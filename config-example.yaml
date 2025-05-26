@@ -1,0 +1,15 @@
+# An example config file.
+# Please do not edit this and instead make a copy and use that.
+# By default, it will grab config.yaml
+####################################################################
+
+credentials:
+  # credentials used to restrict the activate/deactive/update/upload endpoints
+  # credentials must exclude %:/\`'"
+  username: ""
+  password: ""
+
+channels:
+  # List of keys the server will work with.
+  - key1
+  - key2
