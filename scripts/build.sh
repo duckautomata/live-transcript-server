@@ -46,8 +46,19 @@ echo "  - Major:    ${MAJOR_TAG}"
 echo "  - Latest:   ${LATEST_TAG}"
 echo "-----------------------------------"
 
+# --- Docker Command ---
+# Check if the user can run docker without sudo
+if docker info > /dev/null 2>&1; then
+    DOCKER_CMD="docker"
+elif sudo docker info > /dev/null 2>&1; then
+    DOCKER_CMD="sudo docker"
+else
+    echo "Error: Docker is not running or you don't have permission to run it."
+    exit 1
+fi
+
 # Build the image with the specific version tag
-docker build -t "${SPECIFIC_TAG}" .
+$DOCKER_CMD build -t "${SPECIFIC_TAG}" .
 
 # Check if the build succeeded before adding the second tag
 if [ $? -ne 0 ]; then
@@ -55,21 +66,21 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 echo "Build successful. Applying major version tag..."
-docker tag "${SPECIFIC_TAG}" "${MAJOR_TAG}"
-docker tag "${SPECIFIC_TAG}" "${LATEST_TAG}"
+$DOCKER_CMD tag "${SPECIFIC_TAG}" "${MAJOR_TAG}"
+$DOCKER_CMD tag "${SPECIFIC_TAG}" "${LATEST_TAG}"
 echo ""
 echo "Successfully tagged images:"
-docker images | grep "${IMAGE_NAME}"
+$DOCKER_CMD images | grep "${IMAGE_NAME}"
 
 # (Optional) Ask if the user wants to push the tags
 read -p "Push these tags to the registry? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo "Pushing ${SPECIFIC_TAG}..."
-    docker push "${SPECIFIC_TAG}"
+    $DOCKER_CMD push "${SPECIFIC_TAG}"
     echo "Pushing ${MAJOR_TAG}..."
-    docker push "${MAJOR_TAG}"
+    $DOCKER_CMD push "${MAJOR_TAG}"
     echo "Pushing ${LATEST_TAG}..."
-    docker push "${LATEST_TAG}"
+    $DOCKER_CMD push "${LATEST_TAG}"
     echo "Push complete."
 fi
