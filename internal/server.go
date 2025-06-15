@@ -42,6 +42,8 @@ func (w *WebSocketServer) Initialize(handle func(string, func(http.ResponseWrite
 
 	slog.Info("starting save loop in go routine", "key", w.key, "func", "Initialize")
 	go w.saveDataLoop()
+	slog.Info("starting print stats loop in go routine", "key", w.key, "func", "Initialize")
+	go w.printStatsLoop()
 }
 
 func (w *WebSocketServer) activateStream(activeId string, activeTitle string, startTime string, mediaType string) bool {
@@ -120,6 +122,26 @@ func (w *WebSocketServer) saveDataLoop() {
 		w.transcriptLock.Unlock()
 		w.streamLock.Unlock()
 		w.clientsLock.Unlock()
+	}
+}
+
+func (w *WebSocketServer) printStatsLoop() {
+	for {
+		time.Sleep(time.Hour * 12)
+
+		w.serverStats.lock.Lock()
+		slog.Debug("server stats",
+			"key", w.key,
+			"func", "printStatsLoop",
+			"maxNumberConn", w.serverStats.maxNumberConn,
+			"numAudioGrab", w.serverStats.numAudioGrab,
+			"numClipAudio", w.serverStats.numClipAudio,
+			"numClipVideo", w.serverStats.numClipVideo)
+		w.serverStats.maxNumberConn = w.clientConnections
+		w.serverStats.numAudioGrab = 0
+		w.serverStats.numClipAudio = 0
+		w.serverStats.numClipVideo = 0
+		w.serverStats.lock.Unlock()
 	}
 }
 
@@ -374,6 +396,10 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	ws.serverStats.lock.Lock()
+	ws.serverStats.numAudioGrab++
+	ws.serverStats.lock.Unlock()
+
 	// Enable Content-Disposition to have the browser automatically download the audio
 	if stream != "true" {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s_%d.mp3\"", ws.clientData.ActiveID, id))
@@ -466,6 +492,14 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 
 		mergedMediaPath = mediaFilePath
 	}
+
+	ws.serverStats.lock.Lock()
+	if clipExt == ".mp3" {
+		ws.serverStats.numClipAudio++
+	} else if clipExt == ".mp4" {
+		ws.serverStats.numClipVideo++
+	}
+	ws.serverStats.lock.Unlock()
 
 	if clipName == "" {
 		clipName = fmt.Sprintf("%d-%d", start, end)

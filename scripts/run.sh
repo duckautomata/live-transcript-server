@@ -11,4 +11,10 @@ if [[ "$PWD" == */scripts ]]; then
     exit 1
 fi
 
+# Check if the config file exists.
+if [ ! -f "./config.yaml" ]; then
+    echo "Error: Configuration file not found at './config.yaml'"
+    exit 1
+fi
+
 go run ./cmd/web/

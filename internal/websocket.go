@@ -109,6 +109,12 @@ func (ws *WebSocketServer) wsHandler(w http.ResponseWriter, r *http.Request) {
 	ws.clientsLock.Unlock()
 	defer ws.closeSocket(conn)
 
+	ws.serverStats.lock.Lock()
+	if ws.serverStats.maxNumberConn < ws.clientConnections {
+		ws.serverStats.maxNumberConn = ws.clientConnections
+	}
+	ws.serverStats.lock.Unlock()
+
 	ws.hardRefresh(conn)
 
 	err = ws.readLoop(conn)
