@@ -100,7 +100,7 @@ func NewWebSocketServer(key string, username string, password string) *WebSocket
 		clientData:        NewClientData(),
 		maxConn:           1000,
 		clientConnections: 0,
-		maxClipSize:       20,
+		maxClipSize:       30,
 		mediaFolder:       filepath.Join("tmp", key, "media"),
 		serverStats:       ServerStats{},
 	}

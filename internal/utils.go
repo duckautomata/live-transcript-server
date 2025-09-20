@@ -71,9 +71,17 @@ func FfmpegRemux(inputFilePath, outputFilePath string) error {
 
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("ffmpeg", "-i", inputFilePath, "-c", "copy", outputFilePath)
+		cmd = exec.Command("ffmpeg",
+			"-i", inputFilePath,
+			"-c", "copy",
+			"-movflags", "+faststart",
+			outputFilePath)
 	case "darwin", "linux":
-		cmd = exec.Command("ffmpeg", "-i", inputFilePath, "-c", "copy", outputFilePath)
+		cmd = exec.Command("ffmpeg",
+			"-i", inputFilePath,
+			"-c", "copy",
+			"-movflags", "+faststart",
+			outputFilePath)
 	default:
 		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
