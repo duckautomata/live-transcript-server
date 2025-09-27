@@ -35,8 +35,6 @@ else
     echo "No container named '$CONTAINER_NAME' found."
 fi
 
----
-
 ## Image Cleanup (with Confirmation)
 
 echo # Add a newline for readability
