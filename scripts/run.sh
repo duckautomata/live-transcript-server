@@ -4,12 +4,12 @@
 #
 # Usage: ./scripts/run.sh
 
-if [[ "$PWD" == */scripts ]]; then
-    echo "Error: This script must be run from the project's root directory, not from within the 'scripts' subdirectory."
-    echo "You are currently in: $PWD"
-    echo "Please change to the parent directory (e.g., 'cd ..') and run the script like this: ./scripts/run.sh"
-    exit 1
-fi
+# This ensures the script always runs from the project's root directory.
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+cd "$PROJECT_ROOT" || exit 1
+
+echo "Running from project root: $PWD"
 
 # Check if the config file exists.
 if [ ! -f "./config.yaml" ]; then

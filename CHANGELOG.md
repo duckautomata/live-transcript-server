@@ -1,8 +1,12 @@
 # latest
-Using version [1.2](#12-2025-06-14)
+Using version [1.3](#13-2025-09-28)
 
 # Major version 1
-Using version [1.2](#12-2025-06-14)
+Using version [1.3](#13-2025-09-28)
+
+## 1.3 (2025-09-28)
+**Changes**
+- Upgrading dependencies
 
 ## 1.2 (2025-06-14)
 **Changes**
