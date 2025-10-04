@@ -41,14 +41,6 @@ type GobArchive struct {
 	fileName string
 }
 
-type ServerStats struct {
-	lock          sync.Mutex
-	maxNumberConn int
-	numAudioGrab  int
-	numClipAudio  int
-	numClipVideo  int
-}
-
 type WebSocketServer struct {
 	key               string
 	username          string
@@ -64,7 +56,6 @@ type WebSocketServer struct {
 	clientConnections int
 	maxClipSize       int
 	mediaFolder       string
-	serverStats       ServerStats
 }
 
 func NewGobArchive(filename string) *GobArchive {
@@ -102,6 +93,5 @@ func NewWebSocketServer(key string, username string, password string) *WebSocket
 		clientConnections: 0,
 		maxClipSize:       30,
 		mediaFolder:       filepath.Join("tmp", key, "media"),
-		serverStats:       ServerStats{},
 	}
 }

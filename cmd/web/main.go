@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func healthcheckHandler(w http.ResponseWriter, _ *http.Request) {
@@ -47,6 +49,7 @@ func main() {
 	}
 
 	http.HandleFunc("/healthcheck", healthcheckHandler)
+	http.Handle("/metrics", promhttp.Handler())
 
 	slog.Info("WebSocket server listening on port 8080", "func", "main")
 	err = http.ListenAndServe(":8080", nil)

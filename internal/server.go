@@ -42,8 +42,6 @@ func (w *WebSocketServer) Initialize(handle func(string, func(http.ResponseWrite
 
 	slog.Info("starting save loop in go routine", "key", w.key, "func", "Initialize")
 	go w.saveDataLoop()
-	slog.Info("starting print stats loop in go routine", "key", w.key, "func", "Initialize")
-	go w.printStatsLoop()
 }
 
 func (w *WebSocketServer) activateStream(activeId string, activeTitle string, startTime string, mediaType string) bool {
@@ -125,26 +123,6 @@ func (w *WebSocketServer) saveDataLoop() {
 	}
 }
 
-func (w *WebSocketServer) printStatsLoop() {
-	for {
-		time.Sleep(time.Hour * 12)
-
-		w.serverStats.lock.Lock()
-		slog.Debug("server stats",
-			"key", w.key,
-			"func", "printStatsLoop",
-			"maxNumberConn", w.serverStats.maxNumberConn,
-			"numAudioGrab", w.serverStats.numAudioGrab,
-			"numClipAudio", w.serverStats.numClipAudio,
-			"numClipVideo", w.serverStats.numClipVideo)
-		w.serverStats.maxNumberConn = w.clientConnections
-		w.serverStats.numAudioGrab = 0
-		w.serverStats.numClipAudio = 0
-		w.serverStats.numClipVideo = 0
-		w.serverStats.lock.Unlock()
-	}
-}
-
 func (ws *WebSocketServer) basicAuth(r *http.Request) (string, string, bool) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
@@ -171,12 +149,14 @@ func (ws *WebSocketServer) verify(w http.ResponseWriter, r *http.Request) bool {
 	username, password, ok := ws.basicAuth(r)
 	if !ok {
 		http.Error(w, "404 page not found", http.StatusNotFound)
+		Http400Errors.Inc()
 		return false
 	}
 
 	if username != ws.username || password != ws.password {
 		slog.Debug("incorrect username and password", "key", ws.key, "func", "verify", "requestUsername", username, "requestPassword", password)
 		http.Error(w, "404 page not found", http.StatusNotFound)
+		Http400Errors.Inc()
 		return false
 	}
 
@@ -193,6 +173,7 @@ func (ws *WebSocketServer) uploadHandler(w http.ResponseWriter, r *http.Request)
 	var data ClientData
 	if err := decoder.Decode(&data); err != nil {
 		http.Error(w, "Error decoding JSON data", http.StatusBadRequest)
+		Http400Errors.Inc()
 		slog.Error("unable to decode JSON data", "key", ws.key, "func", "uploadHandler", "err", err)
 		return
 	}
@@ -229,6 +210,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 	var data UpdateData
 	if err := decoder.Decode(&data); err != nil {
 		http.Error(w, "Error decoding JSON data", http.StatusBadRequest)
+		Http400Errors.Inc()
 		slog.Error("unable to decode JSON data", "key", ws.key, "func", "updateHandler", "err", err)
 		return
 	}
@@ -240,6 +222,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 		if data.NewLine.ID-1 != lastID {
 			ws.transcriptLock.Unlock()
 			http.Error(w, "Server out of sync. Send current state.", http.StatusConflict)
+			ServerOOS.Inc()
 			slog.Warn("current last id is not one behind new line id. Requesting worker to send current state.", "key", ws.key, "func", "updateHandler", "lastID", lastID, "newLineID", data.NewLine.ID)
 			return
 		}
@@ -247,6 +230,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 		// Our state is empty, but we got an ID that is greater than 0. Meaning we are missing some data.
 		ws.transcriptLock.Unlock()
 		http.Error(w, "Server out of sync. Send current state.", http.StatusConflict)
+		ServerOOS.Inc()
 		slog.Warn("current state is empty but we got an id > 0. Requesting worker to send current state.", "key", ws.key, "func", "updateHandler", "newLineID", data.NewLine.ID)
 		return
 	}
@@ -269,6 +253,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 
 	if fileErr != nil {
 		http.Error(w, "Unable to save raw media to file.", http.StatusInternalServerError)
+		Http500Errors.Inc()
 		slog.Error("unable to save raw media to file.", "key", ws.key, "func", "updateHandler", "err", fileErr)
 		return
 	}
@@ -277,6 +262,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 		os.Remove(rawFile)
 		os.Remove(mp3File)
 		http.Error(w, "Unable to convert raw media to mp3.", http.StatusInternalServerError)
+		Http500Errors.Inc()
 		slog.Error("unable to convert raw media to mp3.", "key", ws.key, "func", "updateHandler", "err", fileErr)
 		return
 	}
@@ -300,13 +286,29 @@ func (ws *WebSocketServer) activateHandler(w http.ResponseWriter, r *http.Reques
 	// Check if the required parameters are present
 	if streamID == "" || title == "" || startTime == "" {
 		http.Error(w, "Missing required parameters", http.StatusBadRequest)
+		Http400Errors.Inc()
 		slog.Warn("invalid parameters", "key", ws.key, "func", "activateHandler", "streamID", streamID, "title", title, "startTime", startTime)
 		return
 	}
 
-	activated := ws.activateStream(streamID, title, startTime, mediaType)
+	var startTimeUnix int64
+
+	// Try to parse the provided startTime; if it fails, use the current time.
+	parsedTime, err := strconv.ParseInt(startTime, 10, 64)
+	if err != nil {
+		slog.Warn("invalid or empty startTime received, using current system time", "key", ws.key, "func", "activateHandler", "receivedTime", startTime)
+		startTimeUnix = time.Now().Unix()
+	} else {
+		startTimeUnix = parsedTime
+	}
+
+	// Convert the final timestamp back to a string for use in other functions.
+	finalStartTimeStr := strconv.FormatInt(startTimeUnix, 10)
+
+	activated := ws.activateStream(streamID, title, finalStartTimeStr, mediaType)
 
 	if activated {
+		ActivatedStreams.WithLabelValues(ws.key, streamID, title).Set(float64(startTimeUnix))
 		w.WriteHeader(http.StatusOK)
 		w.Write(fmt.Appendf(nil, "%s stream successfully activated", ws.key))
 		slog.Info("activated stream", "key", ws.key, "func", "activateHandler", "streamID", streamID, "mediaType", mediaType)
@@ -329,6 +331,7 @@ func (ws *WebSocketServer) deactivateHandler(w http.ResponseWriter, r *http.Requ
 	// Check if the required parameters are present
 	if streamID == "" {
 		http.Error(w, "Missing required parameters", http.StatusBadRequest)
+		Http400Errors.Inc()
 		slog.Warn("invalid parameters, streamID is empty", "key", ws.key, "func", "deactivateHandler")
 		return
 	}
@@ -360,12 +363,14 @@ func (ws *WebSocketServer) statuscheckHandler(w http.ResponseWriter, r *http.Req
 func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Invalid request", http.StatusMethodNotAllowed)
+		Http400Errors.Inc()
 		slog.Warn("invalid request. Method is not a GET", "key", ws.key, "func", "getAudioHandler", "method", r.Method)
 		return
 	}
 
 	if ws.clientData.MediaType == "none" {
 		http.Error(w, "Audio download is disabled for this stream", http.StatusMethodNotAllowed)
+		Http400Errors.Inc()
 		slog.Warn("cannot retrieve audio. Media type is none", "key", ws.key, "func", "getAudioHandler")
 		return
 	}
@@ -377,6 +382,7 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		Http400Errors.Inc()
 		slog.Warn("unable to convert id to int", "key", ws.key, "func", "getAudioHandler", "id", idStr, "err", err)
 		return
 	}
@@ -388,17 +394,17 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "No audio found", http.StatusNotFound)
+			Http400Errors.Inc()
 			slog.Warn("no audio file found for the requested id", "key", ws.key, "func", "getAudioHandler", "id", id)
 			return
 		}
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		Http500Errors.Inc()
 		slog.Error("unable to check audio file", "key", ws.key, "func", "getAudioHandler", "id", id, "err", err)
 		return
 	}
 
-	ws.serverStats.lock.Lock()
-	ws.serverStats.numAudioGrab++
-	ws.serverStats.lock.Unlock()
+	TotalAudioPlayed.WithLabelValues(ws.key).Inc()
 
 	// Enable Content-Disposition to have the browser automatically download the audio
 	if stream != "true" {
@@ -411,12 +417,14 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Invalid request", http.StatusMethodNotAllowed)
+		Http400Errors.Inc()
 		slog.Warn("invalid request. Method is not a GET", "key", ws.key, "func", "getClipHandler", "method", r.Method)
 		return
 	}
 
 	if ws.clientData.MediaType == "none" {
 		http.Error(w, "Clipping is disabled for this stream", http.StatusMethodNotAllowed)
+		Http400Errors.Inc()
 		slog.Warn("cannot clip media. Media type is none", "key", ws.key, "func", "getClipHandler")
 		return
 	}
@@ -438,6 +446,7 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 
 	if mediaType == "mp4" && ws.clientData.MediaType != "video" {
 		http.Error(w, "Video clipping is disabled for this stream", http.StatusMethodNotAllowed)
+		Http400Errors.Inc()
 		slog.Warn("cannot clip mp4. Media type is not 'video'", "key", ws.key, "func", "getClipHandler", "mediaType", ws.clientData.MediaType)
 		return
 	}
@@ -445,18 +454,21 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		slog.Warn("unable to convert start id to int", "key", ws.key, "func", "getClipHandler", "start", startStr, "err", err)
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		Http400Errors.Inc()
 		return
 	}
 
 	if err2 != nil {
 		slog.Warn("unable to convert end id to int", "key", ws.key, "func", "getClipHandler", "end", endStr, "err", err)
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		Http400Errors.Inc()
 		return
 	}
 
 	if start < 0 || end <= start || end-start >= ws.maxClipSize {
 		slog.Warn("invalid start or end id", "key", ws.key, "func", "getClipHandler", "start", start, "end", end, "requestedClipSize", 1+end-start, "maxClipSize", ws.maxClipSize, "err", err)
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		Http400Errors.Inc()
 		return
 	}
 
@@ -466,6 +478,7 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 		os.Remove(mediaFilePath)
 		os.Remove(mergedMediaPath)
 		http.Error(w, "Server error", http.StatusInternalServerError)
+		Http500Errors.Inc()
 		slog.Error("unable to merge raw audio", "key", ws.key, "func", "getClipHandler", "startID", start, "endID", end, "err", err)
 		return
 	}
@@ -483,6 +496,7 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 			os.Remove(mergedMediaPath)
 			slog.Error("unable to convert raw media to new extension", "key", ws.key, "func", "getClipHandler", "extension", clipExt, "err", err)
 			http.Error(w, "Server error", http.StatusInternalServerError)
+			Http500Errors.Inc()
 			return
 		}
 		err = os.Remove(mergedMediaPath)
@@ -493,13 +507,11 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 		mergedMediaPath = mediaFilePath
 	}
 
-	ws.serverStats.lock.Lock()
 	if clipExt == ".mp3" {
-		ws.serverStats.numClipAudio++
+		TotalAudioClipped.WithLabelValues(ws.key).Inc()
 	} else if clipExt == ".mp4" {
-		ws.serverStats.numClipVideo++
+		TotalVideoClipped.WithLabelValues(ws.key).Inc()
 	}
-	ws.serverStats.lock.Unlock()
 
 	if clipName == "" {
 		clipName = fmt.Sprintf("%d-%d", start, end)

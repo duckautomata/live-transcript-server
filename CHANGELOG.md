@@ -1,8 +1,14 @@
 # latest
-Using version [1.3](#13-2025-09-28)
+Using version [1.4](#14-2025-10-04)
 
 # Major version 1
-Using version [1.3](#13-2025-09-28)
+Using version [1.4](#14-2025-10-04)
+
+## 1.4 (2025-10-04)
+**Changes**
+- Added Prometheus metrics and converted runtime to use Docker compose so that it starts up with the Prometheus and Grafana server.
+- Remove server stats since it is no longer needed.
+- Upgrading dependencies
 
 ## 1.3 (2025-09-28)
 **Changes**

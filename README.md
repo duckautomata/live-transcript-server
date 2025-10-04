@@ -175,8 +175,10 @@ You can view all tags on [Dockerhub](https://hub.docker.com/r/duckautomata/live-
 ### Running with Docker
 The easiest way to run the docker image is to
 1. clone this repo locally
-2. create `config.yaml` from the example config file, adding in your specific configurations.
-3. then run `./docker/start.sh`
+2. create `./docker/config.yaml` from the example config file, adding in your specific configurations.
+3. inside `./docker/prometheus.yaml` change the targets to use the local ip address of the server you are running this on.
+3. cd into the `./docker/` folder
+3. then run `./start.sh`
 
 If there are permission errors and the container cannot write to tmp/, then you first need to run `sudo chmod -R 777 tmp` to give the container permissions.
 
@@ -185,3 +187,14 @@ Depending on your use case, you can change the configuration variables in `start
 Logs and current state are stored in the `tmp/` folder outside the container. Because of this, state is not lost on restart.
 
 **Note**: the docker container and the source code use the same `tmp/` folder to store runtime data. Because of this, you are required to run either or, but not both. If you want to run both development and a docker image, then use separate folders.
+
+### Viewing Metrics
+1. Go to `http://<servers ip address>:8090` to view the Prometheus webpage.
+    - Click on Status and go to Targets to verify that the server target is working and up.
+    - If it is not, then that means Prometheus cannot reach the server.
+    - To fix this, edit the target in the `prometheus.yaml` file and make sure it has a reachable ip address.
+2. Go to `http://<servers ip address>:3000` to view the Grafana webpage. 
+    - Log in using admin/admin and reset the password.
+    - Here, you can add Prometheus as a datasource and start creating a dashboard. Make sure to use the `8090` port address.
+
+Important to note that Prometheus's data will reset every time you stop/start it. And Grafana's data/dashboards will reset if you run `./cleanup.sh`. So make sure that you have the your dashboards back up.
