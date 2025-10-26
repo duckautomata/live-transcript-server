@@ -67,9 +67,9 @@ func (w *WebSocketServer) hardRefresh(conn *websocket.Conn) {
 func (w *WebSocketServer) broadcast(msg []byte) {
 	startTime := time.Now()
 	MessageSize.Observe(float64(len(msg)))
-	MessagesTotal.Inc()
 	w.clientsLock.Lock()
 	for _, c := range w.clients {
+		MessagesTotal.Inc()
 		go func(msg []byte) {
 			if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
 				WebsocketError.Inc()

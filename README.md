@@ -175,10 +175,8 @@ You can view all tags on [Dockerhub](https://hub.docker.com/r/duckautomata/live-
 ### Running with Docker
 The easiest way to run the docker image is to
 1. clone this repo locally
-2. create `./docker/config.yaml` from the example config file, adding in your specific configurations.
-3. inside `./docker/prometheus.yaml` change the targets to use the local ip address of the server you are running this on.
-3. cd into the `./docker/` folder
-3. then run `./start.sh`
+2. create `config.yaml` from the example config file, adding in your specific configurations.
+3. then run `./docker/start.sh`
 
 If there are permission errors and the container cannot write to tmp/, then you first need to run `sudo chmod -R 777 tmp` to give the container permissions.
 

@@ -47,28 +47,45 @@ func (w *WebSocketServer) Initialize(handle func(string, func(http.ResponseWrite
 func (w *WebSocketServer) activateStream(activeId string, activeTitle string, startTime string, mediaType string) bool {
 	isNewStream := false
 	w.streamLock.Lock()
+	defer w.streamLock.Unlock()
+
 	msg := ""
-	w.clientData.ActiveTitle = activeTitle
-	w.clientData.StartTime = startTime
-	if w.clientData.ActiveID == activeId {
-		// Stream is already active, only send status event if isLive is false
-		if !w.clientData.IsLive {
-			w.clientData.IsLive = true
-			msg = fmt.Sprintf("![]status\n%s\n%s\n%v", w.clientData.ActiveID, w.clientData.ActiveTitle, w.clientData.IsLive)
-			slog.Debug("stream is already active and isLive is false, sending status event", "key", w.key, "func", "activateStream", "activeID", activeId)
-		} else {
-			slog.Debug("stream is already active and isLive is already true, skipping status event", "key", w.key, "func", "activateStream", "activeID", activeId)
+
+	// Case 1: A completely new stream is starting (different ID)
+	if w.clientData.ActiveID != activeId {
+		StreamAudioPlayed.WithLabelValues(w.key).Set(0)
+		StreamAudioClipped.WithLabelValues(w.key).Set(0)
+		StreamVideoClipped.WithLabelValues(w.key).Set(0)
+
+		// If a previous stream was active for this key, remove its Prometheus metric first.
+		if w.clientData.ActiveID != "" {
+			ActivatedStreams.DeleteLabelValues(w.key, w.clientData.ActiveID, w.clientData.ActiveTitle)
+			slog.Info("removing old stream metric", "key", w.key, "func", "activateStream", "oldStreamID", w.clientData.ActiveID)
 		}
-	} else {
+
+		// Update server state with the new stream's info
 		w.clientData.ActiveID = activeId
+		w.clientData.ActiveTitle = activeTitle
+		w.clientData.StartTime = startTime
 		w.clientData.IsLive = true
 		w.clientData.MediaType = mediaType
 		isNewStream = true
-		// New stream is active, clear local state and send newstream event
+
+		// Prepare the broadcast message for clients
 		msg = fmt.Sprintf("![]newstream\n%s\n%s\n%s\n%s\n%v", w.clientData.ActiveID, w.clientData.ActiveTitle, w.clientData.StartTime, w.clientData.MediaType, w.clientData.IsLive)
-		slog.Debug("received new stream id, clearing local state and sending newstream event", "key", w.key, "func", "activateStream", "activeID", activeId)
+		slog.Debug("received new stream id, sending newstream event", "key", w.key, "func", "activateStream", "activeID", activeId)
+
+	} else {
+		// Case 2: The same stream is being reactivated
+		if !w.clientData.IsLive {
+			w.clientData.IsLive = true
+			msg = fmt.Sprintf("![]status\n%s\n%s\n%v", w.clientData.ActiveID, w.clientData.ActiveTitle, w.clientData.IsLive)
+			slog.Debug("reactivating existing stream, sending status event", "key", w.key, "func", "activateStream", "activeID", activeId)
+		} else {
+			// Case 3: A request to activate an already active stream
+			slog.Debug("stream is already active, skipping event", "key", w.key, "func", "activateStream", "activeID", activeId)
+		}
 	}
-	w.streamLock.Unlock()
 
 	if isNewStream {
 		w.transcriptLock.Lock()
@@ -79,28 +96,37 @@ func (w *WebSocketServer) activateStream(activeId string, activeTitle string, st
 
 	if msg != "" {
 		w.broadcast([]byte(msg))
-		return true
-	} else {
-		return false
+		return true // Indicates a change was made
 	}
+
+	return false // Indicates no change was made
 }
 
 func (w *WebSocketServer) deactivateStream(activeId string) bool {
 	w.streamLock.Lock()
+	defer w.streamLock.Unlock()
+
 	msg := ""
-	if w.clientData.ActiveID == activeId {
+	if w.clientData.ActiveID == activeId && w.clientData.IsLive {
+		// Remove the gauge from Prometheus since the stream is no longer active.
+		deleted := ActivatedStreams.DeleteLabelValues(w.key, w.clientData.ActiveID, w.clientData.ActiveTitle)
+		if deleted {
+			slog.Info("successfully removed stream metric on deactivation", "key", w.key, "func", "deactivateStream", "streamID", activeId)
+		} else {
+			slog.Info("failed to remove stream metric on deactivation", "key", w.key, "func", "deactivateStream", "streamID", activeId)
+		}
+
 		w.clientData.IsLive = false
 		msg = fmt.Sprintf("![]status\n%s\n%s\n%v", w.clientData.ActiveID, w.clientData.ActiveTitle, w.clientData.IsLive)
 		slog.Debug("deactivating stream", "key", w.key, "func", "deactivateStream", "activeID", activeId)
 	}
-	w.streamLock.Unlock()
 
 	if msg != "" {
 		w.broadcast([]byte(msg))
-		return true
-	} else {
-		return false
+		return true // Indicates a change was made
 	}
+
+	return false // Indicates no change was made
 }
 
 func (w *WebSocketServer) saveDataLoop() {
@@ -405,6 +431,7 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 	}
 
 	TotalAudioPlayed.WithLabelValues(ws.key).Inc()
+	StreamAudioPlayed.WithLabelValues(ws.key).Inc()
 
 	// Enable Content-Disposition to have the browser automatically download the audio
 	if stream != "true" {
@@ -509,8 +536,10 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 
 	if clipExt == ".mp3" {
 		TotalAudioClipped.WithLabelValues(ws.key).Inc()
+		StreamAudioClipped.WithLabelValues(ws.key).Inc()
 	} else if clipExt == ".mp4" {
 		TotalVideoClipped.WithLabelValues(ws.key).Inc()
+		StreamVideoClipped.WithLabelValues(ws.key).Inc()
 	}
 
 	if clipName == "" {

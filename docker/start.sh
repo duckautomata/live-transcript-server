@@ -8,15 +8,15 @@
 set -e
 
 # --- Configuration ---
-CONTAINER_NAME_A="live_transcript_server"
-CONTAINER_NAME_B="prometheus"
-CONTAINER_NAME_C="grafana"
+IMAGE_NAME="duckautomata/live-transcript-server"
+TAG="latest"
+CONTAINER_NAME="live_transcript_server"
+RESTART_POLICY="always"
 
 # --- Path and Environment Setup ---
 # This ensures the script always runs relative to its own location.
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 CONFIG_FILE_PATH="$SCRIPT_DIR/config.yaml"
-PROMETHEUS_FILE_PATH="$SCRIPT_DIR/prometheus.yaml"
 TMP_DIR="$SCRIPT_DIR/tmp"
 
 echo "Running from: $SCRIPT_DIR"
@@ -40,38 +40,36 @@ if [ ! -f "$CONFIG_FILE_PATH" ]; then
     echo "Error: Config file not found at '$CONFIG_FILE_PATH'"
     exit 1
 fi
-if [ ! -f "$PROMETHEUS_FILE_PATH" ]; then
-    echo "Error: Prometheus file not found at '$PROMETHEUS_FILE_PATH'"
-    exit 1
-fi
-echo "  Config files found"
+echo "  Config file found"
 
 # Create necessary host directories
 mkdir -p "$TMP_DIR"
 
+# Check if a container with the same name is already running (exact match)
+if [ $($DOCKER_CMD ps -q -f name="^${CONTAINER_NAME}$") ]; then
+    echo "Warning: A container named '$CONTAINER_NAME' is already running."
+    echo "   Please stop it first if you wish to restart it."
+    exit 1
+fi
+echo "  No conflicting containers found"
+
 # --- Docker Command ---
-$DOCKER_CMD compose up -d
+echo -e "\nStarting container: $CONTAINER_NAME"
+$DOCKER_CMD run \
+    --name "$CONTAINER_NAME" \
+    -d --restart "$RESTART_POLICY" \
+    -p 8080:8080 \
+    -v "$CONFIG_FILE_PATH:/app/config.yaml:ro,z" \
+    -v "$TMP_DIR:/app/tmp:z" \
+    "$IMAGE_NAME:$TAG"
 
 # --- Post-run Check ---
 # Give the container a moment to start or fail
 sleep 3
-if ! $DOCKER_CMD ps -q -f name="^${CONTAINER_NAME_A}$" > /dev/null; then
+if ! $DOCKER_CMD ps -q -f name="^${CONTAINER_NAME}$" > /dev/null; then
     echo "Error: Container failed to start. Check logs for details:"
-    echo "   $DOCKER_CMD logs $CONTAINER_NAME_A"
-else
-    echo "Container '$CONTAINER_NAME_A' started successfully and is listening on port 8080."
+    echo "   $DOCKER_CMD logs $CONTAINER_NAME"
+    exit 1
 fi
 
-if ! $DOCKER_CMD ps -q -f name="^${CONTAINER_NAME_B}$" > /dev/null; then
-    echo "Error: Container failed to start. Check logs for details:"
-    echo "   $DOCKER_CMD logs $CONTAINER_NAME_B"
-else
-    echo "Container '$CONTAINER_NAME_B' started successfully and is listening on port 8090."
-fi
-
-if ! $DOCKER_CMD ps -q -f name="^${CONTAINER_NAME_C}$" > /dev/null; then
-    echo "Error: Container failed to start. Check logs for details:"
-    echo "   $DOCKER_CMD logs $CONTAINER_NAME_C"
-else
-    echo "Container '$CONTAINER_NAME_C' started successfully and is listening on port 3000."
-fi
+echo "Container '$CONTAINER_NAME' started successfully and is listening on port 8080."

@@ -19,7 +19,12 @@ var (
 	})
 	ConnectionDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name: "lt_connection_duration_seconds",
-		Help: "The duration of connections.",
+		Help: "The duration of connections in seconds.",
+		Buckets: []float64{
+			1, 5, 10, 30, // seconds
+			60, 300, 600, 1800, // minutes
+			3600, 5400, 7200, 14400, // hours
+		},
 	})
 	MessagesTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "lt_messages_total",
@@ -28,6 +33,11 @@ var (
 	MessageSize = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name: "lt_message_size_bytes",
 		Help: "The size of messages in bytes.",
+		Buckets: []float64{
+			4, 16, 32, 64,
+			128, 256, 512,
+			1024, 8192, 32768, 1048576,
+		},
 	})
 	MessageProcessingDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name: "lt_message_processing_duration_seconds",
@@ -73,15 +83,33 @@ var (
 	},
 		[]string{"key"},
 	)
+	StreamAudioPlayed = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_stream_audio_played_per_key",
+		Help: "The number of successful calls to the /audio endpoint in a given stream period.",
+	},
+		[]string{"key"},
+	)
 	TotalAudioClipped = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "lt_total_audio_clipped_per_key",
 		Help: "The total number of successful audio clips created.",
 	},
 		[]string{"key"},
 	)
+	StreamAudioClipped = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_stream_audio_clipped_per_key",
+		Help: "The total number of successful audio clips created in a given stream period.",
+	},
+		[]string{"key"},
+	)
 	TotalVideoClipped = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "lt_total_video_clipped_per_key",
 		Help: "The total number of successful video clips created.",
+	},
+		[]string{"key"},
+	)
+	StreamVideoClipped = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_stream_video_clipped_per_key",
+		Help: "The total number of successful video clips created in a given stream period.",
 	},
 		[]string{"key"},
 	)
