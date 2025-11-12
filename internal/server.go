@@ -270,6 +270,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 
 	if ws.clientData.MediaType == "none" || data.RawB64Data == "" {
 		ws.refreshAll()
+		slog.Debug("added transcript line with no b64data", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("JSON Line data received and processed successfully"))
 		return
