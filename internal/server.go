@@ -193,6 +193,7 @@ func (ws *WebSocketServer) uploadHandler(w http.ResponseWriter, r *http.Request)
 	if !ws.verify(w, r) {
 		return
 	}
+	uploadStartTime := time.Now()
 
 	// Decode the JSON data from the request body
 	decoder := json.NewDecoder(r.Body)
@@ -203,6 +204,7 @@ func (ws *WebSocketServer) uploadHandler(w http.ResponseWriter, r *http.Request)
 		slog.Error("unable to decode JSON data", "key", ws.key, "func", "uploadHandler", "err", err)
 		return
 	}
+	processStartTime := time.Now()
 
 	// Very susecptiale to deadlock. Pt 2
 	ws.clientsLock.Lock()
@@ -217,13 +219,14 @@ func (ws *WebSocketServer) uploadHandler(w http.ResponseWriter, r *http.Request)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("JSON UploadData data received and processed successfully"))
-	slog.Info("successfully received and processed worker's state", "key", ws.key, "func", "uploadHandler")
+	slog.Debug("successfully received and processed worker's state", "key", ws.key, "func", "uploadHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds())
 }
 
 func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request) {
 	if !ws.verify(w, r) {
 		return
 	}
+	uploadStartTime := time.Now()
 
 	// if !ws.clientData.IsLive {
 	// 	http.Error(w, "Stream is not live yet. Please activate stream before sending data.", http.StatusBadRequest)
@@ -240,6 +243,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 		slog.Error("unable to decode JSON data", "key", ws.key, "func", "updateHandler", "err", err)
 		return
 	}
+	processStartTime := time.Now()
 
 	ws.transcriptLock.Lock()
 	if len(ws.clientData.Transcript) > 0 {
@@ -293,6 +297,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	slog.Debug("successfully added transcript line", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("JSON Line data received and processed successfully"))
 }
@@ -301,6 +306,7 @@ func (ws *WebSocketServer) activateHandler(w http.ResponseWriter, r *http.Reques
 	if !ws.verify(w, r) {
 		return
 	}
+	processStartTime := time.Now()
 
 	// Parse the query parameters
 	query := r.URL.Query()
@@ -337,11 +343,11 @@ func (ws *WebSocketServer) activateHandler(w http.ResponseWriter, r *http.Reques
 		ActivatedStreams.WithLabelValues(ws.key, streamID, title).Set(float64(startTimeUnix))
 		w.WriteHeader(http.StatusOK)
 		w.Write(fmt.Appendf(nil, "%s stream successfully activated", ws.key))
-		slog.Info("activated stream", "key", ws.key, "func", "activateHandler", "streamID", streamID, "mediaType", mediaType)
+		slog.Debug("activated stream", "key", ws.key, "func", "activateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID, "mediaType", mediaType)
 	} else {
 		w.WriteHeader(http.StatusAlreadyReported)
 		w.Write(fmt.Appendf(nil, "%s stream is already activated", ws.key))
-		slog.Info("id already activated", "key", ws.key, "func", "activateHandler", "streamID", streamID)
+		slog.Debug("id already activated", "key", ws.key, "func", "activateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID)
 	}
 }
 
@@ -349,6 +355,7 @@ func (ws *WebSocketServer) deactivateHandler(w http.ResponseWriter, r *http.Requ
 	if !ws.verify(w, r) {
 		return
 	}
+	processStartTime := time.Now()
 
 	// Parse the query parameters
 	query := r.URL.Query()
@@ -367,9 +374,11 @@ func (ws *WebSocketServer) deactivateHandler(w http.ResponseWriter, r *http.Requ
 	if deactivated {
 		w.WriteHeader(http.StatusOK)
 		w.Write(fmt.Appendf(nil, "%s stream successfully deactivated", ws.key))
+		slog.Debug("deactivated stream", "key", ws.key, "func", "deactivateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID)
 	} else {
 		w.WriteHeader(http.StatusAlreadyReported)
 		w.Write(fmt.Appendf(nil, "%s stream was not deactivated", ws.key))
+		slog.Debug("id already deactivated", "key", ws.key, "func", "deactivateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID)
 	}
 }
 
@@ -400,6 +409,7 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 		slog.Warn("cannot retrieve audio. Media type is none", "key", ws.key, "func", "getAudioHandler")
 		return
 	}
+	processStartTime := time.Now()
 
 	// Extract the ID from the query parameter
 	query := r.URL.Query()
@@ -438,6 +448,7 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s_%d.mp3\"", ws.clientData.ActiveID, id))
 	}
 	w.Header().Set("Content-Type", "audio/mpeg")
+	slog.Debug("Successfully found audio", "key", ws.key, "func", "getAudioHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "id", idStr, "stream", stream)
 	http.ServeFile(w, r, filePath)
 }
 
@@ -455,6 +466,7 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 		slog.Warn("cannot clip media. Media type is none", "key", ws.key, "func", "getClipHandler")
 		return
 	}
+	processStartTime := time.Now()
 
 	// Extract the ID from the query parameter
 	query := r.URL.Query()
@@ -557,5 +569,6 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 	sanitizedName := sanitize.BaseName(attachmentName)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s%s\"", sanitizedName, clipExt))
 	w.Header().Set("Content-Type", contentType)
+	slog.Debug("Successfully generated clip", "key", ws.key, "func", "getClipHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "start", startStr, "end", endStr, "clipName", clipName, "mediaType", mediaType)
 	http.ServeFile(w, r, mergedMediaPath)
 }
