@@ -268,14 +268,14 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 	ws.clientData.Transcript = append(ws.clientData.Transcript, data.NewLine)
 	ws.transcriptLock.Unlock()
 
-	if ws.clientData.MediaType == "none" {
+	if ws.clientData.MediaType == "none" || data.RawB64Data == "" {
 		ws.refreshAll()
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("JSON Line data received and processed successfully"))
 		return
 	}
 
-	// Only process raw data if media type is not none.
+	// Only process raw data if media type is not none and there is data
 	rawFile, fileErr := ws.RawB64ToFile(data.RawB64Data, data.NewLine.ID, "raw")
 	mp3File := ChangeExtension(rawFile, ".mp3")
 	convertError := FfmpegConvert(rawFile, mp3File)
