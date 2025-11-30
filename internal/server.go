@@ -278,8 +278,8 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 
 	// Only process raw data if media type is not none and there is data
 	rawFile, fileErr := ws.RawB64ToFile(data.RawB64Data, data.NewLine.ID, "raw")
-	mp3File := ChangeExtension(rawFile, ".mp3")
-	convertError := FfmpegConvert(rawFile, mp3File)
+	m4aFile := ChangeExtension(rawFile, ".m4a")
+	convertError := FfmpegConvert(rawFile, m4aFile)
 	ws.refreshAll()
 
 	if fileErr != nil {
@@ -291,10 +291,10 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 
 	if convertError != nil {
 		os.Remove(rawFile)
-		os.Remove(mp3File)
-		http.Error(w, "Unable to convert raw media to mp3.", http.StatusInternalServerError)
+		os.Remove(m4aFile)
+		http.Error(w, "Unable to convert raw media to m4a.", http.StatusInternalServerError)
 		Http500Errors.Inc()
-		slog.Error("unable to convert raw media to mp3.", "key", ws.key, "func", "updateHandler", "err", fileErr)
+		slog.Error("unable to convert raw media to m4a.", "key", ws.key, "func", "updateHandler", "err", fileErr)
 		return
 	}
 
@@ -424,7 +424,7 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	filePath := filepath.Join(ws.mediaFolder, fmt.Sprintf("%d.mp3", id))
+	filePath := filepath.Join(ws.mediaFolder, fmt.Sprintf("%d.m4a", id))
 
 	// Check if the file exists
 	_, err = os.Stat(filePath)
@@ -446,9 +446,9 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 
 	// Enable Content-Disposition to have the browser automatically download the audio
 	if stream != "true" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s_%d.mp3\"", ws.clientData.ActiveID, id))
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s_%d.m4a\"", ws.clientData.ActiveID, id))
 	}
-	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Content-Type", "audio/mp4")
 	slog.Debug("Successfully found audio", "key", ws.key, "func", "getAudioHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "id", idStr, "stream", stream)
 	http.ServeFile(w, r, filePath)
 }
@@ -477,8 +477,8 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 	mediaType := strings.TrimSpace(query.Get("type"))
 	start, err := strconv.Atoi(startStr)
 	end, err2 := strconv.Atoi(endStr)
-	clipExt := ".mp3"
-	contentType := "audio/mpeg"
+	clipExt := ".m4a"
+	contentType := "audio/mp4"
 	if mediaType == "mp4" && ws.clientData.MediaType == "video" {
 		clipExt = ".mp4"
 		contentType = "video/mp4"
@@ -525,7 +525,7 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 
 	// do an aditional step of converting raw to clipExt since we only send out clipExt files for maximum compatibility.
 	if !alreadyConverted {
-		// Note: audio has to be reencoded to mp3 otherwise it will be broken. Video can be remuxed to a different container without any compatibility issues.
+		// Note: audio has to be reencoded to m4a otherwise it will be broken. Video can be remuxed to a different container without any compatibility issues.
 		if mediaType == "mp4" {
 			err = FfmpegRemux(mergedMediaPath, mediaFilePath)
 		} else {
@@ -547,7 +547,7 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 		mergedMediaPath = mediaFilePath
 	}
 
-	if clipExt == ".mp3" {
+	if clipExt == ".m4a" {
 		TotalAudioClipped.WithLabelValues(ws.key).Inc()
 		StreamAudioClipped.WithLabelValues(ws.key).Inc()
 	} else if clipExt == ".mp4" {
