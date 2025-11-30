@@ -43,7 +43,7 @@ func main() {
 	servers := make([]*internal.WebSocketServer, len(config.Channels))
 
 	for _, channel := range config.Channels {
-		server := internal.NewWebSocketServer(channel, config.Credentials.Username, config.Credentials.Password)
+		server := internal.NewWebSocketServer(channel, config.Credentials.ApiKey)
 		server.Initialize(http.HandleFunc)
 		servers = append(servers, server)
 	}

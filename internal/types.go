@@ -43,8 +43,7 @@ type GobArchive struct {
 
 type WebSocketServer struct {
 	key               string
-	username          string
-	password          string
+	apiKey            string
 	streamLock        sync.Mutex
 	transcriptLock    sync.Mutex
 	clientsLock       sync.Mutex
@@ -75,11 +74,10 @@ func NewClientData() *ClientData {
 	}
 }
 
-func NewWebSocketServer(key string, username string, password string) *WebSocketServer {
+func NewWebSocketServer(key string, apiKey string) *WebSocketServer {
 	return &WebSocketServer{
-		key:      key,
-		username: username,
-		password: password,
+		key:    key,
+		apiKey: apiKey,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:    1024,
 			WriteBufferSize:   1024,

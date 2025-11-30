@@ -1,8 +1,14 @@
 # latest
-Using version [1.4](#14-2025-10-04)
+Using version [1.5](#15-2025-11-30)
 
 # Major version 1
-Using version [1.4](#14-2025-10-04)
+Using version [1.5](#15-2025-11-30)
+
+## 1.5 (2025-11-30)
+**Changes**
+- Changed audio from mp3 to m4a
+- Simplified clipping since we generate a unique merge file per clip
+- Changed how creds are used. Now use api key header instead.
 
 ## 1.4 (2025-10-04)
 **Changes**

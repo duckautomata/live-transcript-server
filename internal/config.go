@@ -9,8 +9,7 @@ import (
 
 type Config struct {
 	Credentials struct {
-		Username string `yaml:"username"`
-		Password string `yaml:"password"`
+		ApiKey string `yaml:"apiKey"`
 	} `yaml:"credentials"`
 	Channels []string `yaml:"channels"`
 }

@@ -99,9 +99,11 @@ func FfmpegConvert(inputFilePath, outputFilePath string) error {
 
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("ffmpeg", "-i", inputFilePath, outputFilePath)
+		// Added -vn to disable video recording, keeping only the audio channel
+		cmd = exec.Command("ffmpeg", "-i", inputFilePath, "-vn", outputFilePath)
 	case "darwin", "linux":
-		cmd = exec.Command("ffmpeg", "-i", inputFilePath, outputFilePath)
+		// Added -vn to disable video recording, keeping only the audio channel
+		cmd = exec.Command("ffmpeg", "-i", inputFilePath, "-vn", outputFilePath)
 	default:
 		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
@@ -132,26 +134,14 @@ func (w *WebSocketServer) RawB64ToFile(rawB64 string, id int, ext string) (strin
 	return filePath, nil
 }
 
-// Binary copy all raw chunks into a single faw file. start and end are inclusive. Returns the merged media path and if this has already been converted to mp3.
-func (w *WebSocketServer) MergeRawAudio(start, end int, clipExt string) (string, bool, error) {
-	mediaFilePath := filepath.Join(w.mediaFolder, fmt.Sprintf("%d-%d%s", start, end, clipExt))
-	rawFilePath := filepath.Join(w.mediaFolder, fmt.Sprintf("%d-%d.raw", start, end))
-
-	// Check if the file already exists. No need to duplicate work
-	_, err := os.Stat(mediaFilePath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return "", false, fmt.Errorf("failed to check file '%s': %w", mediaFilePath, err)
-		}
-	} else {
-		// file already exists, no need to recreate it
-		return mediaFilePath, true, nil
-	}
+// Binary copy all raw chunks into a single raw file. start and end are inclusive. Returns the merged media path.
+func (w *WebSocketServer) MergeRawAudio(start, end int, uniqueID string) (string, error) {
+	rawFilePath := filepath.Join(w.mediaFolder, fmt.Sprintf("%s.raw", uniqueID))
 
 	// Merge raw media into a single raw file
 	outputFile, err := os.Create(rawFilePath)
 	if err != nil {
-		return "", false, fmt.Errorf("failed to create output file: %w", err)
+		return "", fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer outputFile.Close()
 
@@ -159,21 +149,21 @@ func (w *WebSocketServer) MergeRawAudio(start, end int, clipExt string) (string,
 		inputFilename := filepath.Join(w.mediaFolder, fmt.Sprintf("%d.raw", i))
 		inputFile, err := os.Open(inputFilename)
 		if os.IsNotExist(err) {
-			return "", false, fmt.Errorf("file '%s' not found", inputFilename)
+			return "", fmt.Errorf("file '%s' not found", inputFilename)
 		}
 
 		if err != nil {
-			return "", false, fmt.Errorf("failed to open input file %s: %w", inputFilename, err)
+			return "", fmt.Errorf("failed to open input file %s: %w", inputFilename, err)
 		}
-		defer inputFile.Close()
 
 		_, err = io.Copy(outputFile, inputFile)
+		inputFile.Close() // Close explicitly inside loop
 		if err != nil {
-			return "", false, fmt.Errorf("failed to copy from %s to output: %w", inputFilename, err)
+			return "", fmt.Errorf("failed to copy from %s to output: %w", inputFilename, err)
 		}
 	}
 
-	return rawFilePath, false, nil
+	return rawFilePath, nil
 }
 
 func (w *WebSocketServer) ResetAudioFile() {

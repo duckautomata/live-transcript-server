@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -15,33 +14,52 @@ import (
 	"github.com/kennygrant/sanitize"
 )
 
-func (w *WebSocketServer) Initialize(handle func(string, func(http.ResponseWriter, *http.Request))) {
-	err := os.MkdirAll(w.mediaFolder, 0755)
+// Rewriting Initialize and Middleware to be clean and correct with shadowing handling
+func (ws *WebSocketServer) Initialize(handle func(string, func(http.ResponseWriter, *http.Request))) {
+	err := os.MkdirAll(ws.mediaFolder, 0755)
 	if err != nil {
-		slog.Error("cannot create media folder", "key", w.key, "func", "Initialize", "err", err)
+		slog.Error("cannot create media folder", "key", ws.key, "func", "Initialize", "err", err)
 	}
 
-	data, err := w.archive.FileToClientData()
+	data, err := ws.archive.FileToClientData()
 	if err != nil {
-		slog.Error("cannot read in gob archive", "key", w.key, "func", "Initialize", "err", err)
+		slog.Error("cannot read in gob archive", "key", ws.key, "func", "Initialize", "err", err)
 	} else {
-		slog.Info("read in state from file", "key", w.key, "func", "Initialize")
-		w.clientData = data
+		slog.Info("read in state from file", "key", ws.key, "func", "Initialize")
+		ws.clientData = data
 	}
 
-	slog.Info("creating endpoints", "key", w.key, "func", "Initialize")
-	handle(fmt.Sprintf("/ws/%s", w.key), w.wsHandler)
-	handle(fmt.Sprintf("/%s/activate", w.key), w.activateHandler)
-	handle(fmt.Sprintf("/%s/deactivate", w.key), w.deactivateHandler)
-	handle(fmt.Sprintf("/%s/upload", w.key), w.uploadHandler)
-	handle(fmt.Sprintf("/%s/update", w.key), w.updateHandler)
-	handle(fmt.Sprintf("/%s/statuscheck", w.key), w.statuscheckHandler)
+	slog.Info("creating endpoints", "key", ws.key, "func", "Initialize")
+	handle(fmt.Sprintf("/ws/%s", ws.key), ws.wsHandler)
 
-	handle(fmt.Sprintf("/%s/audio", w.key), w.getAudioHandler)
-	handle(fmt.Sprintf("/%s/clip", w.key), w.getClipHandler)
+	// Protected endpoints
+	handle(fmt.Sprintf("/%s/activate", ws.key), ws.apiKeyMiddleware(ws.activateHandler))
+	handle(fmt.Sprintf("/%s/deactivate", ws.key), ws.apiKeyMiddleware(ws.deactivateHandler))
+	handle(fmt.Sprintf("/%s/upload", ws.key), ws.apiKeyMiddleware(ws.uploadHandler))
+	handle(fmt.Sprintf("/%s/update", ws.key), ws.apiKeyMiddleware(ws.updateHandler))
+	handle(fmt.Sprintf("/%s/statuscheck", ws.key), ws.apiKeyMiddleware(ws.statuscheckHandler))
 
-	slog.Info("starting save loop in go routine", "key", w.key, "func", "Initialize")
-	go w.saveDataLoop()
+	// Public endpoints
+	handle(fmt.Sprintf("/%s/audio", ws.key), ws.getAudioHandler)
+	handle(fmt.Sprintf("/%s/clip", ws.key), ws.getClipHandler)
+
+	slog.Info("starting save loop in go routine", "key", ws.key, "func", "Initialize")
+	go ws.saveDataLoop()
+}
+
+func (ws *WebSocketServer) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if ws.apiKey == "" {
+			next(w, r)
+			return
+		}
+		key := r.Header.Get("X-API-Key")
+		if key != ws.apiKey {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (w *WebSocketServer) activateStream(activeId string, activeTitle string, startTime string, mediaType string) bool {
@@ -149,50 +167,7 @@ func (w *WebSocketServer) saveDataLoop() {
 	}
 }
 
-func (ws *WebSocketServer) basicAuth(r *http.Request) (string, string, bool) {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		slog.Debug("authHeader is empty", "key", ws.key, "func", "basicAuth")
-		return "", "", false
-	}
-
-	if !strings.HasPrefix(authHeader, "Basic ") {
-		slog.Debug("authHeader does not have the correct prefix", "key", ws.key, "func", "basicAuth", "authHeader", authHeader)
-		return "", "", false
-	}
-
-	token, _ := base64.StdEncoding.DecodeString(authHeader[6:])
-	parts := strings.SplitN(string(token), ":", 2)
-	if len(parts) != 2 {
-		slog.Debug("authHeader is not in the correct format", "key", ws.key, "func", "basicAuth", "authHeader", authHeader)
-		return "", "", false
-	}
-
-	return parts[0], parts[1], true
-}
-
-func (ws *WebSocketServer) verify(w http.ResponseWriter, r *http.Request) bool {
-	username, password, ok := ws.basicAuth(r)
-	if !ok {
-		http.Error(w, "404 page not found", http.StatusNotFound)
-		Http400Errors.Inc()
-		return false
-	}
-
-	if username != ws.username || password != ws.password {
-		slog.Debug("incorrect username and password", "key", ws.key, "func", "verify", "requestUsername", username, "requestPassword", password)
-		http.Error(w, "404 page not found", http.StatusNotFound)
-		Http400Errors.Inc()
-		return false
-	}
-
-	return true
-}
-
 func (ws *WebSocketServer) uploadHandler(w http.ResponseWriter, r *http.Request) {
-	if !ws.verify(w, r) {
-		return
-	}
 	uploadStartTime := time.Now()
 
 	// Decode the JSON data from the request body
@@ -223,9 +198,6 @@ func (ws *WebSocketServer) uploadHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request) {
-	if !ws.verify(w, r) {
-		return
-	}
 	uploadStartTime := time.Now()
 
 	// if !ws.clientData.IsLive {
@@ -294,7 +266,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 		os.Remove(m4aFile)
 		http.Error(w, "Unable to convert raw media to m4a.", http.StatusInternalServerError)
 		Http500Errors.Inc()
-		slog.Error("unable to convert raw media to m4a.", "key", ws.key, "func", "updateHandler", "err", fileErr)
+		slog.Error("unable to convert raw media to m4a.", "key", ws.key, "func", "updateHandler", "err", convertError)
 		return
 	}
 
@@ -304,9 +276,6 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func (ws *WebSocketServer) activateHandler(w http.ResponseWriter, r *http.Request) {
-	if !ws.verify(w, r) {
-		return
-	}
 	processStartTime := time.Now()
 
 	// Parse the query parameters
@@ -353,9 +322,6 @@ func (ws *WebSocketServer) activateHandler(w http.ResponseWriter, r *http.Reques
 }
 
 func (ws *WebSocketServer) deactivateHandler(w http.ResponseWriter, r *http.Request) {
-	if !ws.verify(w, r) {
-		return
-	}
 	processStartTime := time.Now()
 
 	// Parse the query parameters
@@ -384,10 +350,6 @@ func (ws *WebSocketServer) deactivateHandler(w http.ResponseWriter, r *http.Requ
 }
 
 func (ws *WebSocketServer) statuscheckHandler(w http.ResponseWriter, r *http.Request) {
-	if !ws.verify(w, r) {
-		return
-	}
-
 	ws.clientsLock.Lock()
 	size := ws.clientConnections
 	ws.clientsLock.Unlock()
@@ -512,39 +474,31 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	mediaFilePath := filepath.Join(ws.mediaFolder, fmt.Sprintf("%d-%d%s", start, end, clipExt))
-	mergedMediaPath, alreadyConverted, err := ws.MergeRawAudio(start, end, clipExt)
+	uniqueID := fmt.Sprintf("%d-%d-%d", start, end, time.Now().UnixNano())
+	mergedMediaPath, err := ws.MergeRawAudio(start, end, uniqueID)
 	if err != nil {
-		os.Remove(mediaFilePath)
 		os.Remove(mergedMediaPath)
 		http.Error(w, "Server error", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		slog.Error("unable to merge raw audio", "key", ws.key, "func", "getClipHandler", "startID", start, "endID", end, "err", err)
 		return
 	}
+	defer os.Remove(mergedMediaPath) // Delete the merged raw file when done
 
-	// do an aditional step of converting raw to clipExt since we only send out clipExt files for maximum compatibility.
-	if !alreadyConverted {
-		// Note: audio has to be reencoded to m4a otherwise it will be broken. Video can be remuxed to a different container without any compatibility issues.
-		if mediaType == "mp4" {
-			err = FfmpegRemux(mergedMediaPath, mediaFilePath)
-		} else {
-			err = FfmpegConvert(mergedMediaPath, mediaFilePath)
-		}
-		if err != nil {
-			os.Remove(mediaFilePath)
-			os.Remove(mergedMediaPath)
-			slog.Error("unable to convert raw media to new extension", "key", ws.key, "func", "getClipHandler", "extension", clipExt, "err", err)
-			http.Error(w, "Server error", http.StatusInternalServerError)
-			Http500Errors.Inc()
-			return
-		}
-		err = os.Remove(mergedMediaPath)
-		if err != nil {
-			slog.Error("unable to remove temp merged raw file", "key", ws.key, "func", "getClipHandler", "err", err)
-		}
+	mediaFilePath := filepath.Join(ws.mediaFolder, uniqueID+clipExt)
 
-		mergedMediaPath = mediaFilePath
+	// Note: audio has to be reencoded to m4a otherwise it will be broken. Video can be remuxed to a different container without any compatibility issues.
+	if mediaType == "mp4" {
+		err = FfmpegRemux(mergedMediaPath, mediaFilePath)
+	} else {
+		err = FfmpegConvert(mergedMediaPath, mediaFilePath)
+	}
+	if err != nil {
+		os.Remove(mediaFilePath)
+		slog.Error("unable to convert raw media to new extension", "key", ws.key, "func", "getClipHandler", "extension", clipExt, "err", err)
+		http.Error(w, "Server error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		return
 	}
 
 	if clipExt == ".m4a" {
@@ -571,5 +525,5 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s%s\"", sanitizedName, clipExt))
 	w.Header().Set("Content-Type", contentType)
 	slog.Debug("Successfully generated clip", "key", ws.key, "func", "getClipHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "start", startStr, "end", endStr, "clipName", clipName, "mediaType", mediaType)
-	http.ServeFile(w, r, mergedMediaPath)
+	http.ServeFile(w, r, mediaFilePath)
 }

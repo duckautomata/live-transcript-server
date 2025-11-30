@@ -3,11 +3,11 @@
 # By default, it will grab config.yaml
 ####################################################################
 
+# Use command to generate creds
+# openssl rand -base64 32
 credentials:
   # credentials used to restrict the activate/deactive/update/upload endpoints
-  # credentials must exclude %:/\`'"
-  username: ""
-  password: ""
+  apiKey: ""
 
 channels:
   # List of keys the server will work with.
