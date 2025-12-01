@@ -439,17 +439,30 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 	mediaType := strings.TrimSpace(query.Get("type"))
 	start, err := strconv.Atoi(startStr)
 	end, err2 := strconv.Atoi(endStr)
+
 	clipExt := ".m4a"
 	contentType := "audio/mp4"
-	if mediaType == "mp4" && ws.clientData.MediaType == "video" {
+
+	if mediaType == "mp4" {
+		if ws.clientData.MediaType != "video" {
+			http.Error(w, "Video clipping is disabled for this stream", http.StatusMethodNotAllowed)
+			Http400Errors.Inc()
+			slog.Warn("cannot clip mp4. Media type is not 'video'", "key", ws.key, "func", "getClipHandler", "mediaType", ws.clientData.MediaType)
+			return
+		}
 		clipExt = ".mp4"
 		contentType = "video/mp4"
-	}
-
-	if mediaType == "mp4" && ws.clientData.MediaType != "video" {
-		http.Error(w, "Video clipping is disabled for this stream", http.StatusMethodNotAllowed)
+	} else if mediaType == "mp3" {
+		clipExt = ".mp3"
+		contentType = "audio/mpeg"
+	} else if mediaType == "m4a" || mediaType == "" {
+		// Default to m4a
+		clipExt = ".m4a"
+		contentType = "audio/mp4"
+	} else {
+		http.Error(w, "Invalid media type", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Warn("cannot clip mp4. Media type is not 'video'", "key", ws.key, "func", "getClipHandler", "mediaType", ws.clientData.MediaType)
+		slog.Warn("invalid media type", "key", ws.key, "func", "getClipHandler", "mediaType", mediaType)
 		return
 	}
 
@@ -501,7 +514,7 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if clipExt == ".m4a" {
+	if clipExt == ".m4a" || clipExt == ".mp3" {
 		TotalAudioClipped.WithLabelValues(ws.key).Inc()
 		StreamAudioClipped.WithLabelValues(ws.key).Inc()
 	} else if clipExt == ".mp4" {
