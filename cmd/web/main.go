@@ -12,6 +12,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// To be set via ldflags
+var (
+	Version   = "local"
+	BuildTime = "unknown"
+)
+
 func healthcheckHandler(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"alive": true}`))
@@ -34,6 +40,8 @@ func main() {
 	defer logFile.Close()
 
 	internal.SetupLogging(logFile)
+
+	slog.Info("server starting up", "version", Version, "build_time", BuildTime)
 
 	config, err := internal.GetConfig()
 	if err != nil {

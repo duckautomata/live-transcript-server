@@ -192,9 +192,15 @@ func (ws *WebSocketServer) uploadHandler(w http.ResponseWriter, r *http.Request)
 
 	ws.refreshAll()
 
+	if time.Since(uploadStartTime).Seconds() > 5 {
+		slog.Warn("slow upload time", "key", ws.key, "func", "uploadHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds())
+	}
+	if time.Since(processStartTime).Seconds() > 1 {
+		slog.Warn("slow processing time", "key", ws.key, "func", "uploadHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds())
+	}
+
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("JSON UploadData data received and processed successfully"))
-	slog.Debug("successfully received and processed worker's state", "key", ws.key, "func", "uploadHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds())
 }
 
 func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request) {
@@ -242,7 +248,9 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 
 	if ws.clientData.MediaType == "none" || data.RawB64Data == "" {
 		ws.refreshAll()
-		slog.Debug("added transcript line with no b64data", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
+		if time.Since(processStartTime).Seconds() > 1 {
+			slog.Warn("slow processing time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
+		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("JSON Line data received and processed successfully"))
 		return
@@ -270,7 +278,13 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	slog.Debug("successfully added transcript line", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
+	if time.Since(uploadStartTime).Seconds() > 5 {
+		slog.Warn("slow upload time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
+	}
+	if time.Since(processStartTime).Seconds() > 1 {
+		slog.Warn("slow processing time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
+	}
+
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("JSON Line data received and processed successfully"))
 }
@@ -406,12 +420,15 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 	TotalAudioPlayed.WithLabelValues(ws.key).Inc()
 	StreamAudioPlayed.WithLabelValues(ws.key).Inc()
 
+	if time.Since(processStartTime).Seconds() > 1 {
+		slog.Warn("slow audio processing time", "key", ws.key, "func", "getAudioHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "id", idStr, "stream", stream)
+	}
+
 	// Enable Content-Disposition to have the browser automatically download the audio
 	if stream != "true" {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s_%d.m4a\"", ws.clientData.ActiveID, id))
 	}
 	w.Header().Set("Content-Type", "audio/mp4")
-	slog.Debug("Successfully found audio", "key", ws.key, "func", "getAudioHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "id", idStr, "stream", stream)
 	http.ServeFile(w, r, filePath)
 }
 
@@ -532,11 +549,15 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 	}
 	yymmdd := time.Unix(unixTimeInt64, 0).Format("20060102")
 	attachmentName := fmt.Sprintf("%s-%s-%s", ws.key, yymmdd, clipName)
+
+	if time.Since(processStartTime).Seconds() > 1 {
+		slog.Warn("slow clip processing time", "key", ws.key, "func", "getClipHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "start", startStr, "end", endStr, "clipName", clipName, "mediaType", mediaType)
+	}
+
 	// use BaseName rather than Name because BaseName removes / where as Name removes anything before the last /
 	// Also BaseName preserves capitalization.
 	sanitizedName := sanitize.BaseName(attachmentName)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s%s\"", sanitizedName, clipExt))
 	w.Header().Set("Content-Type", contentType)
-	slog.Debug("Successfully generated clip", "key", ws.key, "func", "getClipHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "start", startStr, "end", endStr, "clipName", clipName, "mediaType", mediaType)
 	http.ServeFile(w, r, mediaFilePath)
 }

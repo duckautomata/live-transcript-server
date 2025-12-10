@@ -38,6 +38,9 @@ fi
 # Extract the major version (e.g., '1' from '1.2')
 MAJOR_VERSION=$(echo "$VERSION" | cut -d. -f1)
 
+# Generate Build Time
+BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
 # Construct the full tags
 SPECIFIC_TAG="${IMAGE_NAME}:${VERSION}"
 MAJOR_TAG="${IMAGE_NAME}:${MAJOR_VERSION}"
@@ -63,6 +66,8 @@ fi
 # Build the image and apply all tags in a single, efficient command.
 echo "Building Docker image..."
 if ! $DOCKER_CMD build \
+    --build-arg VERSION="${VERSION}" \
+    --build-arg BUILD_TIME="${BUILD_TIME}" \
     -t "${SPECIFIC_TAG}" \
     -t "${MAJOR_TAG}" \
     -t "${LATEST_TAG}" \
