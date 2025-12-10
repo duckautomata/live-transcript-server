@@ -79,3 +79,7 @@ if ! $DOCKER_CMD ps -q -f name="^${CONTAINER_NAME}$" > /dev/null; then
 fi
 
 echo -e "\nUpdate complete. Container '$CONTAINER_NAME' is running with the latest image."
+echo -e "\nRetrieving startup logs for $CONTAINER_NAME..."
+echo "---------------------------------------------------"
+$DOCKER_CMD logs "$CONTAINER_NAME"
+echo "---------------------------------------------------"
