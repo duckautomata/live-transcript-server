@@ -179,6 +179,7 @@ func (ws *WebSocketServer) uploadHandler(w http.ResponseWriter, r *http.Request)
 		slog.Error("unable to decode JSON data", "key", ws.key, "func", "uploadHandler", "err", err)
 		return
 	}
+	uploadTime := time.Since(uploadStartTime).Milliseconds()
 	processStartTime := time.Now()
 
 	// Very susecptiale to deadlock. Pt 2
@@ -190,13 +191,13 @@ func (ws *WebSocketServer) uploadHandler(w http.ResponseWriter, r *http.Request)
 	ws.streamLock.Unlock()
 	ws.clientsLock.Unlock()
 
-	ws.refreshAll()
+	ws.refreshAll(uploadTime, processStartTime)
 
-	if time.Since(uploadStartTime).Seconds() > 5 {
-		slog.Warn("slow upload time", "key", ws.key, "func", "uploadHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds())
+	if uploadTime > 5*1000 {
+		slog.Warn("slow upload time", "key", ws.key, "func", "uploadHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds())
 	}
 	if time.Since(processStartTime).Seconds() > 1 {
-		slog.Warn("slow processing time", "key", ws.key, "func", "uploadHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds())
+		slog.Warn("slow processing time", "key", ws.key, "func", "uploadHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds())
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -221,6 +222,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 		slog.Error("unable to decode JSON data", "key", ws.key, "func", "updateHandler", "err", err)
 		return
 	}
+	uploadTime := time.Since(uploadStartTime).Milliseconds()
 	processStartTime := time.Now()
 
 	ws.transcriptLock.Lock()
@@ -247,7 +249,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 	ws.transcriptLock.Unlock()
 
 	if ws.clientData.MediaType == "none" || data.RawB64Data == "" {
-		ws.refreshAll()
+		ws.refreshAll(uploadTime, processStartTime)
 		if time.Since(processStartTime).Seconds() > 1 {
 			slog.Warn("slow processing time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
 		}
@@ -260,7 +262,7 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 	rawFile, fileErr := ws.RawB64ToFile(data.RawB64Data, data.NewLine.ID, "raw")
 	m4aFile := ChangeExtension(rawFile, ".m4a")
 	convertError := FfmpegConvert(rawFile, m4aFile)
-	ws.refreshAll()
+	ws.refreshAll(uploadTime, processStartTime)
 
 	if fileErr != nil {
 		http.Error(w, "Unable to save raw media to file.", http.StatusInternalServerError)
@@ -278,11 +280,11 @@ func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if time.Since(uploadStartTime).Seconds() > 5 {
-		slog.Warn("slow upload time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
+	if uploadTime > 5*1000 {
+		slog.Warn("slow upload time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
 	}
 	if time.Since(processStartTime).Seconds() > 1 {
-		slog.Warn("slow processing time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
+		slog.Warn("slow processing time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
 	}
 
 	w.WriteHeader(http.StatusOK)

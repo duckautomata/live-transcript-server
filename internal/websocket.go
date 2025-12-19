@@ -22,7 +22,7 @@ func (w *WebSocketServer) readLoop(conn *websocket.Conn) error {
 	}
 }
 
-func (w *WebSocketServer) refreshAll() {
+func (w *WebSocketServer) refreshAll(uploadTime int64, startTime time.Time) {
 	if len(w.clientData.Transcript) == 0 {
 		return
 	}
@@ -34,7 +34,7 @@ func (w *WebSocketServer) refreshAll() {
 	lastLine := w.clientData.Transcript[len(w.clientData.Transcript)-1]
 	// w.transcriptLock.Unlock()
 
-	sb.WriteString(fmt.Sprintf("%d\n%d", lastLine.ID, lastLine.Timestamp))
+	sb.WriteString(fmt.Sprintf("%d\n%d\n%d\n%d", lastLine.ID, lastLine.Timestamp, uploadTime, startTime.UnixMilli()))
 	for _, seg := range lastLine.Segments {
 		sb.WriteString(fmt.Sprintf("\n%d\n%s", seg.Timestamp, seg.Text))
 	}

@@ -95,7 +95,7 @@ The client wants to resync the entire state.
 All messages will start with `![]` and split up the parts of the message with `\n` except for hardrefresh, which will send the entire transcript data as a JSON for simplicity.
 
 The goal of this message structure is to minimize data being sent between the server and the client. It also minimizes the computation time needed to generate the message. JSON is very slow.
-- ![]refresh\n{timestamp_1}\n{text_1}\n{timestamp_2}\n{text_2} ...
+- ![]refresh\n{id}\n{line_timestamp}\n{upload_time_ms}\n{process_start_timestamp_ms}\n{timestamp_1}\n{text_1}\n{timestamp_2}\n{text_2} ...
 - ![]newstream\n{streamId}\n{streamTitle}\n{startTimeUnix}\n{mediaType}\n{isLive}
 - ![]status\n{streamId}\n{streamTitle}\n{isLive}
 - ![]error\n{errorType}\n{message}
