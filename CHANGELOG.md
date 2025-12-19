@@ -1,8 +1,12 @@
 # latest
-Using version [1.5](#15-2025-11-30)
+Using version [1.6](#16-2025-12-18)
 
 # Major version 1
-Using version [1.5](#15-2025-11-30)
+Using version [1.6](#16-2025-12-18)
+
+## 1.6 (2025-12-18)
+**Changes**
+- Updated refresh call to ui to include updload time (ms) and processing start time (UnixTimestampMs).
 
 ## 1.5 (2025-11-30)
 **Changes**
