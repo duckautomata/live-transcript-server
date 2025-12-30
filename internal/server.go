@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,47 +16,43 @@ import (
 	"github.com/kennygrant/sanitize"
 )
 
-// Rewriting Initialize and Middleware to be clean and correct with shadowing handling
-func (ws *WebSocketServer) Initialize(handle func(string, func(http.ResponseWriter, *http.Request))) {
-	err := os.MkdirAll(ws.mediaFolder, 0755)
+func (app *App) RegisterRoutes(mux *http.ServeMux) {
+	err := os.MkdirAll(app.TempDir, 0755)
 	if err != nil {
-		slog.Error("cannot create media folder", "key", ws.key, "func", "Initialize", "err", err)
+		slog.Error("cannot create tmp folder", "func", "RegisterRoutes", "err", err)
 	}
 
-	data, err := ws.archive.FileToClientData()
-	if err != nil {
-		slog.Error("cannot read in gob archive", "key", ws.key, "func", "Initialize", "err", err)
-	} else {
-		slog.Info("read in state from file", "key", ws.key, "func", "Initialize")
-		ws.clientData = data
+	for _, cs := range app.Channels {
+		err := os.MkdirAll(cs.MediaFolder, 0755)
+		if err != nil {
+			slog.Error("cannot create media folder", "key", cs.Key, "func", "RegisterRoutes", "err", err)
+		}
 	}
 
-	slog.Info("creating endpoints", "key", ws.key, "func", "Initialize")
-	handle(fmt.Sprintf("/ws/%s", ws.key), ws.wsHandler)
+	slog.Info("registering endpoints", "func", "RegisterRoutes")
 
-	// Protected endpoints
-	handle(fmt.Sprintf("/%s/activate", ws.key), ws.apiKeyMiddleware(ws.activateHandler))
-	handle(fmt.Sprintf("/%s/deactivate", ws.key), ws.apiKeyMiddleware(ws.deactivateHandler))
-	handle(fmt.Sprintf("/%s/upload", ws.key), ws.apiKeyMiddleware(ws.uploadHandler))
-	handle(fmt.Sprintf("/%s/update", ws.key), ws.apiKeyMiddleware(ws.updateHandler))
-	handle(fmt.Sprintf("/%s/statuscheck", ws.key), ws.apiKeyMiddleware(ws.statuscheckHandler))
+	// API Key protected routes
+	mux.HandleFunc("POST /{channel}/activate", app.apiKeyMiddleware(app.activateHandler))
+	mux.HandleFunc("POST /{channel}/deactivate", app.apiKeyMiddleware(app.deactivateHandler))
+	mux.HandleFunc("POST /{channel}/sync", app.apiKeyMiddleware(app.syncHandler))
+	mux.HandleFunc("POST /{channel}/line", app.apiKeyMiddleware(app.lineHandler))
+	mux.HandleFunc("POST /{channel}/media/{id}", app.apiKeyMiddleware(app.mediaHandler))
+	mux.HandleFunc("GET /{channel}/statuscheck", app.apiKeyMiddleware(app.statuscheckHandler))
 
-	// Public endpoints
-	handle(fmt.Sprintf("/%s/audio", ws.key), ws.getAudioHandler)
-	handle(fmt.Sprintf("/%s/clip", ws.key), ws.getClipHandler)
-
-	slog.Info("starting save loop in go routine", "key", ws.key, "func", "Initialize")
-	go ws.saveDataLoop()
+	// Public routes
+	mux.HandleFunc("GET /{channel}/websocket", app.wsHandler)
+	mux.HandleFunc("GET /{channel}/audio", app.getAudioHandler)
+	mux.HandleFunc("GET /{channel}/clip", app.getClipHandler)
 }
 
-func (ws *WebSocketServer) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
+func (app *App) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if ws.apiKey == "" {
+		if app.ApiKey == "" {
 			next(w, r)
 			return
 		}
 		key := r.Header.Get("X-API-Key")
-		if key != ws.apiKey {
+		if key != app.ApiKey {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
@@ -62,236 +60,387 @@ func (ws *WebSocketServer) apiKeyMiddleware(next http.HandlerFunc) http.HandlerF
 	}
 }
 
-func (w *WebSocketServer) activateStream(activeId string, activeTitle string, startTime string, mediaType string) bool {
-	isNewStream := false
-	w.streamLock.Lock()
-	defer w.streamLock.Unlock()
+// Activate a stream and send a message to all clients.
+// Returns true if the stream was activated and a message was sent, false otherwise.
+func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId string, activeTitle string, startTime string, mediaType string) bool {
 
-	msg := ""
+	// 1. Get current stream state from DB
+	currentStream, err := app.GetStream(ctx, cs.Key)
+	if err != nil {
+		slog.Error("failed to get stream from db", "key", cs.Key, "err", err)
+		return false
+	}
 
-	// Case 1: A completely new stream is starting (different ID)
-	if w.clientData.ActiveID != activeId {
-		StreamAudioPlayed.WithLabelValues(w.key).Set(0)
-		StreamAudioClipped.WithLabelValues(w.key).Set(0)
-		StreamVideoClipped.WithLabelValues(w.key).Set(0)
+	var msg WebSocketMessage
 
-		// If a previous stream was active for this key, remove its Prometheus metric first.
-		if w.clientData.ActiveID != "" {
-			ActivatedStreams.DeleteLabelValues(w.key, w.clientData.ActiveID, w.clientData.ActiveTitle)
-			slog.Info("removing old stream metric", "key", w.key, "func", "activateStream", "oldStreamID", w.clientData.ActiveID)
+	// If no stream exists, or the ID is different, it's a new stream
+	if currentStream == nil || currentStream.ActiveID != activeId {
+		StreamAudioPlayed.WithLabelValues(cs.Key).Set(0)
+		StreamAudioClipped.WithLabelValues(cs.Key).Set(0)
+		StreamVideoClipped.WithLabelValues(cs.Key).Set(0)
+
+		// Remove previous stream activation metric when a new stream is activated. If there was a previous active stream.
+		if currentStream != nil && currentStream.ActiveID != "" {
+			deleted := ActivatedStreams.DeleteLabelValues(cs.Key, currentStream.ActiveID, currentStream.ActiveTitle)
+			if deleted {
+				slog.Info("removed old stream activation metric", "key", cs.Key, "func", "activateStream", "oldStreamID", currentStream.ActiveID)
+			}
 		}
 
-		// Update server state with the new stream's info
-		w.clientData.ActiveID = activeId
-		w.clientData.ActiveTitle = activeTitle
-		w.clientData.StartTime = startTime
-		w.clientData.IsLive = true
-		w.clientData.MediaType = mediaType
-		isNewStream = true
+		newStream := &Stream{
+			ChannelID:   cs.Key,
+			ActiveID:    activeId,
+			ActiveTitle: activeTitle,
+			StartTime:   startTime,
+			IsLive:      true,
+			MediaType:   mediaType,
+		}
 
-		// Prepare the broadcast message for clients
-		msg = fmt.Sprintf("![]newstream\n%s\n%s\n%s\n%s\n%v", w.clientData.ActiveID, w.clientData.ActiveTitle, w.clientData.StartTime, w.clientData.MediaType, w.clientData.IsLive)
-		slog.Debug("received new stream id, sending newstream event", "key", w.key, "func", "activateStream", "activeID", activeId)
+		if err := app.UpsertStream(ctx, newStream); err != nil {
+			slog.Error("failed to upsert new stream", "key", cs.Key, "err", err)
+			return false
+		}
+
+		// Clear transcript for new stream
+		if err := app.ClearTranscript(ctx, cs.Key); err != nil {
+			slog.Error("failed to clear transcript", "key", cs.Key, "err", err)
+			return false
+		}
+
+		cs.ResetAudioFile()
+		data := EventNewStreamData{
+			ActiveID:    newStream.ActiveID,
+			ActiveTitle: newStream.ActiveTitle,
+			StartTime:   newStream.StartTime,
+			MediaType:   newStream.MediaType,
+			IsLive:      newStream.IsLive,
+		}
+		msg = WebSocketMessage{
+			Event: EventNewStream,
+			Data:  data,
+		}
+		slog.Debug("received new stream id, sending newstream event", "key", cs.Key, "func", "activateStream", "activeID", activeId)
 
 	} else {
-		// Case 2: The same stream is being reactivated
-		if !w.clientData.IsLive {
-			w.clientData.IsLive = true
-			msg = fmt.Sprintf("![]status\n%s\n%s\n%v", w.clientData.ActiveID, w.clientData.ActiveTitle, w.clientData.IsLive)
-			slog.Debug("reactivating existing stream, sending status event", "key", w.key, "func", "activateStream", "activeID", activeId)
+		// Same stream ID
+		if !currentStream.IsLive {
+			// Reactivate
+			if err := app.SetStreamLive(ctx, cs.Key, true); err != nil {
+				slog.Error("failed to set stream live", "key", cs.Key, "err", err)
+				return false
+			}
+			currentStream.IsLive = true
+			data := EventStatusData{
+				ActiveID:    currentStream.ActiveID,
+				ActiveTitle: currentStream.ActiveTitle,
+				IsLive:      currentStream.IsLive,
+			}
+			msg = WebSocketMessage{
+				Event: EventStatus,
+				Data:  data,
+			}
+			slog.Debug("reactivating existing stream, sending status event", "key", cs.Key, "func", "activateStream", "activeID", activeId)
 		} else {
-			// Case 3: A request to activate an already active stream
-			slog.Debug("stream is already active, skipping event", "key", w.key, "func", "activateStream", "activeID", activeId)
+			// Already active
+			slog.Debug("stream is already active, skipping event", "key", cs.Key, "func", "activateStream", "activeID", activeId)
 		}
 	}
 
-	if isNewStream {
-		w.transcriptLock.Lock()
-		w.clientData.Transcript = make([]Line, 0)
-		w.transcriptLock.Unlock()
-		w.ResetAudioFile()
+	if msg.Event != "" {
+		cs.broadcast(msg)
+		return true
 	}
 
-	if msg != "" {
-		w.broadcast([]byte(msg))
-		return true // Indicates a change was made
-	}
-
-	return false // Indicates no change was made
+	return false
 }
 
-func (w *WebSocketServer) deactivateStream(activeId string) bool {
-	w.streamLock.Lock()
-	defer w.streamLock.Unlock()
+// Deactivate a stream and send a message to all clients.
+// Returns true if the stream was deactivated and a message was sent, false otherwise.
+func (app *App) deactivateStream(ctx context.Context, cs *ChannelState, activeId string) bool {
 
-	msg := ""
-	if w.clientData.ActiveID == activeId && w.clientData.IsLive {
-		// Remove the gauge from Prometheus since the stream is no longer active.
-		deleted := ActivatedStreams.DeleteLabelValues(w.key, w.clientData.ActiveID, w.clientData.ActiveTitle)
+	currentStream, err := app.GetStream(ctx, cs.Key)
+	if err != nil {
+		slog.Error("failed to get stream from db", "key", cs.Key, "err", err)
+		return false
+	}
+
+	var msg WebSocketMessage
+	if currentStream != nil && currentStream.ActiveID == activeId && currentStream.IsLive {
+		deleted := ActivatedStreams.DeleteLabelValues(cs.Key, currentStream.ActiveID, currentStream.ActiveTitle)
 		if deleted {
-			slog.Info("successfully removed stream metric on deactivation", "key", w.key, "func", "deactivateStream", "streamID", activeId)
+			slog.Info("successfully removed stream metric on deactivation", "key", cs.Key, "func", "deactivateStream", "streamID", activeId)
 		} else {
-			slog.Info("failed to remove stream metric on deactivation", "key", w.key, "func", "deactivateStream", "streamID", activeId)
+			slog.Info("failed to remove stream metric on deactivation", "key", cs.Key, "func", "deactivateStream", "streamID", activeId)
 		}
 
-		w.clientData.IsLive = false
-		msg = fmt.Sprintf("![]status\n%s\n%s\n%v", w.clientData.ActiveID, w.clientData.ActiveTitle, w.clientData.IsLive)
-		slog.Debug("deactivating stream", "key", w.key, "func", "deactivateStream", "activeID", activeId)
-	}
-
-	if msg != "" {
-		w.broadcast([]byte(msg))
-		return true // Indicates a change was made
-	}
-
-	return false // Indicates no change was made
-}
-
-func (w *WebSocketServer) saveDataLoop() {
-	for {
-		time.Sleep(time.Minute * 1)
-
-		// Very susecptiale to deadlock.
-		w.clientsLock.Lock()
-		w.streamLock.Lock()
-		w.transcriptLock.Lock()
-
-		// Saving new data to file
-		if err := w.archive.ClientDataToFile(w.clientData); err != nil {
-			slog.Error("unable to save current state to file", "key", w.key, "func", "saveDataLoop", "err", err)
+		if err := app.SetStreamLive(ctx, cs.Key, false); err != nil {
+			slog.Error("failed to set stream not live", "key", cs.Key, "err", err)
+			return false
 		}
 
-		w.transcriptLock.Unlock()
-		w.streamLock.Unlock()
-		w.clientsLock.Unlock()
+		// msg = fmt.Sprintf("![]status\n%s\n%s\n%v", currentStream.ActiveID, currentStream.ActiveTitle, false)
+		data := EventStatusData{
+			ActiveID:    currentStream.ActiveID,
+			ActiveTitle: currentStream.ActiveTitle,
+			IsLive:      false,
+		}
+		msg = WebSocketMessage{
+			Event: EventStatus,
+			Data:  data,
+		}
+		slog.Debug("deactivating stream", "key", cs.Key, "func", "deactivateStream", "activeID", activeId)
 	}
+
+	if msg.Event != "" {
+		cs.broadcast(msg)
+		return true
+	}
+
+	return false
 }
 
-func (ws *WebSocketServer) uploadHandler(w http.ResponseWriter, r *http.Request) {
+// Handle a sync request from the worker. Sets current stream state and replaces transcript.
+func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "syncHandler", "key", key)
+		return
+	}
+
 	uploadStartTime := time.Now()
 
-	// Decode the JSON data from the request body
 	decoder := json.NewDecoder(r.Body)
-	var data ClientData
+	var data WorkerData
 	if err := decoder.Decode(&data); err != nil {
 		http.Error(w, "Error decoding JSON data", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Error("unable to decode JSON data", "key", ws.key, "func", "uploadHandler", "err", err)
+		slog.Error("unable to decode JSON data", "key", cs.Key, "func", "syncHandler", "err", err)
 		return
 	}
 	uploadTime := time.Since(uploadStartTime).Milliseconds()
 	processStartTime := time.Now()
 
-	// Very susecptiale to deadlock. Pt 2
-	ws.clientsLock.Lock()
-	ws.streamLock.Lock()
-	ws.transcriptLock.Lock()
-	ws.clientData = &data
-	ws.transcriptLock.Unlock()
-	ws.streamLock.Unlock()
-	ws.clientsLock.Unlock()
+	// Update Stream Info
+	stream := &Stream{
+		ChannelID:   cs.Key,
+		ActiveID:    data.ActiveID,
+		ActiveTitle: data.ActiveTitle,
+		StartTime:   data.StartTime,
+		IsLive:      data.IsLive,
+		MediaType:   data.MediaType,
+	}
+	if err := app.UpsertStream(r.Context(), stream); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		slog.Error("failed to upsert stream", "err", err)
+		return
+	}
 
-	ws.refreshAll(uploadTime, processStartTime)
+	// For every line in the transcript, check if we have the media file.
+	// If we do, set MediaAvailable to true.
+	for i := range data.Transcript {
+		line := &data.Transcript[i]
+		m4aPath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.m4a", line.ID))
+		rawPath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.raw", line.ID))
+		if _, err := os.Stat(m4aPath); err == nil {
+			line.MediaAvailable = true
+		} else if _, err := os.Stat(rawPath); err == nil {
+			line.MediaAvailable = true
+		}
+	}
+
+	if err := app.ReplaceTranscript(r.Context(), cs.Key, data.Transcript); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		slog.Error("failed to replace transcript", "err", err)
+		return
+	}
+
+	app.broadcastNewLine(r.Context(), cs, uploadTime, nil)
 
 	if uploadTime > 5*1000 {
-		slog.Warn("slow upload time", "key", ws.key, "func", "uploadHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds())
+		slog.Warn("slow upload time", "key", cs.Key, "func", "syncHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds())
 	}
 	if time.Since(processStartTime).Seconds() > 1 {
-		slog.Warn("slow processing time", "key", ws.key, "func", "uploadHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds())
+		slog.Warn("slow processing time", "key", cs.Key, "func", "syncHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds())
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("JSON UploadData data received and processed successfully"))
+	w.Write([]byte("JSON Sync data received and processed successfully"))
 }
 
-func (ws *WebSocketServer) updateHandler(w http.ResponseWriter, r *http.Request) {
+// Handle a new line request from the worker. Appends a new line to the transcript.
+func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "lineHandler", "key", key)
+		return
+	}
+
 	uploadStartTime := time.Now()
 
-	// if !ws.clientData.IsLive {
-	// 	http.Error(w, "Stream is not live yet. Please activate stream before sending data.", http.StatusBadRequest)
-	// 	slog.Warn("received update but no stream is live.", "key", ws.key, "func", "updateHandler")
-	// 	return
-	// }
-
-	// Decode the JSON data from the request body
 	decoder := json.NewDecoder(r.Body)
-	var data UpdateData
+	var data Line
 	if err := decoder.Decode(&data); err != nil {
 		http.Error(w, "Error decoding JSON data", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Error("unable to decode JSON data", "key", ws.key, "func", "updateHandler", "err", err)
+		slog.Error("unable to decode JSON data", "key", cs.Key, "func", "lineHandler", "err", err)
 		return
 	}
 	uploadTime := time.Since(uploadStartTime).Milliseconds()
 	processStartTime := time.Now()
 
-	ws.transcriptLock.Lock()
-	if len(ws.clientData.Transcript) > 0 {
-		// If the next ID does not match us with our current data, we return a reqeust to send us entire state
-		lastID := ws.clientData.Transcript[len(ws.clientData.Transcript)-1].ID
-		if data.NewLine.ID-1 != lastID {
-			ws.transcriptLock.Unlock()
-			http.Error(w, "Server out of sync. Send current state.", http.StatusConflict)
-			ServerOOS.Inc()
-			slog.Warn("current last id is not one behind new line id. Requesting worker to send current state.", "key", ws.key, "func", "updateHandler", "lastID", lastID, "newLineID", data.NewLine.ID)
-			return
-		}
-	} else if data.NewLine.ID > 0 {
-		// Our state is empty, but we got an ID that is greater than 0. Meaning we are missing some data.
-		ws.transcriptLock.Unlock()
+	lastID, err := app.GetLastLineID(r.Context(), cs.Key)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		slog.Error("failed to get last line id", "err", err)
+		return
+	}
+
+	expectedID := lastID + 1
+	// Special case: if DB is empty (lastID = -1), we expect 0.
+	// This works because -1 + 1 = 0. And we expect the first line to be 0.
+
+	// Force MediaAvailable to false for new lines
+	data.MediaAvailable = false
+
+	if data.ID != expectedID {
 		http.Error(w, "Server out of sync. Send current state.", http.StatusConflict)
 		ServerOOS.Inc()
-		slog.Warn("current state is empty but we got an id > 0. Requesting worker to send current state.", "key", ws.key, "func", "updateHandler", "newLineID", data.NewLine.ID)
-		return
-	}
-	// else, our state is empty and we received a 0 id. So all is good.
-	ws.clientData.Transcript = append(ws.clientData.Transcript, data.NewLine)
-	ws.transcriptLock.Unlock()
-
-	if ws.clientData.MediaType == "none" || data.RawB64Data == "" {
-		ws.refreshAll(uploadTime, processStartTime)
-		if time.Since(processStartTime).Seconds() > 1 {
-			slog.Warn("slow processing time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("JSON Line data received and processed successfully"))
+		slog.Warn("line id mismatch. Requesting worker to send current state.", "key", cs.Key, "func", "lineHandler", "lastID", lastID, "newLineID", data.ID)
 		return
 	}
 
-	// Only process raw data if media type is not none and there is data
-	rawFile, fileErr := ws.RawB64ToFile(data.RawB64Data, data.NewLine.ID, "raw")
-	m4aFile := ChangeExtension(rawFile, ".m4a")
-	convertError := FfmpegConvert(rawFile, m4aFile)
-	ws.refreshAll(uploadTime, processStartTime)
-
-	if fileErr != nil {
-		http.Error(w, "Unable to save raw media to file.", http.StatusInternalServerError)
+	if err := app.InsertTranscriptLine(r.Context(), cs.Key, data); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
-		slog.Error("unable to save raw media to file.", "key", ws.key, "func", "updateHandler", "err", fileErr)
+		slog.Error("failed to insert transcript line", "err", err)
 		return
 	}
 
-	if convertError != nil {
-		os.Remove(rawFile)
-		os.Remove(m4aFile)
-		http.Error(w, "Unable to convert raw media to m4a.", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		slog.Error("unable to convert raw media to m4a.", "key", ws.key, "func", "updateHandler", "err", convertError)
-		return
-	}
-
-	if uploadTime > 5*1000 {
-		slog.Warn("slow upload time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
-	}
+	app.broadcastNewLine(r.Context(), cs, uploadTime, &data)
 	if time.Since(processStartTime).Seconds() > 1 {
-		slog.Warn("slow processing time", "key", ws.key, "func", "updateHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.NewLine.ID)
+		slog.Warn("slow processing time", "key", cs.Key, "func", "lineHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.ID)
 	}
-
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("JSON Line data received and processed successfully"))
 }
 
-func (ws *WebSocketServer) activateHandler(w http.ResponseWriter, r *http.Request) {
+// Handle a media file upload. Saves the file to the media folder and converts it.
+func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "mediaHandler", "key", key)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
+
+	if err := r.ParseMultipartForm(100 << 20); err != nil { // 100 MB max
+		http.Error(w, "Unable to parse form", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "Error retrieving file", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
+	defer file.Close()
+
+	// Save raw file
+	rawFilePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.raw", id))
+	dst, err := os.Create(rawFilePath)
+	if err != nil {
+		http.Error(w, "Unable to create file", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		slog.Error("unable to create raw file", "key", cs.Key, "func", "mediaHandler", "err", err)
+		return
+	}
+
+	if _, err := io.Copy(dst, file); err != nil {
+		dst.Close()
+		http.Error(w, "Unable to save file", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		slog.Error("unable to save raw file", "key", cs.Key, "func", "mediaHandler", "err", err)
+		return
+	}
+	dst.Close() // Close explicitly to flush write
+
+	// Convert to m4a
+	m4aFile := ChangeExtension(rawFilePath, ".m4a")
+	if err := FfmpegConvert(rawFilePath, m4aFile); err != nil {
+		os.Remove(rawFilePath)
+		os.Remove(m4aFile)
+		http.Error(w, "Unable to convert media", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		slog.Error("unable to convert media", "key", cs.Key, "func", "mediaHandler", "err", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Media received and processed successfully"))
+
+	// Update DB and broadcast
+	success := true
+	if err := app.SetMediaAvailable(r.Context(), cs.Key, id, true); err != nil {
+		if err.Error() == "line not found" {
+			// This usually fails if the media was uploaded before the line was added.
+			// Wait 500ms then try again to give the line time to be added.
+			slog.Warn("line not found, retrying", "key", cs.Key, "id", id)
+			time.Sleep(500 * time.Millisecond)
+			if err := app.SetMediaAvailable(r.Context(), cs.Key, id, true); err != nil {
+				slog.Error("failed to set media available on retry", "key", cs.Key, "id", id, "err", err)
+				Http500Errors.Inc()
+				success = false
+			}
+		} else {
+			slog.Error("failed to set media available", "key", cs.Key, "id", id, "err", err)
+			Http500Errors.Inc()
+			success = false
+		}
+	}
+	// We don't fail the request because the file is saved and converted.
+	if success {
+		// Broadcast new media availability
+		// Get last 100 available IDs
+		ids, err := app.GetLastAvailableMediaIDs(r.Context(), cs.Key, 100)
+		if err != nil {
+			slog.Error("failed to get last available media ids. Fallback to single id", "key", cs.Key, "err", err)
+			ids = []int{id}
+		}
+		app.broadcastNewMedia(cs, ids)
+	}
+}
+
+// Handle an activate request from the worker. Activates a stream and sends a message to all clients.
+func (app *App) activateHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "activateHandler", "key", key)
+		return
+	}
 	processStartTime := time.Now()
 
 	// Parse the query parameters
@@ -305,7 +454,7 @@ func (ws *WebSocketServer) activateHandler(w http.ResponseWriter, r *http.Reques
 	if streamID == "" || title == "" || startTime == "" {
 		http.Error(w, "Missing required parameters", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Warn("invalid parameters", "key", ws.key, "func", "activateHandler", "streamID", streamID, "title", title, "startTime", startTime)
+		slog.Warn("invalid parameters", "key", cs.Key, "func", "activateHandler", "streamID", streamID, "title", title, "startTime", startTime)
 		return
 	}
 
@@ -314,7 +463,7 @@ func (ws *WebSocketServer) activateHandler(w http.ResponseWriter, r *http.Reques
 	// Try to parse the provided startTime; if it fails, use the current time.
 	parsedTime, err := strconv.ParseInt(startTime, 10, 64)
 	if err != nil {
-		slog.Warn("invalid or empty startTime received, using current system time", "key", ws.key, "func", "activateHandler", "receivedTime", startTime)
+		slog.Warn("invalid or empty startTime received, using current system time", "key", cs.Key, "func", "activateHandler", "receivedTime", startTime)
 		startTimeUnix = time.Now().Unix()
 	} else {
 		startTimeUnix = parsedTime
@@ -323,21 +472,29 @@ func (ws *WebSocketServer) activateHandler(w http.ResponseWriter, r *http.Reques
 	// Convert the final timestamp back to a string for use in other functions.
 	finalStartTimeStr := strconv.FormatInt(startTimeUnix, 10)
 
-	activated := ws.activateStream(streamID, title, finalStartTimeStr, mediaType)
+	activated := app.activateStream(r.Context(), cs, streamID, title, finalStartTimeStr, mediaType)
 
 	if activated {
-		ActivatedStreams.WithLabelValues(ws.key, streamID, title).Set(float64(startTimeUnix))
+		ActivatedStreams.WithLabelValues(cs.Key, streamID, title).Set(float64(startTimeUnix))
 		w.WriteHeader(http.StatusOK)
-		w.Write(fmt.Appendf(nil, "%s stream successfully activated", ws.key))
-		slog.Debug("activated stream", "key", ws.key, "func", "activateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID, "mediaType", mediaType)
+		w.Write(fmt.Appendf(nil, "%s stream successfully activated", cs.Key))
+		slog.Debug("activated stream", "key", cs.Key, "func", "activateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID, "mediaType", mediaType)
 	} else {
 		w.WriteHeader(http.StatusAlreadyReported)
-		w.Write(fmt.Appendf(nil, "%s stream is already activated", ws.key))
-		slog.Debug("id already activated", "key", ws.key, "func", "activateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID)
+		w.Write(fmt.Appendf(nil, "%s stream is already activated", cs.Key))
+		slog.Debug("id already activated", "key", cs.Key, "func", "activateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID)
 	}
 }
 
-func (ws *WebSocketServer) deactivateHandler(w http.ResponseWriter, r *http.Request) {
+func (app *App) deactivateHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "deactivateHandler", "key", key)
+		return
+	}
 	processStartTime := time.Now()
 
 	// Parse the query parameters
@@ -348,44 +505,70 @@ func (ws *WebSocketServer) deactivateHandler(w http.ResponseWriter, r *http.Requ
 	if streamID == "" {
 		http.Error(w, "Missing required parameters", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Warn("invalid parameters, streamID is empty", "key", ws.key, "func", "deactivateHandler")
+		slog.Warn("invalid parameters, streamID is empty", "key", cs.Key, "func", "deactivateHandler")
 		return
 	}
 
-	deactivated := ws.deactivateStream(streamID)
+	deactivated := app.deactivateStream(r.Context(), cs, streamID)
 
 	if deactivated {
 		w.WriteHeader(http.StatusOK)
-		w.Write(fmt.Appendf(nil, "%s stream successfully deactivated", ws.key))
-		slog.Debug("deactivated stream", "key", ws.key, "func", "deactivateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID)
+		w.Write(fmt.Appendf(nil, "%s stream successfully deactivated", cs.Key))
+		slog.Debug("deactivated stream", "key", cs.Key, "func", "deactivateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID)
 	} else {
 		w.WriteHeader(http.StatusAlreadyReported)
-		w.Write(fmt.Appendf(nil, "%s stream was not deactivated", ws.key))
-		slog.Debug("id already deactivated", "key", ws.key, "func", "deactivateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID)
+		w.Write(fmt.Appendf(nil, "%s stream was not deactivated", cs.Key))
+		slog.Debug("id already deactivated", "key", cs.Key, "func", "deactivateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID)
 	}
 }
 
-func (ws *WebSocketServer) statuscheckHandler(w http.ResponseWriter, r *http.Request) {
-	ws.clientsLock.Lock()
-	size := ws.clientConnections
-	ws.clientsLock.Unlock()
+func (app *App) statuscheckHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "statuscheckHandler", "key", key)
+		return
+	}
+
+	cs.ClientsLock.Lock()
+	size := cs.ClientConnections
+	cs.ClientsLock.Unlock()
 
 	w.WriteHeader(http.StatusOK)
 	w.Write(fmt.Appendf(nil, "Current number of clients: %d", size))
 }
 
-func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Invalid request", http.StatusMethodNotAllowed)
+func (app *App) getAudioHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
 		Http400Errors.Inc()
-		slog.Warn("invalid request. Method is not a GET", "key", ws.key, "func", "getAudioHandler", "method", r.Method)
+		slog.Warn("invalid channel name", "func", "getAudioHandler", "key", key)
 		return
 	}
 
-	if ws.clientData.MediaType == "none" {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Invalid request", http.StatusMethodNotAllowed)
+		Http400Errors.Inc()
+		slog.Warn("invalid request. Method is not a GET", "key", cs.Key, "func", "getAudioHandler", "method", r.Method)
+		return
+	}
+
+	stream, err := app.GetStream(r.Context(), cs.Key)
+	mediaType := "none"
+	activeID := ""
+	if err == nil && stream != nil {
+		mediaType = stream.MediaType
+		activeID = stream.ActiveID
+	}
+
+	if mediaType == "none" {
 		http.Error(w, "Audio download is disabled for this stream", http.StatusMethodNotAllowed)
 		Http400Errors.Inc()
-		slog.Warn("cannot retrieve audio. Media type is none", "key", ws.key, "func", "getAudioHandler")
+		slog.Warn("cannot retrieve audio. Media type is none", "key", cs.Key, "func", "getAudioHandler")
 		return
 	}
 	processStartTime := time.Now()
@@ -393,16 +576,16 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 	// Extract the ID from the query parameter
 	query := r.URL.Query()
 	idStr := query.Get("id")
-	stream := query.Get("stream")
+	isStream := query.Get("stream")
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Warn("unable to convert id to int", "key", ws.key, "func", "getAudioHandler", "id", idStr, "err", err)
+		slog.Warn("unable to convert id to int", "key", cs.Key, "func", "getAudioHandler", "id", idStr, "err", err)
 		return
 	}
 
-	filePath := filepath.Join(ws.mediaFolder, fmt.Sprintf("%d.m4a", id))
+	filePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.m4a", id))
 
 	// Check if the file exists
 	_, err = os.Stat(filePath)
@@ -410,42 +593,59 @@ func (ws *WebSocketServer) getAudioHandler(w http.ResponseWriter, r *http.Reques
 		if os.IsNotExist(err) {
 			http.Error(w, "No audio found", http.StatusNotFound)
 			Http400Errors.Inc()
-			slog.Warn("no audio file found for the requested id", "key", ws.key, "func", "getAudioHandler", "id", id)
+			slog.Warn("no audio file found for the requested id", "key", cs.Key, "func", "getAudioHandler", "id", id)
 			return
 		}
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		Http500Errors.Inc()
-		slog.Error("unable to check audio file", "key", ws.key, "func", "getAudioHandler", "id", id, "err", err)
+		slog.Error("unable to check audio file", "key", cs.Key, "func", "getAudioHandler", "id", id, "err", err)
 		return
 	}
 
-	TotalAudioPlayed.WithLabelValues(ws.key).Inc()
-	StreamAudioPlayed.WithLabelValues(ws.key).Inc()
+	TotalAudioPlayed.WithLabelValues(cs.Key).Inc()
+	StreamAudioPlayed.WithLabelValues(cs.Key).Inc()
 
 	if time.Since(processStartTime).Seconds() > 1 {
-		slog.Warn("slow audio processing time", "key", ws.key, "func", "getAudioHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "id", idStr, "stream", stream)
+		slog.Warn("slow audio processing time", "key", cs.Key, "func", "getAudioHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "id", idStr, "stream", isStream)
 	}
 
 	// Enable Content-Disposition to have the browser automatically download the audio
-	if stream != "true" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s_%d.m4a\"", ws.clientData.ActiveID, id))
+	if isStream != "true" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s_%d.m4a\"", activeID, id))
 	}
 	w.Header().Set("Content-Type", "audio/mp4")
 	http.ServeFile(w, r, filePath)
 }
 
-func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Invalid request", http.StatusMethodNotAllowed)
+func (app *App) getClipHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
 		Http400Errors.Inc()
-		slog.Warn("invalid request. Method is not a GET", "key", ws.key, "func", "getClipHandler", "method", r.Method)
+		slog.Warn("invalid channel name", "func", "getClipHandler", "key", key)
 		return
 	}
 
-	if ws.clientData.MediaType == "none" {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Invalid request", http.StatusMethodNotAllowed)
+		Http400Errors.Inc()
+		slog.Warn("invalid request. Method is not a GET", "key", cs.Key, "func", "getClipHandler", "method", r.Method)
+		return
+	}
+
+	stream, err := app.GetStream(r.Context(), cs.Key)
+	mediaType := "none"
+	startTime := ""
+	if err == nil && stream != nil {
+		mediaType = stream.MediaType
+		startTime = stream.StartTime
+	}
+
+	if mediaType == "none" {
 		http.Error(w, "Clipping is disabled for this stream", http.StatusMethodNotAllowed)
 		Http400Errors.Inc()
-		slog.Warn("cannot clip media. Media type is none", "key", ws.key, "func", "getClipHandler")
+		slog.Warn("cannot clip media. Media type is none", "key", cs.Key, "func", "getClipHandler")
 		return
 	}
 	processStartTime := time.Now()
@@ -455,105 +655,107 @@ func (ws *WebSocketServer) getClipHandler(w http.ResponseWriter, r *http.Request
 	startStr := query.Get("start")
 	endStr := query.Get("end")
 	clipName := strings.TrimSpace(query.Get("name"))
-	mediaType := strings.TrimSpace(query.Get("type"))
+	reqMediaType := strings.TrimSpace(query.Get("type"))
 	start, err := strconv.Atoi(startStr)
 	end, err2 := strconv.Atoi(endStr)
 
 	clipExt := ".m4a"
 	contentType := "audio/mp4"
 
-	if mediaType == "mp4" {
-		if ws.clientData.MediaType != "video" {
+	switch reqMediaType {
+	case "mp4":
+		if mediaType != "video" {
 			http.Error(w, "Video clipping is disabled for this stream", http.StatusMethodNotAllowed)
 			Http400Errors.Inc()
-			slog.Warn("cannot clip mp4. Media type is not 'video'", "key", ws.key, "func", "getClipHandler", "mediaType", ws.clientData.MediaType)
+			slog.Warn("cannot clip mp4. Media type is not 'video'", "key", cs.Key, "func", "getClipHandler", "mediaType", mediaType)
 			return
 		}
 		clipExt = ".mp4"
 		contentType = "video/mp4"
-	} else if mediaType == "mp3" {
+	case "mp3":
 		clipExt = ".mp3"
 		contentType = "audio/mpeg"
-	} else if mediaType == "m4a" || mediaType == "" {
+	case "m4a", "":
 		// Default to m4a
 		clipExt = ".m4a"
 		contentType = "audio/mp4"
-	} else {
+	default:
 		http.Error(w, "Invalid media type", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Warn("invalid media type", "key", ws.key, "func", "getClipHandler", "mediaType", mediaType)
+		slog.Warn("invalid media type", "key", cs.Key, "func", "getClipHandler", "mediaType", reqMediaType)
 		return
 	}
 
 	if err != nil {
-		slog.Warn("unable to convert start id to int", "key", ws.key, "func", "getClipHandler", "start", startStr, "err", err)
+		slog.Warn("unable to convert start id to int", "key", cs.Key, "func", "getClipHandler", "start", startStr, "err", err)
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		Http400Errors.Inc()
 		return
 	}
 
 	if err2 != nil {
-		slog.Warn("unable to convert end id to int", "key", ws.key, "func", "getClipHandler", "end", endStr, "err", err)
+		slog.Warn("unable to convert end id to int", "key", cs.Key, "func", "getClipHandler", "end", endStr, "err", err)
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		Http400Errors.Inc()
 		return
 	}
 
-	if start < 0 || end <= start || end-start >= ws.maxClipSize {
-		slog.Warn("invalid start or end id", "key", ws.key, "func", "getClipHandler", "start", start, "end", end, "requestedClipSize", 1+end-start, "maxClipSize", ws.maxClipSize, "err", err)
+	if start < 0 || end <= start || end-start >= app.MaxClipSize {
+		slog.Warn("invalid start or end id", "key", cs.Key, "func", "getClipHandler", "start", start, "end", end, "requestedClipSize", 1+end-start, "maxClipSize", app.MaxClipSize, "err", err)
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		Http400Errors.Inc()
 		return
 	}
 
 	uniqueID := fmt.Sprintf("%d-%d-%d", start, end, time.Now().UnixNano())
-	mergedMediaPath, err := ws.MergeRawAudio(start, end, uniqueID)
+	mergedMediaPath, err := cs.MergeRawAudio(start, end, uniqueID)
 	if err != nil {
 		os.Remove(mergedMediaPath)
 		http.Error(w, "Server error", http.StatusInternalServerError)
 		Http500Errors.Inc()
-		slog.Error("unable to merge raw audio", "key", ws.key, "func", "getClipHandler", "startID", start, "endID", end, "err", err)
+		slog.Error("unable to merge raw audio", "key", cs.Key, "func", "getClipHandler", "startID", start, "endID", end, "err", err)
 		return
 	}
 	defer os.Remove(mergedMediaPath) // Delete the merged raw file when done
 
-	mediaFilePath := filepath.Join(ws.mediaFolder, uniqueID+clipExt)
+	mediaFilePath := filepath.Join(cs.MediaFolder, uniqueID+clipExt)
 
 	// Note: audio has to be reencoded to m4a otherwise it will be broken. Video can be remuxed to a different container without any compatibility issues.
-	if mediaType == "mp4" {
+	if reqMediaType == "mp4" {
 		err = FfmpegRemux(mergedMediaPath, mediaFilePath)
 	} else {
 		err = FfmpegConvert(mergedMediaPath, mediaFilePath)
 	}
 	if err != nil {
 		os.Remove(mediaFilePath)
-		slog.Error("unable to convert raw media to new extension", "key", ws.key, "func", "getClipHandler", "extension", clipExt, "err", err)
+		slog.Error("unable to convert raw media to new extension", "key", cs.Key, "func", "getClipHandler", "extension", clipExt, "err", err)
 		http.Error(w, "Server error", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		return
 	}
 
-	if clipExt == ".m4a" || clipExt == ".mp3" {
-		TotalAudioClipped.WithLabelValues(ws.key).Inc()
-		StreamAudioClipped.WithLabelValues(ws.key).Inc()
-	} else if clipExt == ".mp4" {
-		TotalVideoClipped.WithLabelValues(ws.key).Inc()
-		StreamVideoClipped.WithLabelValues(ws.key).Inc()
+	switch clipExt {
+	case ".m4a", ".mp3":
+		TotalAudioClipped.WithLabelValues(cs.Key).Inc()
+		StreamAudioClipped.WithLabelValues(cs.Key).Inc()
+	case ".mp4":
+		TotalVideoClipped.WithLabelValues(cs.Key).Inc()
+		StreamVideoClipped.WithLabelValues(cs.Key).Inc()
 	}
 
 	if clipName == "" {
 		clipName = fmt.Sprintf("%d-%d", start, end)
 	}
-	unixTimeInt, err := strconv.Atoi(ws.clientData.StartTime)
+	unixTimeInt, err := strconv.Atoi(startTime)
 	unixTimeInt64 := int64(unixTimeInt)
 	if err != nil {
 		unixTimeInt64 = time.Now().Unix()
 	}
 	yymmdd := time.Unix(unixTimeInt64, 0).Format("20060102")
-	attachmentName := fmt.Sprintf("%s-%s-%s", ws.key, yymmdd, clipName)
+	attachmentName := fmt.Sprintf("%s-%s-%s", cs.Key, yymmdd, clipName)
 
 	if time.Since(processStartTime).Seconds() > 1 {
-		slog.Warn("slow clip processing time", "key", ws.key, "func", "getClipHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "start", startStr, "end", endStr, "clipName", clipName, "mediaType", mediaType)
+		slog.Warn("slow clip processing time", "key", cs.Key, "func", "getClipHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "start", startStr, "end", endStr, "clipName", clipName, "mediaType", reqMediaType)
 	}
 
 	// use BaseName rather than Name because BaseName removes / where as Name removes anything before the last /

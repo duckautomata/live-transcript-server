@@ -1,10 +1,11 @@
 module live-transcript-server
 
-go 1.25.1
+go 1.25
 
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/kennygrant/sanitize v1.2.4
+	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/prometheus/client_golang v1.23.2
 	gopkg.in/yaml.v3 v3.0.1
 )

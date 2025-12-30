@@ -1,10 +1,9 @@
 package internal
 
 import (
-	"fmt"
+	"context"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"slices"
@@ -12,105 +11,162 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func (w *WebSocketServer) readLoop(conn *websocket.Conn) error {
+func (cs *ChannelState) readLoop(conn *websocket.Conn) error {
 	for {
-		_, message, err := conn.ReadMessage()
+		var msg WebSocketMessage
+		err := conn.ReadJSON(&msg)
 		if err != nil {
 			return nil
 		}
-		slog.Debug("received message from client", "key", w.key, "func", "readLoop", "readMessage", string(message))
+		slog.Debug("received message from client", "key", cs.Key, "func", "readLoop", "event", msg.Event)
 	}
 }
 
-func (w *WebSocketServer) refreshAll(uploadTime int64, startTime time.Time) {
-	if len(w.clientData.Transcript) == 0 {
+// Send new line to all clients. If newLine is nil, then the last line from the database is used.
+func (app *App) broadcastNewLine(ctx context.Context, cs *ChannelState, uploadTime int64, newLine *Line) {
+	if newLine == nil {
+		lastLine, err := app.GetLastLine(ctx, cs.Key)
+		if err != nil {
+			slog.Error("failed to get last line for refresh", "key", cs.Key, "err", err)
+			return
+		}
+		newLine = lastLine
+	}
+	if newLine == nil {
 		return
 	}
 
-	var sb strings.Builder
-	sb.WriteString("![]refresh\n")
-
-	// w.transcriptLock.Lock()
-	lastLine := w.clientData.Transcript[len(w.clientData.Transcript)-1]
-	// w.transcriptLock.Unlock()
-
-	sb.WriteString(fmt.Sprintf("%d\n%d\n%d\n%d", lastLine.ID, lastLine.Timestamp, uploadTime, startTime.UnixMilli()))
-	for _, seg := range lastLine.Segments {
-		sb.WriteString(fmt.Sprintf("\n%d\n%s", seg.Timestamp, seg.Text))
+	data := EventNewLineData{
+		LineID:      newLine.ID,
+		Timestamp:   newLine.Timestamp,
+		UploadTime:  uploadTime,
+		EmittedTime: time.Now().UnixMilli(),
+		Segments:    newLine.Segments,
 	}
 
-	w.broadcast([]byte(sb.String()))
+	msg := WebSocketMessage{
+		Event: EventNewLine,
+		Data:  data,
+	}
+
+	cs.broadcast(msg)
 }
 
-func (w *WebSocketServer) hardRefresh(conn *websocket.Conn) {
-	// Very susecptiale to deadlock.
-	// w.clientsLock.Lock()
-	// w.streamLock.Lock()
-	// w.transcriptLock.Lock()
-	outData := HardRefreshData{
-		Event: "hardrefresh",
-		Data:  w.clientData,
+// broadcastNewMedia sends a newMedia event to all clients with the list of latest available media IDs.
+func (app *App) broadcastNewMedia(cs *ChannelState, ids []int) {
+	data := EventNewMediaData{
+		AvailableIDs: ids,
+	}
+
+	msg := WebSocketMessage{
+		Event: EventNewMedia,
+		Data:  data,
+	}
+
+	cs.broadcast(msg)
+}
+
+// Send full transcript to conn
+func (app *App) syncClient(ctx context.Context, cs *ChannelState, conn *websocket.Conn) {
+	stream, err := app.GetStream(ctx, cs.Key)
+	if err != nil {
+		slog.Error("failed to get stream for sync", "key", cs.Key, "err", err)
+		return
+	}
+	if stream == nil {
+		stream = &Stream{
+			ActiveID:    "",
+			ActiveTitle: "",
+			StartTime:   "0",
+			MediaType:   "none",
+			IsLive:      false,
+		}
+	}
+
+	syncData := &EventSyncData{
+		ActiveID:    stream.ActiveID,
+		ActiveTitle: stream.ActiveTitle,
+		StartTime:   stream.StartTime,
+		MediaType:   stream.MediaType,
+		IsLive:      stream.IsLive,
+		Transcript:  make([]Line, 0),
+	}
+
+	transcript, err := app.GetTranscript(ctx, cs.Key)
+	if err != nil {
+		slog.Error("failed to get transcript for sync", "key", cs.Key, "err", err)
+		return
+	}
+	syncData.Transcript = transcript
+
+	outData := WebSocketMessage{
+		Event: EventSync,
+		Data:  syncData,
 	}
 	startTime := time.Now()
 	MessagesTotal.Inc()
 	if err := conn.WriteJSON(outData); err != nil {
 		WebsocketError.Inc()
-		defer w.closeSocket(conn)
+		defer cs.closeSocket(conn)
 	}
 
-	// w.transcriptLock.Unlock()
-	// w.streamLock.Unlock()
-	// w.clientsLock.Unlock()
 	MessageProcessingDuration.Observe(time.Since(startTime).Seconds())
 }
 
-func (w *WebSocketServer) broadcast(msg []byte) {
+func (cs *ChannelState) broadcast(msg any) {
 	startTime := time.Now()
-	MessageSize.Observe(float64(len(msg)))
-	w.clientsLock.Lock()
-	for _, c := range w.clients {
+	// MessageSize.Observe(float64(len(msg))) // Size metric is hard with any
+	cs.ClientsLock.Lock()
+	for _, c := range cs.Clients {
 		MessagesTotal.Inc()
-		go func(msg []byte) {
-			if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+		go func(msg any, c *websocket.Conn) {
+			if err := c.WriteJSON(msg); err != nil {
 				WebsocketError.Inc()
-				defer w.closeSocket(c)
+				cs.closeSocket(c)
 			}
-		}(msg)
+		}(msg, c)
 	}
-	w.clientsLock.Unlock()
+	cs.ClientsLock.Unlock()
 	MessageProcessingDuration.Observe(time.Since(startTime).Seconds())
 }
 
-func (w *WebSocketServer) closeSocket(conn *websocket.Conn) error {
+func (cs *ChannelState) closeSocket(conn *websocket.Conn) error {
 	ActiveConnections.Dec()
-	ClientsPerKey.WithLabelValues(w.key).Dec()
+	ClientsPerKey.WithLabelValues(cs.Key).Dec()
 
-	w.clientsLock.Lock()
-	for i, c := range w.clients {
+	cs.ClientsLock.Lock()
+	for i, c := range cs.Clients {
 		if c == conn {
-			w.clients = slices.Delete(w.clients, i, i+1)
+			cs.Clients = slices.Delete(cs.Clients, i, i+1)
 			break
 		}
 	}
-	w.clientConnections--
-	w.clientsLock.Unlock()
+	cs.ClientConnections--
+	cs.ClientsLock.Unlock()
 	return conn.Close()
 }
 
-func (ws *WebSocketServer) wsHandler(w http.ResponseWriter, r *http.Request) {
-	if ws.clientConnections >= ws.maxConn {
+func (app *App) wsHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		return
+	}
+
+	if cs.ClientConnections >= app.MaxConn {
 		http.Error(w, "Max number of connection already reached", http.StatusBadRequest)
-		slog.Error("max number of connections already reached", "key", ws.key, "func", "wsHandler", "maxConn", ws.maxConn)
+		slog.Error("max number of connections already reached", "key", cs.Key, "func", "wsHandler", "maxConn", app.MaxConn)
 		WebsocketError.Inc()
 		return
 	}
 
-	conn, err := ws.upgrader.Upgrade(w, r, nil)
+	conn, err := app.Upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		if _, ok := err.(websocket.HandshakeError); !ok {
-			slog.Error("unable to establish handshake with client", "key", ws.key, "func", "wsHandler", "err", err)
+			slog.Error("unable to establish handshake with client", "key", cs.Key, "func", "wsHandler", "err", err)
 		} else {
-			slog.Error("unable to initiate ws connection", "key", ws.key, "func", "wsHandler", "err", err)
+			slog.Error("unable to initiate ws connection", "key", cs.Key, "func", "wsHandler", "err", err)
 		}
 		WebsocketError.Inc()
 		return
@@ -118,23 +174,23 @@ func (ws *WebSocketServer) wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	ActiveConnections.Inc()
 	TotalConnections.Inc()
-	ClientsPerKey.WithLabelValues(ws.key).Inc()
+	ClientsPerKey.WithLabelValues(cs.Key).Inc()
 	startTime := time.Now()
 
-	ws.clientsLock.Lock()
-	ws.clientConnections++
-	ws.clients = append(ws.clients, conn)
-	ws.clientsLock.Unlock()
+	cs.ClientsLock.Lock()
+	cs.ClientConnections++
+	cs.Clients = append(cs.Clients, conn)
+	cs.ClientsLock.Unlock()
 	defer func() {
 		ConnectionDuration.Observe(time.Since(startTime).Seconds())
-		ws.closeSocket(conn)
+		cs.closeSocket(conn)
 	}()
 
-	ws.hardRefresh(conn)
+	app.syncClient(r.Context(), cs, conn)
 
-	err = ws.readLoop(conn)
+	err = cs.readLoop(conn)
 	if err != nil {
-		slog.Error("error in clients readloop", "key", ws.key, "func", "wsHandler", "err", err)
+		slog.Error("error in clients readloop", "key", cs.Key, "func", "wsHandler", "err", err)
 		WebsocketError.Inc()
 	}
 }

@@ -1,9 +1,7 @@
 package internal
 
 import (
-	"bytes"
 	"encoding/base64"
-	"encoding/gob"
 	"fmt"
 	"io"
 	"os"
@@ -11,51 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 )
-
-func (g *GobArchive) GobToClientData(dataBuffer *bytes.Reader) (*ClientData, error) {
-	if dataBuffer == nil {
-		return nil, fmt.Errorf("dataBuffer must not be nil")
-	}
-	decoder := gob.NewDecoder(dataBuffer)
-
-	var data ClientData
-	if err := decoder.Decode(&data); err != nil {
-		return nil, err
-	}
-
-	return &data, nil
-}
-
-func (g *GobArchive) FileToClientData() (*ClientData, error) {
-	file, err := os.Open(g.fileName)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	decoder := gob.NewDecoder(file)
-	var data ClientData
-	if err := decoder.Decode(&data); err != nil {
-		return nil, err
-	}
-
-	return &data, nil
-}
-
-func (g *GobArchive) ClientDataToFile(data *ClientData) error {
-	file, err := os.Create(g.fileName)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := gob.NewEncoder(file)
-	if err := encoder.Encode(data); err != nil {
-		return err
-	}
-
-	return nil
-}
 
 // example/name.abc -> example/name.def
 func ChangeExtension(filePath string, newExtension string) string {
@@ -94,7 +47,7 @@ func FfmpegRemux(inputFilePath, outputFilePath string) error {
 	return nil
 }
 
-func FfmpegConvert(inputFilePath, outputFilePath string) error {
+var FfmpegConvert = func(inputFilePath, outputFilePath string) error {
 	var cmd *exec.Cmd
 
 	switch runtime.GOOS {
@@ -117,15 +70,15 @@ func FfmpegConvert(inputFilePath, outputFilePath string) error {
 }
 
 // converts a b64 endocing of binary media data and saves it to a file. Returns file path
-func (w *WebSocketServer) RawB64ToFile(rawB64 string, id int, ext string) (string, error) {
-	filePath := filepath.Join(w.mediaFolder, fmt.Sprintf("%d.raw", id))
+func (cs *ChannelState) RawB64ToFile(rawB64 string, id int, ext string) (string, error) {
+	filePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.raw", id))
 
 	decodedData, err := base64.StdEncoding.DecodeString(rawB64)
 	if err != nil {
 		return "", fmt.Errorf("error, unable to decode b64 media: %v", err)
 	}
 
-	os.MkdirAll(w.mediaFolder, 0755)
+	os.MkdirAll(cs.MediaFolder, 0755)
 	err = os.WriteFile(filePath, decodedData, 0755)
 	if err != nil {
 		return "", fmt.Errorf("error, unable to write media to file '%s': %v", filePath, err)
@@ -135,8 +88,8 @@ func (w *WebSocketServer) RawB64ToFile(rawB64 string, id int, ext string) (strin
 }
 
 // Binary copy all raw chunks into a single raw file. start and end are inclusive. Returns the merged media path.
-func (w *WebSocketServer) MergeRawAudio(start, end int, uniqueID string) (string, error) {
-	rawFilePath := filepath.Join(w.mediaFolder, fmt.Sprintf("%s.raw", uniqueID))
+func (cs *ChannelState) MergeRawAudio(start, end int, uniqueID string) (string, error) {
+	rawFilePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%s.raw", uniqueID))
 
 	// Merge raw media into a single raw file
 	outputFile, err := os.Create(rawFilePath)
@@ -146,7 +99,7 @@ func (w *WebSocketServer) MergeRawAudio(start, end int, uniqueID string) (string
 	defer outputFile.Close()
 
 	for i := start; i <= end; i++ {
-		inputFilename := filepath.Join(w.mediaFolder, fmt.Sprintf("%d.raw", i))
+		inputFilename := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.raw", i))
 		inputFile, err := os.Open(inputFilename)
 		if os.IsNotExist(err) {
 			return "", fmt.Errorf("file '%s' not found", inputFilename)
@@ -166,7 +119,7 @@ func (w *WebSocketServer) MergeRawAudio(start, end int, uniqueID string) (string
 	return rawFilePath, nil
 }
 
-func (w *WebSocketServer) ResetAudioFile() {
-	os.RemoveAll(w.mediaFolder)
-	os.MkdirAll(w.mediaFolder, 0755)
+func (cs *ChannelState) ResetAudioFile() {
+	os.RemoveAll(cs.MediaFolder)
+	os.MkdirAll(cs.MediaFolder, 0755)
 }

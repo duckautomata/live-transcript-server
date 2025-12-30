@@ -1,7 +1,7 @@
 package internal
 
 import (
-	"fmt"
+	"database/sql"
 	"net/http"
 	"path/filepath"
 	"sync"
@@ -9,16 +9,32 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-type Segments struct {
+// ===== Data Models =====
+
+type Segment struct {
 	Timestamp int    `json:"timestamp"`
 	Text      string `json:"text"`
 }
+
 type Line struct {
-	ID        int        `json:"id"`
-	Timestamp int        `json:"timestamp"`
-	Segments  []Segments `json:"segments"`
+	ID             int       `json:"id"`
+	Timestamp      int       `json:"timestamp"`
+	Segments       []Segment `json:"segments"`
+	MediaAvailable bool      `json:"mediaAvailable"`
 }
-type ClientData struct {
+
+// Stream represents the state of a stream for a channel in the database.
+type Stream struct {
+	ChannelID   string `json:"channelId"`
+	ActiveID    string `json:"activeId"`
+	ActiveTitle string `json:"activeTitle"`
+	StartTime   string `json:"startTime"`
+	IsLive      bool   `json:"isLive"`
+	MediaType   string `json:"mediaType"`
+}
+
+// WorkerData represents the full state of the worker. Used to sync the server with the worker.
+type WorkerData struct {
 	ActiveID    string `json:"activeId"`
 	ActiveTitle string `json:"activeTitle"`
 	StartTime   string `json:"startTime"`
@@ -27,69 +43,111 @@ type ClientData struct {
 	Transcript  []Line `json:"transcript"`
 }
 
-type UpdateData struct {
-	NewLine    Line   `json:"line"`
-	RawB64Data string `json:"rawB64Data"`
+// ===== Client Events =====
+
+type EventType string
+
+const (
+	EventNewLine   EventType = "newLine"
+	EventNewStream EventType = "newStream"
+	EventStatus    EventType = "status"
+	EventSync      EventType = "sync"
+	EventNewMedia  EventType = "newMedia"
+)
+
+// WebSocketMessage represents a message sent over the WebSocket connection.
+type WebSocketMessage struct {
+	Event EventType `json:"event"`
+	Data  any       `json:"data"`
 }
 
-type HardRefreshData struct {
-	Event string      `json:"event"`
-	Data  *ClientData `json:"clientData"`
+// EventSyncData represents the data sent to sync the client with the server.
+type EventSyncData struct {
+	ActiveID    string `json:"activeId"`
+	ActiveTitle string `json:"activeTitle"`
+	StartTime   string `json:"startTime"`
+	IsLive      bool   `json:"isLive"`
+	MediaType   string `json:"mediaType"`
+	Transcript  []Line `json:"transcript"`
 }
 
-type GobArchive struct {
-	fileName string
+// EventNewLineData represents the data sent to notify the client of a new line in the transcript.
+type EventNewLineData struct {
+	LineID         int       `json:"lineId"`
+	Timestamp      int       `json:"timestamp"`
+	UploadTime     int64     `json:"uploadTime"`
+	EmittedTime    int64     `json:"emittedTime"`
+	MediaAvailable bool      `json:"mediaAvailable"`
+	Segments       []Segment `json:"segments"`
 }
 
-type WebSocketServer struct {
-	key               string
-	apiKey            string
-	streamLock        sync.Mutex
-	transcriptLock    sync.Mutex
-	clientsLock       sync.Mutex
-	upgrader          websocket.Upgrader
-	archive           *GobArchive
-	clientData        *ClientData
-	clients           []*websocket.Conn
-	maxConn           int
-	clientConnections int
-	maxClipSize       int
-	mediaFolder       string
+// EventNewStreamData represents the data sent to notify the client of a new stream.
+type EventNewStreamData struct {
+	ActiveID    string `json:"activeId"`
+	ActiveTitle string `json:"activeTitle"`
+	StartTime   string `json:"startTime"`
+	MediaType   string `json:"mediaType"`
+	IsLive      bool   `json:"isLive"`
 }
 
-func NewGobArchive(filename string) *GobArchive {
-	return &GobArchive{
-		fileName: filename,
-	}
+// EventStatusData represents the data sent to notify the client of a change in the stream status.
+type EventStatusData struct {
+	ActiveID    string `json:"activeId"`
+	ActiveTitle string `json:"activeTitle"`
+	IsLive      bool   `json:"isLive"`
 }
 
-func NewClientData() *ClientData {
-	return &ClientData{
-		ActiveID:    "",
-		ActiveTitle: "",
-		StartTime:   "",
-		MediaType:   "none",
-		IsLive:      false,
-		Transcript:  make([]Line, 0),
-	}
+// EventNewMediaData represents the data sent to notify the client of available media.
+type EventNewMediaData struct {
+	AvailableIDs []int `json:"ids"`
 }
 
-func NewWebSocketServer(key string, apiKey string) *WebSocketServer {
-	return &WebSocketServer{
-		key:    key,
-		apiKey: apiKey,
-		upgrader: websocket.Upgrader{
+// ===== Server State =====
+
+// ChannelState holds the state and connections for a specific channel.
+type ChannelState struct {
+	Key               string
+	ClientsLock       sync.Mutex
+	Clients           []*websocket.Conn
+	ClientConnections int
+	MediaFolder       string
+}
+
+// App holds the application-wide dependencies and configuration.
+type App struct {
+	ApiKey      string
+	DB          *sql.DB
+	Upgrader    websocket.Upgrader
+	Channels    map[string]*ChannelState
+	MaxConn     int
+	MaxClipSize int
+	TempDir     string
+}
+
+func NewApp(apiKey string, db *sql.DB, channelsConfig []string, tempDir string) *App {
+	app := &App{
+		ApiKey: apiKey,
+		DB:     db,
+		Upgrader: websocket.Upgrader{
 			ReadBufferSize:    1024,
 			WriteBufferSize:   1024,
 			EnableCompression: true,
 			CheckOrigin:       func(r *http.Request) bool { return true },
 		},
-		archive:           NewGobArchive(filepath.Join("tmp", key, fmt.Sprintf("%s.gob", key))),
-		clients:           make([]*websocket.Conn, 0, 1000),
-		clientData:        NewClientData(),
-		maxConn:           1000,
-		clientConnections: 0,
-		maxClipSize:       30,
-		mediaFolder:       filepath.Join("tmp", key, "media"),
+		Channels:    make(map[string]*ChannelState),
+		MaxConn:     2000,
+		MaxClipSize: 30,
+		TempDir:     tempDir,
 	}
+
+	for _, key := range channelsConfig {
+		app.Channels[key] = &ChannelState{
+			Key:               key,
+			Clients:           make([]*websocket.Conn, 0, 1000),
+			MediaFolder:       filepath.Join(app.TempDir, key, "media"),
+			ClientConnections: 0,
+		}
+	}
+
+	return app
 }
