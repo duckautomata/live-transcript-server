@@ -43,6 +43,7 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{channel}/websocket", app.wsHandler)
 	mux.HandleFunc("GET /{channel}/audio", app.getAudioHandler)
 	mux.HandleFunc("GET /{channel}/clip", app.getClipHandler)
+	mux.HandleFunc("GET /{channel}/frame", app.getFrameHandler)
 }
 
 func (app *App) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -396,6 +397,16 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract first frame if video
+	stream, err := app.GetStream(r.Context(), cs.Key)
+	if err == nil && stream != nil && stream.MediaType == "video" {
+		jpgFile := ChangeExtension(rawFilePath, ".jpg")
+		if err := FfmpegExtractFrame(rawFilePath, jpgFile, 480); err != nil {
+			slog.Error("unable to extract frame", "key", cs.Key, "func", "mediaHandler", "err", err)
+			// Don't fail the request if frame extraction fails
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Media received and processed successfully"))
 
@@ -614,6 +625,85 @@ func (app *App) getAudioHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s_%d.m4a\"", activeID, id))
 	}
 	w.Header().Set("Content-Type", "audio/mp4")
+	http.ServeFile(w, r, filePath)
+}
+
+func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "getFrameHandler", "key", key)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Invalid request", http.StatusMethodNotAllowed)
+		Http400Errors.Inc()
+		slog.Warn("invalid request. Method is not a GET", "key", cs.Key, "func", "getFrameHandler", "method", r.Method)
+		return
+	}
+
+	stream, err := app.GetStream(r.Context(), cs.Key)
+	mediaType := "none"
+	activeID := ""
+	if err == nil && stream != nil {
+		mediaType = stream.MediaType
+		activeID = stream.ActiveID
+	}
+
+	if mediaType != "video" {
+		http.Error(w, "Frame download is disabled for this stream", http.StatusMethodNotAllowed)
+		Http400Errors.Inc()
+		slog.Warn("cannot retrieve frame. Media type is not video", "key", cs.Key, "func", "getFrameHandler", "mediaType", mediaType)
+		return
+	}
+	processStartTime := time.Now()
+
+	// Extract the ID from the query parameter
+	query := r.URL.Query()
+	idStr := query.Get("id")
+	requestedStreamID := query.Get("stream_id")
+
+	if requestedStreamID != "" && requestedStreamID != activeID {
+		http.Error(w, "Stream ID mismatch", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("stream id mismatch", "key", cs.Key, "func", "getFrameHandler", "requestedStreamID", requestedStreamID, "activeID", activeID)
+		return
+	}
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		Http400Errors.Inc()
+		slog.Warn("unable to convert id to int", "key", cs.Key, "func", "getFrameHandler", "id", idStr, "err", err)
+		return
+	}
+
+	filePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.jpg", id))
+
+	// Check if the file exists
+	_, err = os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "No frame found", http.StatusNotFound)
+			Http400Errors.Inc()
+			slog.Warn("no frame file found for the requested id", "key", cs.Key, "func", "getFrameHandler", "id", id)
+			return
+		}
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		slog.Error("unable to check frame file", "key", cs.Key, "func", "getFrameHandler", "id", id, "err", err)
+		return
+	}
+
+	if time.Since(processStartTime).Seconds() > 1 {
+		slog.Warn("slow frame processing time", "key", cs.Key, "func", "getFrameHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "id", idStr)
+	}
+
+	w.Header().Set("Cache-Control", "public, max-age=31536000") // Cache for 1 year, as frames are immutable for an ID. The browser will grab new frames when the stream id changes.
+	w.Header().Set("Content-Type", "image/jpeg")
 	http.ServeFile(w, r, filePath)
 }
 

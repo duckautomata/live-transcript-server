@@ -69,6 +69,39 @@ var FfmpegConvert = func(inputFilePath, outputFilePath string) error {
 	return nil
 }
 
+var FfmpegExtractFrame = func(inputFilePath, outputFilePath string, height int) error {
+	var cmd *exec.Cmd
+
+	// -vf "scale=-1:height" maintains aspect ratio while setting height
+	scaleFilter := fmt.Sprintf("scale=-1:%d", height)
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("ffmpeg",
+			"-i", inputFilePath,
+			"-vframes", "1",
+			"-vf", scaleFilter,
+			"-q:v", "5", // Standard quality for jpeg
+			outputFilePath)
+	case "darwin", "linux":
+		cmd = exec.Command("ffmpeg",
+			"-i", inputFilePath,
+			"-vframes", "1",
+			"-vf", scaleFilter,
+			"-q:v", "5",
+			outputFilePath)
+	default:
+		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg frame extraction failed: %w, output: %s", err, string(output))
+	}
+
+	return nil
+}
+
 // converts a b64 endocing of binary media data and saves it to a file. Returns file path
 func (cs *ChannelState) RawB64ToFile(rawB64 string, id int, ext string) (string, error) {
 	filePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.raw", id))
