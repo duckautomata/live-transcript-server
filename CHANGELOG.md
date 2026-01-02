@@ -10,7 +10,7 @@ Using version [1.6](#16-2025-12-18)
 ## 2.1 (2026-01-01)
 **Changes**
 - Extract first frame of media for every line
-- Added /frame endpoint
+- Added /frame endpoint and metrics for it
 
 ## 2.0 (2025-12-30)
 **Changes**

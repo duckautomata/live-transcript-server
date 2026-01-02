@@ -77,6 +77,7 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 	// If no stream exists, or the ID is different, it's a new stream
 	if currentStream == nil || currentStream.ActiveID != activeId {
 		StreamAudioPlayed.WithLabelValues(cs.Key).Set(0)
+		StreamFramesDownloads.WithLabelValues(cs.Key).Set(0)
 		StreamAudioClipped.WithLabelValues(cs.Key).Set(0)
 		StreamVideoClipped.WithLabelValues(cs.Key).Set(0)
 
@@ -697,6 +698,9 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("unable to check frame file", "key", cs.Key, "func", "getFrameHandler", "id", id, "err", err)
 		return
 	}
+
+	TotalFramesDownloads.WithLabelValues(cs.Key).Inc()
+	StreamFramesDownloads.WithLabelValues(cs.Key).Inc()
 
 	if time.Since(processStartTime).Seconds() > 1 {
 		slog.Warn("slow frame processing time", "key", cs.Key, "func", "getFrameHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "id", idStr)
