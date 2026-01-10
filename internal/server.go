@@ -43,6 +43,8 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{channel}/websocket", app.wsHandler)
 	mux.HandleFunc("GET /{channel}/audio", app.getAudioHandler)
 	mux.HandleFunc("GET /{channel}/clip", app.getClipHandler)
+	mux.HandleFunc("GET /{channel}/download", app.downloadHandler)
+	mux.HandleFunc("GET /{channel}/trim", app.trimHandler)
 	mux.HandleFunc("GET /{channel}/frame", app.getFrameHandler)
 }
 
@@ -59,6 +61,32 @@ func (app *App) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// Adds the necessary CORS headers to all responses.
+// Accepts any origin.
+func CorsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set the allowed origin.
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		// Set the allowed methods
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+		// Set the allowed headers
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
+
+		// Handle preflight OPTIONS requests
+		// This is sent by the browser to check permissions *before*
+		// sending the actual request.
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Serve the next handler in the chain
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Activate a stream and send a message to all clients.
@@ -754,8 +782,6 @@ func (app *App) getClipHandler(w http.ResponseWriter, r *http.Request) {
 	end, err2 := strconv.Atoi(endStr)
 
 	clipExt := ".m4a"
-	contentType := "audio/mp4"
-
 	switch reqMediaType {
 	case "mp4":
 		if mediaType != "video" {
@@ -765,14 +791,11 @@ func (app *App) getClipHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		clipExt = ".mp4"
-		contentType = "video/mp4"
 	case "mp3":
 		clipExt = ".mp3"
-		contentType = "audio/mpeg"
 	case "m4a", "":
 		// Default to m4a
 		clipExt = ".m4a"
-		contentType = "audio/mp4"
 	default:
 		http.Error(w, "Invalid media type", http.StatusBadRequest)
 		Http400Errors.Inc()
@@ -814,7 +837,7 @@ func (app *App) getClipHandler(w http.ResponseWriter, r *http.Request) {
 
 	mediaFilePath := filepath.Join(cs.MediaFolder, uniqueID+clipExt)
 
-	// Note: audio has to be reencoded to m4a otherwise it will be broken. Video can be remuxed to a different container without any compatibility issues.
+	// Note: audio has to be recoded to m4a otherwise it will be broken. Video can be remixed to a different container without any compatibility issues.
 	if reqMediaType == "mp4" {
 		err = FfmpegRemux(mergedMediaPath, mediaFilePath)
 	} else {
@@ -855,7 +878,155 @@ func (app *App) getClipHandler(w http.ResponseWriter, r *http.Request) {
 	// use BaseName rather than Name because BaseName removes / where as Name removes anything before the last /
 	// Also BaseName preserves capitalization.
 	sanitizedName := sanitize.BaseName(attachmentName)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s%s\"", sanitizedName, clipExt))
+	writeJSON(w, map[string]string{
+		"id":       uniqueID,
+		"filename": sanitizedName,
+	})
+}
+
+func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "downloadHandler", "key", key)
+		return
+	}
+
+	query := r.URL.Query()
+	id := query.Get("id")
+	stream := query.Get("stream")
+	filename := query.Get("filename")
+
+	if id == "" {
+		http.Error(w, "Missing id", http.StatusBadRequest)
+		return
+	}
+
+	if stream != "true" && filename == "" {
+		http.Error(w, "Missing filename", http.StatusBadRequest)
+		return
+	}
+
+	// Find the file. It could be .m4a, .mp4, .mp3, or .jpg
+	var filePath string
+	var contentType string
+	var ext string
+	extensions := []string{".m4a", ".mp4", ".mp3", ".jpg"}
+	contentTypes := map[string]string{
+		".m4a": "audio/mp4",
+		".mp4": "video/mp4",
+		".mp3": "audio/mpeg",
+		".jpg": "image/jpeg",
+	}
+
+	for _, e := range extensions {
+		path := filepath.Join(cs.MediaFolder, id+e)
+		if _, err := os.Stat(path); err == nil {
+			filePath = path
+			ext = e
+			contentType = contentTypes[e]
+			break
+		}
+	}
+
+	if filePath == "" {
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+
+	if stream != "true" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s%s\"", filename, ext))
+	}
 	w.Header().Set("Content-Type", contentType)
-	http.ServeFile(w, r, mediaFilePath)
+	http.ServeFile(w, r, filePath)
+}
+
+func (app *App) trimHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "trimHandler", "key", key)
+		return
+	}
+
+	query := r.URL.Query()
+	id := query.Get("id")
+	startStr := query.Get("start")
+	endStr := query.Get("end")
+	filename := query.Get("filename")
+
+	if id == "" || startStr == "" || endStr == "" || filename == "" {
+		http.Error(w, "Missing required parameters", http.StatusBadRequest)
+		return
+	}
+
+	start, err := strconv.ParseFloat(startStr, 64)
+	if err != nil {
+		http.Error(w, "Invalid start time", http.StatusBadRequest)
+		return
+	}
+	end, err := strconv.ParseFloat(endStr, 64)
+	if err != nil {
+		http.Error(w, "Invalid end time", http.StatusBadRequest)
+		return
+	}
+
+	// Find source file
+	var srcPath string
+	var ext string
+	var contentType string
+	extensions := []string{".m4a", ".mp4", ".mp3"}
+	contentTypes := map[string]string{
+		".m4a": "audio/mp4",
+		".mp4": "video/mp4",
+		".mp3": "audio/mpeg",
+	}
+
+	for _, e := range extensions {
+		path := filepath.Join(cs.MediaFolder, id+e)
+		if _, err := os.Stat(path); err == nil {
+			srcPath = path
+			ext = e
+			contentType = contentTypes[e]
+			break
+		}
+	}
+
+	if srcPath == "" {
+		http.Error(w, "Source file not found", http.StatusNotFound)
+		return
+	}
+
+	trimmedID := fmt.Sprintf("%s-trimmed-%d", id, time.Now().UnixNano())
+	trimmedPath := filepath.Join(cs.MediaFolder, trimmedID+ext)
+
+	if err := FfmpegTrim(srcPath, trimmedPath, start, end); err != nil {
+		slog.Error("failed to trim file", "err", err)
+		http.Error(w, "Failed to trim file", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(trimmedPath)
+
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s%s\"", filename, ext))
+	w.Header().Set("Content-Type", contentType)
+	http.ServeFile(w, r, trimmedPath)
+}
+
+// --- HTTP Helper Functions ---
+
+func writeJSON(w http.ResponseWriter, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		slog.Error("failed to write JSON response", "err", err)
+	}
+}
+
+func writeError(w http.ResponseWriter, code int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	writeJSON(w, map[string]string{"error": message})
 }

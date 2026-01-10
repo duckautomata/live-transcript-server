@@ -1,11 +1,16 @@
 # latest
-Using version [2.1](#21-2026-01-01)
+Using version [2.2](#22-2026-01-10)
 
 # Major version 2
-Using version [2.1](#21-2026-01-01)
+Using version [2.2](#22-2026-01-10)
 
 # Major version 1
 Using version [1.6](#16-2025-12-18)
+
+## 2.2 (2026-01-10)
+**Changes**
+- Changed how clipping is handled.
+- added new endpoints to download and trim media.
 
 ## 2.1 (2026-01-01)
 **Changes**

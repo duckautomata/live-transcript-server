@@ -19,7 +19,7 @@ func ChangeExtension(filePath string, newExtension string) string {
 	return filePath + newExtension
 }
 
-func FfmpegRemux(inputFilePath, outputFilePath string) error {
+var FfmpegRemux = func(inputFilePath, outputFilePath string) error {
 	var cmd *exec.Cmd
 
 	switch runtime.GOOS {
@@ -28,12 +28,14 @@ func FfmpegRemux(inputFilePath, outputFilePath string) error {
 			"-i", inputFilePath,
 			"-c", "copy",
 			"-movflags", "+faststart",
+			"-y", // Overwrite output file
 			outputFilePath)
 	case "darwin", "linux":
 		cmd = exec.Command("ffmpeg",
 			"-i", inputFilePath,
 			"-c", "copy",
 			"-movflags", "+faststart",
+			"-y", // Overwrite output file
 			outputFilePath)
 	default:
 		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
@@ -53,10 +55,10 @@ var FfmpegConvert = func(inputFilePath, outputFilePath string) error {
 	switch runtime.GOOS {
 	case "windows":
 		// Added -vn to disable video recording, keeping only the audio channel
-		cmd = exec.Command("ffmpeg", "-i", inputFilePath, "-vn", outputFilePath)
+		cmd = exec.Command("ffmpeg", "-i", inputFilePath, "-vn", "-movflags", "+faststart", "-y", outputFilePath)
 	case "darwin", "linux":
 		// Added -vn to disable video recording, keeping only the audio channel
-		cmd = exec.Command("ffmpeg", "-i", inputFilePath, "-vn", outputFilePath)
+		cmd = exec.Command("ffmpeg", "-i", inputFilePath, "-vn", "-movflags", "+faststart", "-y", outputFilePath)
 	default:
 		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
@@ -82,6 +84,7 @@ var FfmpegExtractFrame = func(inputFilePath, outputFilePath string, height int) 
 			"-vframes", "1",
 			"-vf", scaleFilter,
 			"-q:v", "5", // Standard quality for jpeg
+			"-y",
 			outputFilePath)
 	case "darwin", "linux":
 		cmd = exec.Command("ffmpeg",
@@ -89,6 +92,7 @@ var FfmpegExtractFrame = func(inputFilePath, outputFilePath string, height int) 
 			"-vframes", "1",
 			"-vf", scaleFilter,
 			"-q:v", "5",
+			"-y",
 			outputFilePath)
 	default:
 		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
@@ -97,6 +101,36 @@ var FfmpegExtractFrame = func(inputFilePath, outputFilePath string, height int) 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg frame extraction failed: %w, output: %s", err, string(output))
+	}
+
+	return nil
+}
+
+var FfmpegTrim = func(inputFilePath, outputFilePath string, start, end float64) error {
+	var cmd *exec.Cmd
+
+	duration := end - start
+	if duration <= 0 {
+		return fmt.Errorf("invalid duration: %f", duration)
+	}
+
+	switch runtime.GOOS {
+	case "windows", "darwin", "linux":
+		cmd = exec.Command("ffmpeg",
+			"-ss", fmt.Sprintf("%f", start),
+			"-i", inputFilePath,
+			"-t", fmt.Sprintf("%f", duration),
+			"-c", "copy",
+			"-movflags", "+faststart",
+			"-y",
+			outputFilePath)
+	default:
+		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg trim failed: %w, output: %s", err, string(output))
 	}
 
 	return nil

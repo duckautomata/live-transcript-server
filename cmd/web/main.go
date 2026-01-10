@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"live-transcript-server/internal"
 	"log/slog"
@@ -81,9 +82,18 @@ func main() {
 	mux.HandleFunc("GET /version", versionHandler)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
+	corsHandler := internal.CorsMiddleware(mux)
+	server := &http.Server{
+		Addr:         ":8080",
+		Handler:      corsHandler,
+		ReadTimeout:  2 * time.Minute,
+		WriteTimeout: 4 * time.Minute,
+		IdleTimeout:  4 * time.Minute,
+	}
+
 	slog.Info("WebSocket server listening on port 8080", "func", "main")
-	err = http.ListenAndServe(":8080", mux)
-	if err != nil {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("unable to start WebSocket server", "func", "main", "err", err)
+		os.Exit(1)
 	}
 }
