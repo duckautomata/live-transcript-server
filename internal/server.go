@@ -717,8 +717,7 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "No frame found", http.StatusNotFound)
-			Http400Errors.Inc()
-			slog.Warn("no frame file found for the requested id", "key", cs.Key, "func", "getFrameHandler", "id", id)
+			// Don't consider this an error as it will flood the logs.
 			return
 		}
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)

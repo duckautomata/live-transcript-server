@@ -106,6 +106,7 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, conn *websocke
 	startTime := time.Now()
 	MessagesTotal.Inc()
 	if err := conn.WriteJSON(outData); err != nil {
+		slog.Error("failed to write sync message to client", "key", cs.Key, "err", err)
 		WebsocketError.Inc()
 		defer cs.closeSocket(conn)
 	}
@@ -121,6 +122,7 @@ func (cs *ChannelState) broadcast(msg any) {
 		MessagesTotal.Inc()
 		go func(msg any, c *websocket.Conn) {
 			if err := c.WriteJSON(msg); err != nil {
+				slog.Error("failed to write message to client", "key", cs.Key, "err", err)
 				WebsocketError.Inc()
 				cs.closeSocket(c)
 			}
@@ -131,19 +133,22 @@ func (cs *ChannelState) broadcast(msg any) {
 }
 
 func (cs *ChannelState) closeSocket(conn *websocket.Conn) error {
-	ActiveConnections.Dec()
-	ClientsPerKey.WithLabelValues(cs.Key).Dec()
-
 	cs.ClientsLock.Lock()
+	defer cs.ClientsLock.Unlock()
+
 	for i, c := range cs.Clients {
 		if c == conn {
 			cs.Clients = slices.Delete(cs.Clients, i, i+1)
-			break
+			cs.ClientConnections--
+
+			ActiveConnections.Dec()
+			ClientsPerKey.WithLabelValues(cs.Key).Dec()
+
+			return conn.Close()
 		}
 	}
-	cs.ClientConnections--
-	cs.ClientsLock.Unlock()
-	return conn.Close()
+	// Connection already closed or not found
+	return nil
 }
 
 func (app *App) wsHandler(w http.ResponseWriter, r *http.Request) {

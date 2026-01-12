@@ -133,3 +133,77 @@ func TestWebsocketMaxConnections(t *testing.T) {
 	}
 	// Note: Gorilla dialer returns error on non-200 handshake usually.
 }
+
+func TestWebsocketDoubleClose(t *testing.T) {
+	key := "test-ws-double-close"
+	app, mux, db := setupTestApp(t, []string{key})
+	defer db.Close()
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/" + key + "/websocket"
+
+	// Connect
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial ws: %v", err)
+	}
+	// We do NOT defer ws.Close() here because we want to manually close it via server side to test
+
+	// Get ChannelState
+	cs, ok := app.Channels[key]
+	if !ok {
+		t.Fatalf("channel state not found for key %s", key)
+	}
+
+	// Wait for connection to be registered (it happens in wsHandler goroutine)
+	// We can loop check cs.ClientConnections
+	// Simple retry loop
+	registered := false
+	for i := 0; i < 10; i++ {
+		cs.ClientsLock.Lock()
+		if cs.ClientConnections == 1 {
+			registered = true
+			cs.ClientsLock.Unlock()
+			break
+		}
+		cs.ClientsLock.Unlock()
+		// Sleep a tiny bit?
+	}
+	if !registered {
+		t.Fatal("client did not register in time")
+	}
+
+	cs.ClientsLock.Lock()
+	conn := cs.Clients[0]
+	cs.ClientsLock.Unlock()
+
+	// Initial check
+	if cs.ClientConnections != 1 {
+		t.Errorf("expected 1 connection, got %d", cs.ClientConnections)
+	}
+
+	// First Close
+	err = cs.closeSocket(conn)
+	if err != nil {
+		t.Logf("first closeSocket returned error (might be expected if conn closed): %v", err)
+	}
+
+	// Check
+	if cs.ClientConnections != 0 {
+		t.Errorf("expected 0 connections after first close, got %d", cs.ClientConnections)
+	}
+
+	// Second Close (Duplicate)
+	err = cs.closeSocket(conn)
+	if err != nil {
+		t.Logf("second closeSocket returned error: %v", err)
+	}
+
+	// Check again - should still be 0, NOT -1
+	if cs.ClientConnections != 0 {
+		t.Errorf("expected 0 connections after second close, got %d", cs.ClientConnections)
+	}
+
+	ws.Close() // Clean up client side
+}
