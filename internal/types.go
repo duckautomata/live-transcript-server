@@ -135,7 +135,7 @@ func NewApp(apiKey string, db *sql.DB, channelsConfig []string, tempDir string) 
 			CheckOrigin:       func(r *http.Request) bool { return true },
 		},
 		Channels:    make(map[string]*ChannelState),
-		MaxConn:     2000,
+		MaxConn:     10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
 		MaxClipSize: 30,
 		TempDir:     tempDir,
 	}
