@@ -84,11 +84,10 @@ func main() {
 
 	corsHandler := internal.CorsMiddleware(mux)
 	server := &http.Server{
-		Addr:         ":8080",
-		Handler:      corsHandler,
-		ReadTimeout:  2 * time.Minute,
-		WriteTimeout: 4 * time.Minute,
-		IdleTimeout:  4 * time.Minute,
+		Addr:              ":8080",
+		Handler:           corsHandler,
+		ReadHeaderTimeout: 10 * time.Second,  // Protects the handshake but doesn't kill the WebSocket stream.
+		IdleTimeout:       120 * time.Second, // HTTP Keep-Alive (reusing connection for new requests), does not affect WebSocket connection.
 	}
 
 	slog.Info("WebSocket server listening on port 8080", "func", "main")
