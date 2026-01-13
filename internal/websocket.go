@@ -2,14 +2,40 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
+	"syscall"
 	"time"
 
 	"slices"
 
 	"github.com/gorilla/websocket"
 )
+
+// isClientDisconnectError checks if the error is due to a client disconnecting.
+func isClientDisconnectError(err error) bool {
+	// 1. Check for polite WebSocket close codes (User closed tab, etc.)
+	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
+		return true
+	}
+
+	// 2. Check for underlying network/OS errors (Broken Pipe or Connection Reset)
+	// This handles "writev: broken pipe" and "read: connection reset by peer"
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		var syscallErr *os.SyscallError
+		if errors.As(opErr.Err, &syscallErr) {
+			if syscallErr.Err == syscall.EPIPE || syscallErr.Err == syscall.ECONNRESET {
+				return true
+			}
+		}
+	}
+
+	return false
+}
 
 func (cs *ChannelState) readLoop(conn *websocket.Conn) error {
 	for {
@@ -106,8 +132,12 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, conn *websocke
 	startTime := time.Now()
 	MessagesTotal.Inc()
 	if err := conn.WriteJSON(outData); err != nil {
-		slog.Error("failed to write sync message to client", "key", cs.Key, "err", err)
-		WebsocketError.Inc()
+		if isClientDisconnectError(err) {
+			slog.Debug("client disconnected before sync message was sent", "key", cs.Key, "err", err)
+		} else {
+			slog.Error("failed to write sync message to client", "key", cs.Key, "err", err)
+			WebsocketError.Inc()
+		}
 		defer cs.closeSocket(conn)
 	}
 
@@ -122,8 +152,12 @@ func (cs *ChannelState) broadcast(msg any) {
 		MessagesTotal.Inc()
 		go func(msg any, c *websocket.Conn) {
 			if err := c.WriteJSON(msg); err != nil {
-				slog.Error("failed to write message to client", "key", cs.Key, "err", err)
-				WebsocketError.Inc()
+				if isClientDisconnectError(err) {
+					slog.Debug("client disconnected before message was sent", "key", cs.Key, "err", err)
+				} else {
+					slog.Error("failed to write message to client", "key", cs.Key, "err", err)
+					WebsocketError.Inc()
+				}
 				cs.closeSocket(c)
 			}
 		}(msg, c)
