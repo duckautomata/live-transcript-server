@@ -40,11 +40,37 @@ func isClientDisconnectError(err error) bool {
 func (cs *ChannelState) readLoop(conn *websocket.Conn) error {
 	for {
 		var msg WebSocketMessage
-		err := conn.ReadJSON(&msg)
-		if err != nil {
-			return nil
+		if err := conn.ReadJSON(&msg); err != nil {
+			if isClientDisconnectError(err) {
+				return nil
+			}
+			continue
 		}
-		slog.Debug("received message from client", "key", cs.Key, "func", "readLoop", "event", msg.Event)
+
+		if msg.Event == EventPing {
+			dataMap, ok := msg.Data.(map[string]any)
+			if !ok {
+				slog.Error("invalid ping data format", "key", cs.Key, "func", "readLoop")
+				continue
+			}
+
+			// extract timestamp safely
+			var timestamp int
+			if ts, ok := dataMap["timestamp"].(float64); ok {
+				timestamp = int(ts)
+			}
+
+			pongMsg := WebSocketMessage{
+				Event: EventPong,
+				Data: EventPingPongData{
+					Timestamp: timestamp,
+				},
+			}
+
+			if err := conn.WriteJSON(pongMsg); err != nil {
+				slog.Error("failed to send pong", "key", cs.Key, "func", "readLoop", "err", err)
+			}
+		}
 	}
 }
 
@@ -63,11 +89,10 @@ func (app *App) broadcastNewLine(ctx context.Context, cs *ChannelState, uploadTi
 	}
 
 	data := EventNewLineData{
-		LineID:      newLine.ID,
-		Timestamp:   newLine.Timestamp,
-		UploadTime:  uploadTime,
-		EmittedTime: time.Now().UnixMilli(),
-		Segments:    newLine.Segments,
+		LineID:     newLine.ID,
+		Timestamp:  newLine.Timestamp,
+		UploadTime: uploadTime,
+		Segments:   newLine.Segments,
 	}
 
 	msg := WebSocketMessage{

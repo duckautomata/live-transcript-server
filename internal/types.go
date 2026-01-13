@@ -53,6 +53,8 @@ const (
 	EventStatus    EventType = "status"
 	EventSync      EventType = "sync"
 	EventNewMedia  EventType = "newMedia"
+	EventPing      EventType = "ping"
+	EventPong      EventType = "pong"
 )
 
 // WebSocketMessage represents a message sent over the WebSocket connection.
@@ -76,7 +78,6 @@ type EventNewLineData struct {
 	LineID         int       `json:"lineId"`
 	Timestamp      int       `json:"timestamp"`
 	UploadTime     int64     `json:"uploadTime"`
-	EmittedTime    int64     `json:"emittedTime"`
 	MediaAvailable bool      `json:"mediaAvailable"`
 	Segments       []Segment `json:"segments"`
 }
@@ -100,6 +101,11 @@ type EventStatusData struct {
 // EventNewMediaData represents the data sent to notify the client of available media.
 type EventNewMediaData struct {
 	AvailableIDs []int `json:"ids"`
+}
+
+// EventPingPongData represents the data sent when the client pings the server.
+type EventPingPongData struct {
+	Timestamp int `json:"timestamp"`
 }
 
 // ===== Server State =====

@@ -207,3 +207,60 @@ func TestWebsocketDoubleClose(t *testing.T) {
 
 	ws.Close() // Clean up client side
 }
+
+func TestWebsocketPingPong(t *testing.T) {
+	key := "test-ws-ping-pong"
+	_, mux, db := setupTestApp(t, []string{key})
+	defer db.Close()
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/" + key + "/websocket"
+
+	// Connect
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial ws: %v", err)
+	}
+	defer ws.Close()
+
+	// Read initial sync message
+	var initMsg WebSocketMessage
+	ws.ReadJSON(&initMsg)
+
+	// Send Ping
+	timestamp := 123456
+	pingMsg := WebSocketMessage{
+		Event: EventPing,
+		Data: map[string]interface{}{
+			"timestamp": timestamp,
+		},
+	}
+	if err := ws.WriteJSON(pingMsg); err != nil {
+		t.Fatalf("failed to write ping message: %v", err)
+	}
+
+	// Read Pong
+	var msg WebSocketMessage
+	if err := ws.ReadJSON(&msg); err != nil {
+		t.Fatalf("failed to read message: %v", err)
+	}
+
+	if msg.Event != EventPong {
+		t.Errorf("expected event pong, got: %s", msg.Event)
+	}
+
+	dataMap, ok := msg.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data to be map, got %T", msg.Data)
+	}
+
+	ts, ok := dataMap["timestamp"].(float64)
+	if !ok {
+		t.Errorf("expected timestamp in data")
+	}
+
+	if int(ts) != timestamp {
+		t.Errorf("expected timestamp %d, got %d", timestamp, int(ts))
+	}
+}
