@@ -44,7 +44,7 @@ func (cs *ChannelState) readLoop(conn *websocket.Conn) error {
 			if isClientDisconnectError(err) {
 				return nil
 			}
-			continue
+			return err
 		}
 
 		if msg.Event == EventPing {
