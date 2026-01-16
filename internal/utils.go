@@ -121,6 +121,7 @@ var FfmpegTrim = func(inputFilePath, outputFilePath string, start, end float64) 
 			"-i", inputFilePath,
 			"-t", fmt.Sprintf("%f", duration),
 			"-c", "copy",
+			"-avoid_negative_ts", "make_zero",
 			"-movflags", "+faststart",
 			"-y",
 			outputFilePath)
