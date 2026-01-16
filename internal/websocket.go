@@ -18,7 +18,7 @@ import (
 // isClientDisconnectError checks if the error is due to a client disconnecting.
 func isClientDisconnectError(err error) bool {
 	// 1. Check for polite WebSocket close codes (User closed tab, etc.)
-	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
+	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived, websocket.CloseAbnormalClosure) {
 		return true
 	}
 

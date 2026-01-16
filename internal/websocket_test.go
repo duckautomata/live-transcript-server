@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -262,5 +263,52 @@ func TestWebsocketPingPong(t *testing.T) {
 
 	if int(ts) != timestamp {
 		t.Errorf("expected timestamp %d, got %d", timestamp, int(ts))
+	}
+}
+
+func TestIsClientDisconnectError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "Normal Closure",
+			err:      &websocket.CloseError{Code: websocket.CloseNormalClosure},
+			expected: true,
+		},
+		{
+			name:     "Going Away",
+			err:      &websocket.CloseError{Code: websocket.CloseGoingAway},
+			expected: true,
+		},
+		{
+			name:     "No Status Received",
+			err:      &websocket.CloseError{Code: websocket.CloseNoStatusReceived},
+			expected: true,
+		},
+		{
+			name:     "Abnormal Closure (1006)",
+			err:      &websocket.CloseError{Code: websocket.CloseAbnormalClosure},
+			expected: true,
+		},
+		{
+			name:     "Other Close Error",
+			err:      &websocket.CloseError{Code: websocket.CloseProtocolError},
+			expected: false,
+		},
+		{
+			name:     "Generic Error",
+			err:      errors.New("some random error"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isClientDisconnectError(tt.err); got != tt.expected {
+				t.Errorf("isClientDisconnectError() = %v, want %v", got, tt.expected)
+			}
+		})
 	}
 }
