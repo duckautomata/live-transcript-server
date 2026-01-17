@@ -67,7 +67,7 @@ func TestMediaAvailability(t *testing.T) {
 	}
 
 	// Verify DB state
-	l, err := app.GetLastLine(context.Background(), "test")
+	l, err := app.GetLastLine(context.Background(), "test", "stream-1")
 	if err != nil {
 		t.Fatalf("failed to get last line: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestMediaAvailability(t *testing.T) {
 		app.broadcastNewMedia(cs, []int{2})
 	} else {
 		// Validated DB update only if handler success
-		l, err = app.GetLastLine(context.Background(), "test")
+		l, err = app.GetLastLine(context.Background(), "test", "stream-1")
 		if err != nil {
 			t.Fatalf("failed to get last line: %v", err)
 		}

@@ -44,6 +44,7 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{channel}/stream/{streamID}/{filename}", app.streamHandler)
 	mux.HandleFunc("GET /{channel}/download/{streamID}/{filename}", app.downloadHandler)
 	mux.HandleFunc("GET /{channel}/frame/{streamID}/{filename}", app.getFrameHandler)
+	mux.HandleFunc("GET /{channel}/transcript/{streamID}", app.getTranscriptHandler)
 	mux.HandleFunc("POST /{channel}/clip", app.postClipHandler)
 	mux.HandleFunc("POST /{channel}/trim", app.postTrimHandler)
 }
@@ -132,14 +133,15 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 			MediaType:   mediaType,
 		}
 
-		if err := app.UpsertStream(ctx, newStream); err != nil {
-			slog.Error("failed to upsert new stream", "key", cs.Key, "err", err)
-			return false
+		// Deactivate previous stream if it was live
+		if currentStream != nil && currentStream.IsLive {
+			if err := app.SetStreamLive(ctx, cs.Key, currentStream.ActiveID, false); err != nil {
+				slog.Error("failed to deactivate previous stream", "key", cs.Key, "streamID", currentStream.ActiveID, "err", err)
+			}
 		}
 
-		// Clear transcript for new stream
-		if err := app.ClearTranscript(ctx, cs.Key); err != nil {
-			slog.Error("failed to clear transcript", "key", cs.Key, "err", err)
+		if err := app.UpsertStream(ctx, newStream); err != nil {
+			slog.Error("failed to upsert new stream", "key", cs.Key, "err", err)
 			return false
 		}
 
@@ -150,8 +152,46 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 			return false
 		}
 
-		// Rotation Logic
-		rotateFolders(cs.BaseMediaFolder, cs.NumPastStreams, activeId, cs.Key)
+		// Rotation Logic: Query DB for all streams to apply retention policy
+		allStreams, err := app.GetAllStreams(ctx, cs.Key)
+		if err == nil {
+			// allStreams is sorted by start_time DESC (newest first).
+			// We want to keep 'keepCount' streams (active + NumPastStreams).
+			keepCount := cs.NumPastStreams + 1
+			if len(allStreams) > keepCount {
+				for i := keepCount; i < len(allStreams); i++ {
+					streamToDelete := allStreams[i]
+					// Delete from DB (Stream meta)
+					if err := app.DeleteStream(ctx, cs.Key, streamToDelete.ActiveID); err != nil {
+						slog.Error("failed to delete stream from db", "key", cs.Key, "streamID", streamToDelete.ActiveID, "err", err)
+						continue
+					}
+					// Delete Transcript from DB
+					if err := app.DeleteTranscript(ctx, cs.Key, streamToDelete.ActiveID); err != nil {
+						slog.Error("failed to delete transcript from db", "key", cs.Key, "streamID", streamToDelete.ActiveID, "err", err)
+					}
+					// Delete from Filesystem
+					pathToDelete := filepath.Join(cs.BaseMediaFolder, streamToDelete.ActiveID)
+					slog.Info("deleting old stream folder", "key", cs.Key, "path", pathToDelete)
+					os.RemoveAll(pathToDelete)
+				}
+			}
+		} else {
+			slog.Error("failed to get all streams for rotation", "key", cs.Key, "err", err)
+		}
+
+		// Broadcast pastStreams event
+		pastStreams, err := app.GetPastStreams(ctx, cs.Key, activeId)
+		if err == nil {
+			pastStreamsMsg := WebSocketMessage{
+				Event: EventPastStreams,
+				Data:  EventPastStreamsData{Streams: pastStreams},
+			}
+			cs.broadcast(pastStreamsMsg)
+		} else {
+			slog.Error("failed to get past streams for broadcast", "key", cs.Key, "err", err)
+		}
+
 		data := EventNewStreamData{
 			ActiveID:    newStream.ActiveID,
 			ActiveTitle: newStream.ActiveTitle,
@@ -168,8 +208,8 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 	} else {
 		// Same stream ID
 		if !currentStream.IsLive {
-			// Reactivate
-			if err := app.SetStreamLive(ctx, cs.Key, true); err != nil {
+			// Reactivate: Update the specific stream to be live
+			if err := app.SetStreamLive(ctx, cs.Key, currentStream.ActiveID, true); err != nil {
 				slog.Error("failed to set stream live", "key", cs.Key, "err", err)
 				return false
 			}
@@ -217,7 +257,7 @@ func (app *App) deactivateStream(ctx context.Context, cs *ChannelState, activeId
 			slog.Info("failed to remove stream metric on deactivation", "key", cs.Key, "func", "deactivateStream", "streamID", activeId)
 		}
 
-		if err := app.SetStreamLive(ctx, cs.Key, false); err != nil {
+		if err := app.SetStreamLive(ctx, cs.Key, activeId, false); err != nil {
 			slog.Error("failed to set stream not live", "key", cs.Key, "err", err)
 			return false
 		}
@@ -309,14 +349,14 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := app.ReplaceTranscript(r.Context(), cs.Key, data.Transcript); err != nil {
+	if err := app.ReplaceTranscript(r.Context(), cs.Key, data.ActiveID, data.Transcript); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		slog.Error("failed to replace transcript", "err", err)
 		return
 	}
 
-	app.broadcastNewLine(r.Context(), cs, uploadTime, nil)
+	app.broadcastNewLine(r.Context(), cs, data.ActiveID, uploadTime, nil)
 
 	if uploadTime > 5*1000 {
 		slog.Warn("slow upload time", "key", cs.Key, "func", "syncHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds())
@@ -353,15 +393,22 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 	uploadTime := time.Since(uploadStartTime).Milliseconds()
 	processStartTime := time.Now()
 
-	lastID, err := app.GetLastLineID(r.Context(), cs.Key)
+	// Get Active Stream to determine where to append line
+	stream, err := app.GetStream(r.Context(), cs.Key)
+	if err != nil || stream == nil {
+		http.Error(w, "No active stream found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("no active stream for line append", "key", cs.Key, "func", "lineHandler")
+		return
+	}
+
+	lastID, err := app.GetLastLineID(r.Context(), cs.Key, stream.ActiveID)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		slog.Error("failed to get last line id", "err", err)
 		return
 	}
-	// Save raw file logic removed from lineHandler as it handles JSON only.
-	// Uploads are handled by mediaHandler.
 	expectedID := lastID + 1
 	// Special case: if DB is empty (lastID = -1), we expect 0.
 	// This works because -1 + 1 = 0. And we expect the first line to be 0.
@@ -376,14 +423,14 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := app.InsertTranscriptLine(r.Context(), cs.Key, data); err != nil {
+	if err := app.InsertTranscriptLine(r.Context(), cs.Key, stream.ActiveID, data); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		slog.Error("failed to insert transcript line", "err", err)
 		return
 	}
 
-	app.broadcastNewLine(r.Context(), cs, uploadTime, &data)
+	app.broadcastNewLine(r.Context(), cs, stream.ActiveID, uploadTime, &data)
 	if time.Since(processStartTime).Seconds() > 1 {
 		slog.Warn("slow processing time", "key", cs.Key, "func", "lineHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.ID)
 	}
@@ -483,28 +530,40 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Update DB and broadcast
 	success := true
-	if err := app.SetMediaAvailable(r.Context(), cs.Key, id, true); err != nil {
-		if err.Error() == "line not found" {
-			// This usually fails if the media was uploaded before the line was added.
-			// Wait 500ms then try again to give the line time to be added.
-			slog.Warn("line not found, retrying", "key", cs.Key, "id", id)
-			time.Sleep(500 * time.Millisecond)
-			if err := app.SetMediaAvailable(r.Context(), cs.Key, id, true); err != nil {
-				slog.Error("failed to set media available on retry", "key", cs.Key, "id", id, "err", err)
+	// Get Active Stream explicitly for DB updates
+	streamForDB, err := app.GetStream(r.Context(), cs.Key)
+	activeID := ""
+	if err == nil && streamForDB != nil {
+		activeID = streamForDB.ActiveID
+	}
+
+	if activeID != "" {
+		if err := app.SetMediaAvailable(r.Context(), cs.Key, activeID, id, true); err != nil {
+			if err.Error() == "line not found" {
+				// This usually fails if the media was uploaded before the line was added.
+				// Wait 500ms then try again to give the line time to be added.
+				slog.Warn("line not found, retrying", "key", cs.Key, "id", id)
+				time.Sleep(500 * time.Millisecond)
+				if err := app.SetMediaAvailable(r.Context(), cs.Key, activeID, id, true); err != nil {
+					slog.Error("failed to set media available on retry", "key", cs.Key, "id", id, "err", err)
+					Http500Errors.Inc()
+					success = false
+				}
+			} else {
+				slog.Error("failed to set media available", "key", cs.Key, "id", id, "err", err)
 				Http500Errors.Inc()
 				success = false
 			}
-		} else {
-			slog.Error("failed to set media available", "key", cs.Key, "id", id, "err", err)
-			Http500Errors.Inc()
-			success = false
 		}
+	} else {
+		slog.Warn("cannot set media available: no active stream", "key", cs.Key, "id", id)
 	}
+
 	// We don't fail the request because the file is saved and converted.
-	if success {
+	if success && activeID != "" {
 		// Broadcast new media availability
 		// Get last 100 available IDs
-		ids, err := app.GetLastAvailableMediaIDs(r.Context(), cs.Key, 100)
+		ids, err := app.GetLastAvailableMediaIDs(r.Context(), cs.Key, activeID, 100)
 		if err != nil {
 			slog.Error("failed to get last available media ids. Fallback to single id", "key", cs.Key, "err", err)
 			ids = []int{id}
@@ -1076,6 +1135,34 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 		"status": "success",
 		"id":     req.ID,
 	})
+}
+
+func (app *App) getTranscriptHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "getTranscriptHandler", "key", key)
+		return
+	}
+
+	streamID := r.PathValue("streamID")
+	if streamID == "" {
+		http.Error(w, "Missing streamID", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
+
+	lines, err := app.GetTranscript(r.Context(), cs.Key, streamID)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		slog.Error("failed to get transcript", "key", cs.Key, "streamID", streamID, "err", err)
+		return
+	}
+
+	writeJSON(w, lines)
 }
 
 // --- HTTP Helper Functions ---

@@ -48,13 +48,14 @@ type WorkerData struct {
 type EventType string
 
 const (
-	EventNewLine   EventType = "newLine"
-	EventNewStream EventType = "newStream"
-	EventStatus    EventType = "status"
-	EventSync      EventType = "sync"
-	EventNewMedia  EventType = "newMedia"
-	EventPing      EventType = "ping"
-	EventPong      EventType = "pong"
+	EventNewLine     EventType = "newLine"
+	EventNewStream   EventType = "newStream"
+	EventStatus      EventType = "status"
+	EventSync        EventType = "sync"
+	EventNewMedia    EventType = "newMedia"
+	EventPing        EventType = "ping"
+	EventPong        EventType = "pong"
+	EventPastStreams EventType = "pastStreams"
 )
 
 // WebSocketMessage represents a message sent over the WebSocket connection.
@@ -106,6 +107,11 @@ type EventNewMediaData struct {
 // EventPingPongData represents the data sent when the client pings the server.
 type EventPingPongData struct {
 	Timestamp int `json:"timestamp"`
+}
+
+// EventPastStreamsData represents the data sent to notify the client of past streams.
+type EventPastStreamsData struct {
+	Streams []Stream `json:"streams"`
 }
 
 // ===== Server State =====

@@ -15,7 +15,7 @@ func TestDB_GetLastLine(t *testing.T) {
 	channelID := "test-last-line"
 
 	// Test Empty
-	line, err := app.GetLastLine(ctx, channelID)
+	line, err := app.GetLastLine(ctx, channelID, "test-stream")
 	if err != nil {
 		t.Fatalf("failed to get last line (empty): %v", err)
 	}
@@ -29,12 +29,12 @@ func TestDB_GetLastLine(t *testing.T) {
 		{ID: 2, Timestamp: 300, Segments: []Segment{{Text: "Third"}}},
 		{ID: 1, Timestamp: 200, Segments: []Segment{{Text: "Second"}}},
 	}
-	if err := app.ReplaceTranscript(ctx, channelID, lines); err != nil {
+	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
 		t.Fatalf("failed to replace transcript: %v", err)
 	}
 
 	// Test GetLastLine
-	line, err = app.GetLastLine(ctx, channelID)
+	line, err = app.GetLastLine(ctx, channelID, "test-stream")
 	if err != nil {
 		t.Fatalf("failed to get last line: %v", err)
 	}
@@ -125,7 +125,9 @@ func TestDB_StreamOperations(t *testing.T) {
 	}
 
 	// 4. Test SetStreamLive
-	if err := app.SetStreamLive(ctx, channelID, false); err != nil {
+	// Set specific stream explicitly active (although logic usually sets it false)
+	// But SetStreamLive takes (ctx, channel, activeID, bool)
+	if err := app.SetStreamLive(ctx, channelID, "vid1", false); err != nil {
 		t.Fatalf("SetStreamLive failed: %v", err)
 	}
 
@@ -146,7 +148,7 @@ func TestDB_TranscriptOperations(t *testing.T) {
 	channelID := "test-transcript-ops"
 
 	// 0. Get empty transcript
-	lines, err := app.GetTranscript(ctx, channelID)
+	lines, err := app.GetTranscript(ctx, channelID, "test-stream")
 	if err != nil {
 		t.Fatalf("GetTranscript (empty) failed: %v", err)
 	}
@@ -154,7 +156,7 @@ func TestDB_TranscriptOperations(t *testing.T) {
 		t.Errorf("expected empty transcript, got %d lines", len(lines))
 	}
 
-	lastId, err := app.GetLastLineID(ctx, channelID)
+	lastId, err := app.GetLastLineID(ctx, channelID, "test-stream")
 	if err != nil {
 		t.Fatalf("GetLastLineID (empty) failed: %v", err)
 	}
@@ -162,7 +164,7 @@ func TestDB_TranscriptOperations(t *testing.T) {
 		t.Errorf("expected last ID to be -1, got %d", lastId)
 	}
 
-	lastLine, err := app.GetLastLine(ctx, channelID)
+	lastLine, err := app.GetLastLine(ctx, channelID, "test-stream")
 	if err != nil {
 		t.Fatalf("GetLastLine (empty) failed: %v", err)
 	}
@@ -172,12 +174,12 @@ func TestDB_TranscriptOperations(t *testing.T) {
 
 	// 1. InsertTranscriptLine
 	line0 := Line{ID: 0, Timestamp: 100, Segments: []Segment{{Text: "Hello"}}}
-	if err := app.InsertTranscriptLine(ctx, channelID, line0); err != nil {
+	if err := app.InsertTranscriptLine(ctx, channelID, "test-stream", line0); err != nil {
 		t.Fatalf("InsertTranscriptLine failed: %v", err)
 	}
 
 	// 2. GetTranscript
-	lines, err = app.GetTranscript(ctx, channelID)
+	lines, err = app.GetTranscript(ctx, channelID, "test-stream")
 	if err != nil {
 		t.Fatalf("GetTranscript failed: %v", err)
 	}
@@ -186,7 +188,7 @@ func TestDB_TranscriptOperations(t *testing.T) {
 	}
 
 	// 3. GetLastLineID
-	lastID, err := app.GetLastLineID(ctx, channelID)
+	lastID, err := app.GetLastLineID(ctx, channelID, "test-stream")
 	if err != nil {
 		t.Fatalf("GetLastLineID failed: %v", err)
 	}
@@ -199,11 +201,11 @@ func TestDB_TranscriptOperations(t *testing.T) {
 		{ID: 0, Timestamp: 100, Segments: []Segment{{Text: "New Hello"}}},
 		{ID: 1, Timestamp: 200, Segments: []Segment{{Text: "New World"}}},
 	}
-	if err := app.ReplaceTranscript(ctx, channelID, newLines); err != nil {
+	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", newLines); err != nil {
 		t.Fatalf("ReplaceTranscript failed: %v", err)
 	}
 
-	lines, err = app.GetTranscript(ctx, channelID)
+	lines, err = app.GetTranscript(ctx, channelID, "test-stream")
 	if err != nil {
 		t.Fatalf("GetTranscript after replace failed: %v", err)
 	}
@@ -212,11 +214,11 @@ func TestDB_TranscriptOperations(t *testing.T) {
 	}
 
 	// 5. ClearTranscript
-	if err := app.ClearTranscript(ctx, channelID); err != nil {
-		t.Fatalf("ClearTranscript failed: %v", err)
+	if err := app.DeleteTranscript(ctx, channelID, "test-stream"); err != nil {
+		t.Fatalf("DeleteTranscript failed: %v", err)
 	}
 
-	lines, err = app.GetTranscript(ctx, channelID)
+	lines, err = app.GetTranscript(ctx, channelID, "test-stream")
 	if err != nil || len(lines) != 0 {
 		t.Error("expected empty transcript after clear")
 	}
@@ -230,7 +232,7 @@ func TestDB_GetLastAvailableMediaIDs(t *testing.T) {
 	channelID := "test-media-ids"
 
 	// Test Empty
-	lastIDs, err := app.GetLastAvailableMediaIDs(ctx, channelID, 10)
+	lastIDs, err := app.GetLastAvailableMediaIDs(ctx, channelID, "test-stream", 10)
 	if err != nil {
 		t.Fatalf("failed to get last media IDs (empty): %v", err)
 	}
@@ -244,11 +246,11 @@ func TestDB_GetLastAvailableMediaIDs(t *testing.T) {
 		{ID: 2, Timestamp: 300, Segments: []Segment{{Text: "Third"}}},
 		{ID: 1, Timestamp: 200, Segments: []Segment{{Text: "Second"}}},
 	}
-	if err := app.ReplaceTranscript(ctx, channelID, lines); err != nil {
+	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
 		t.Fatalf("failed to replace transcript: %v", err)
 	}
 
-	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, 10)
+	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, "test-stream", 10)
 	if err != nil {
 		t.Fatalf("failed to get last media IDs: %v", err)
 	}
@@ -262,11 +264,11 @@ func TestDB_GetLastAvailableMediaIDs(t *testing.T) {
 		{ID: 2, Timestamp: 300, MediaAvailable: false, Segments: []Segment{{Text: "Third"}}},
 		{ID: 1, Timestamp: 200, MediaAvailable: true, Segments: []Segment{{Text: "Second"}}},
 	}
-	if err := app.ReplaceTranscript(ctx, channelID, lines); err != nil {
+	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
 		t.Fatalf("failed to replace transcript: %v", err)
 	}
 
-	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, 10)
+	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, "test-stream", 10)
 	if err != nil {
 		t.Fatalf("failed to get last media IDs: %v", err)
 	}
@@ -283,11 +285,11 @@ func TestDB_GetLastAvailableMediaIDs(t *testing.T) {
 		{ID: 2, Timestamp: 300, MediaAvailable: false, Segments: []Segment{{Text: "Third"}}},
 		{ID: 1, Timestamp: 200, MediaAvailable: true, Segments: []Segment{{Text: "Second"}}},
 	}
-	if err := app.ReplaceTranscript(ctx, channelID, lines); err != nil {
+	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
 		t.Fatalf("failed to replace transcript: %v", err)
 	}
 
-	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, 1)
+	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, "test-stream", 1)
 	if err != nil {
 		t.Fatalf("failed to get last media IDs: %v", err)
 	}
@@ -304,15 +306,185 @@ func TestDB_GetLastAvailableMediaIDs(t *testing.T) {
 		{ID: 2, Timestamp: 300, MediaAvailable: false, Segments: []Segment{{Text: "Third"}}},
 		{ID: 1, Timestamp: 200, MediaAvailable: true, Segments: []Segment{{Text: "Second"}}},
 	}
-	if err := app.ReplaceTranscript(ctx, channelID, lines); err != nil {
+	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
 		t.Fatalf("failed to replace transcript: %v", err)
 	}
 
-	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, 0)
+	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, "test-stream", 0)
 	if err != nil {
 		t.Fatalf("failed to get last media IDs: %v", err)
 	}
 	if len(lastIDs) != 0 {
 		t.Errorf("expected 0 last media IDs, got %d", len(lastIDs))
+	}
+}
+
+func TestDB_GetPastStreams(t *testing.T) {
+	app := setupTestDB(t)
+	defer app.DB.Close()
+
+	ctx := context.Background()
+	channelID := "test-past-streams"
+
+	// 1. No streams
+	streams, err := app.GetPastStreams(ctx, channelID, "any")
+	if err != nil {
+		t.Fatalf("GetPastStreams failed: %v", err)
+	}
+	if len(streams) != 0 {
+		t.Errorf("expected 0 streams, got %d", len(streams))
+	}
+
+	// 2. Insert Active Stream (Live)
+	activeStream := &Stream{
+		ChannelID:   channelID,
+		ActiveID:    "active1",
+		ActiveTitle: "Active 1",
+		StartTime:   "1000",
+		IsLive:      true,
+		MediaType:   "audio",
+	}
+	if err := app.UpsertStream(ctx, activeStream); err != nil {
+		t.Fatalf("UpsertStream active failed: %v", err)
+	}
+
+	streams, err = app.GetPastStreams(ctx, channelID, "active1")
+	if err != nil {
+		t.Fatalf("GetPastStreams failed: %v", err)
+	}
+	if len(streams) != 0 {
+		t.Errorf("expected 0 past streams (active IS live), got %d", len(streams))
+	}
+
+	// 3. Insert Past Stream (Not Live)
+	pastStream := &Stream{
+		ChannelID:   channelID,
+		ActiveID:    "past1",
+		ActiveTitle: "Past 1",
+		StartTime:   "900",
+		IsLive:      false,
+		MediaType:   "audio",
+	}
+	if err := app.UpsertStream(ctx, pastStream); err != nil {
+		t.Fatalf("UpsertStream past failed: %v", err)
+	}
+	// Also insert another past stream
+	pastStream2 := &Stream{
+		ChannelID:   channelID,
+		ActiveID:    "past2",
+		ActiveTitle: "Past 2",
+		StartTime:   "800", // Older
+		IsLive:      false,
+		MediaType:   "audio",
+	}
+	if err := app.UpsertStream(ctx, pastStream2); err != nil {
+		t.Fatalf("UpsertStream past2 failed: %v", err)
+	}
+
+	// 4. GetPastStreams
+	streams, err = app.GetPastStreams(ctx, channelID, "active1")
+	if err != nil {
+		t.Fatalf("GetPastStreams failed: %v", err)
+	}
+	if len(streams) != 2 {
+		t.Errorf("expected 2 past streams, got %d", len(streams))
+	} else {
+		// Expect order: newest first (past1, then past2)
+		if streams[0].ActiveID != "past1" {
+			t.Errorf("expected first stream to be past1, got %s", streams[0].ActiveID)
+		}
+		if streams[1].ActiveID != "past2" {
+			t.Errorf("expected second stream to be past2, got %s", streams[1].ActiveID)
+		}
+	}
+
+	// 5. Test Exclude ID (simulate "past1" is arguably the current stream but marked not live?
+	// Or simply verify the exclude logic works even if stream is found)
+	// The SQL is: active_id != ? AND is_live = 0.
+	// So if we pass "past1" as activeID, it should be excluded.
+	streams, err = app.GetPastStreams(ctx, channelID, "past1")
+	if err != nil {
+		t.Fatalf("GetPastStreams exclude failed: %v", err)
+	}
+	if len(streams) != 1 {
+		t.Errorf("expected 1 past stream (excluding past1), got %d", len(streams))
+	}
+	if streams[0].ActiveID != "past2" {
+		t.Errorf("expected stream to be past2, got %s", streams[0].ActiveID)
+	}
+}
+
+func TestDB_DeleteStream(t *testing.T) {
+	app := setupTestDB(t)
+	defer app.DB.Close()
+
+	ctx := context.Background()
+	channelID := "test-delete-stream"
+	activeID := "stream-to-delete"
+
+	// 1. Insert Stream
+	stream := &Stream{
+		ChannelID:   channelID,
+		ActiveID:    activeID,
+		ActiveTitle: "To Be Deleted",
+		StartTime:   "1000",
+		IsLive:      true,
+		MediaType:   "audio",
+	}
+	if err := app.UpsertStream(ctx, stream); err != nil {
+		t.Fatalf("UpsertStream failed: %v", err)
+	}
+
+	stream2 := &Stream{
+		ChannelID:   channelID,
+		ActiveID:    "another-stream",
+		ActiveTitle: "Should Not Be Deleted",
+		StartTime:   "1000",
+		IsLive:      false,
+		MediaType:   "audio",
+	}
+	if err := app.UpsertStream(ctx, stream2); err != nil {
+		t.Fatalf("UpsertStream failed: %v", err)
+	}
+
+	// 2. Verify existence
+	// Note: GetStream retrieves the latest stream.
+	s, err := app.GetStream(ctx, channelID)
+	if err != nil {
+		t.Fatalf("GetStream failed: %v", err)
+	}
+	if s == nil || s.ActiveID != activeID {
+		t.Fatal("expected stream to be active")
+	}
+
+	// 3. Delete Stream
+	if err := app.DeleteStream(ctx, channelID, activeID); err != nil {
+		t.Fatalf("DeleteStream failed: %v", err)
+	}
+
+	// 4. Verify deletion
+	s, err = app.GetStream(ctx, channelID)
+	if err != nil {
+		t.Fatalf("GetStream after delete failed: %v", err)
+	}
+	if s == nil {
+		t.Errorf("expected to retrieve another stream, got nil")
+	}
+	if s.ActiveID != "another-stream" {
+		t.Errorf("expected another stream to be active, got %s", s.ActiveID)
+	}
+
+	// 5. Delete another stream
+	if err := app.DeleteStream(ctx, channelID, "another-stream"); err != nil {
+		t.Fatalf("DeleteStream failed: %v", err)
+	}
+
+	// 6. Verify deletion
+	s, err = app.GetStream(ctx, channelID)
+	if err != nil {
+		t.Fatalf("GetStream after delete failed: %v", err)
+	}
+	if s != nil {
+		t.Errorf("expected nil stream after deletion, got %v", s)
 	}
 }

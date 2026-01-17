@@ -75,9 +75,9 @@ func (cs *ChannelState) readLoop(conn *websocket.Conn) error {
 }
 
 // Send new line to all clients. If newLine is nil, then the last line from the database is used.
-func (app *App) broadcastNewLine(ctx context.Context, cs *ChannelState, uploadTime int64, newLine *Line) {
+func (app *App) broadcastNewLine(ctx context.Context, cs *ChannelState, activeID string, uploadTime int64, newLine *Line) {
 	if newLine == nil {
-		lastLine, err := app.GetLastLine(ctx, cs.Key)
+		lastLine, err := app.GetLastLine(ctx, cs.Key, activeID)
 		if err != nil {
 			slog.Error("failed to get last line for refresh", "key", cs.Key, "err", err)
 			return
@@ -143,7 +143,7 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, conn *websocke
 		Transcript:  make([]Line, 0),
 	}
 
-	transcript, err := app.GetTranscript(ctx, cs.Key)
+	transcript, err := app.GetTranscript(ctx, cs.Key, stream.ActiveID)
 	if err != nil {
 		slog.Error("failed to get transcript for sync", "key", cs.Key, "err", err)
 		return
@@ -163,7 +163,27 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, conn *websocke
 			slog.Error("failed to write sync message to client", "key", cs.Key, "err", err)
 			WebsocketError.Inc()
 		}
-		defer cs.closeSocket(conn)
+		cs.closeSocket(conn)
+		return
+	}
+
+	// Send past streams
+	pastStreams, err := app.GetPastStreams(ctx, cs.Key, stream.ActiveID)
+	if err == nil && len(pastStreams) > 0 {
+		pastStreamsMsg := WebSocketMessage{
+			Event: EventPastStreams,
+			Data:  EventPastStreamsData{Streams: pastStreams},
+		}
+		if err := conn.WriteJSON(pastStreamsMsg); err != nil {
+			if isClientDisconnectError(err) {
+				slog.Debug("client disconnected before past streams message was sent", "key", cs.Key, "err", err)
+			} else {
+				slog.Error("failed to write past streams message to client", "key", cs.Key, "err", err)
+				WebsocketError.Inc()
+			}
+			cs.closeSocket(conn)
+			return
+		}
 	}
 
 	MessageProcessingDuration.Observe(time.Since(startTime).Seconds())

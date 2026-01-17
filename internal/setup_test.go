@@ -72,7 +72,7 @@ func seedExampleData(t *testing.T, app *App, channelID string) {
 			},
 		},
 	}
-	if err := app.ReplaceTranscript(ctx, channelID, lines); err != nil {
+	if err := app.ReplaceTranscript(ctx, channelID, "stream-1", lines); err != nil {
 		t.Fatalf("failed to seed transcript: %v", err)
 	}
 }
