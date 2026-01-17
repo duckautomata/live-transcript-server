@@ -89,6 +89,18 @@ var (
 	},
 		[]string{"key"},
 	)
+	TotalVideoPlayed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "lt_total_video_played_per_key",
+		Help: "The total number of successful calls to the /video endpoint.",
+	},
+		[]string{"key"},
+	)
+	StreamVideoPlayed = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_stream_video_played_per_key",
+		Help: "The number of successful calls to the /video endpoint in a given stream period.",
+	},
+		[]string{"key"},
+	)
 	TotalFramesDownloads = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "lt_total_frame_downloads_per_key",
 		Help: "The total number of successful calls to the /frame endpoint.",
