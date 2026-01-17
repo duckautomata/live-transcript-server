@@ -7,11 +7,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type ChannelConfig struct {
+	Name           string `yaml:"name"`
+	NumPastStreams int    `yaml:"numPastStreams"`
+}
+
 type Config struct {
 	Credentials struct {
 		ApiKey string `yaml:"apiKey"`
 	} `yaml:"credentials"`
-	Channels []string `yaml:"channels"`
+	Channels []ChannelConfig `yaml:"channels"`
 }
 
 func GetConfig() (Config, error) {

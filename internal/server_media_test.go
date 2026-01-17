@@ -23,12 +23,17 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	// Activate stream
 	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: "s1", ActiveTitle: "Stream 1", StartTime: "12345", IsLive: true, MediaType: "video"})
 	// Create dummy media files
-	os.WriteFile(filepath.Join(app.Channels[key].MediaFolder, "1.m4a"), []byte("audio"), 0644)
-	os.WriteFile(filepath.Join(app.Channels[key].MediaFolder, "1.jpg"), []byte("image"), 0644)
+	// s1 folder
+	s1Folder := filepath.Join(app.Channels[key].BaseMediaFolder, "s1")
+	os.MkdirAll(s1Folder, 0755)
+	app.Channels[key].ActiveMediaFolder = s1Folder
+
+	os.WriteFile(filepath.Join(s1Folder, "1.m4a"), []byte("audio"), 0644)
+	os.WriteFile(filepath.Join(s1Folder, "1.jpg"), []byte("image"), 0644)
 
 	// Create dummy raw files for clip testing (ids 0-10)
 	for i := 0; i <= 10; i++ {
-		os.WriteFile(filepath.Join(app.Channels[key].MediaFolder, fmt.Sprintf("%d.raw", i)), []byte("raw_audio"), 0644)
+		os.WriteFile(filepath.Join(s1Folder, fmt.Sprintf("%d.raw", i)), []byte("raw_audio"), 0644)
 	}
 
 	// Mock FFmpeg for clip/trim

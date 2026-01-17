@@ -1,13 +1,15 @@
 package internal
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"time"
 )
 
 // example/name.abc -> example/name.def
@@ -137,27 +139,9 @@ var FfmpegTrim = func(inputFilePath, outputFilePath string, start, end float64) 
 	return nil
 }
 
-// converts a b64 endocing of binary media data and saves it to a file. Returns file path
-func (cs *ChannelState) RawB64ToFile(rawB64 string, id int, ext string) (string, error) {
-	filePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.raw", id))
-
-	decodedData, err := base64.StdEncoding.DecodeString(rawB64)
-	if err != nil {
-		return "", fmt.Errorf("error, unable to decode b64 media: %v", err)
-	}
-
-	os.MkdirAll(cs.MediaFolder, 0755)
-	err = os.WriteFile(filePath, decodedData, 0755)
-	if err != nil {
-		return "", fmt.Errorf("error, unable to write media to file '%s': %v", filePath, err)
-	}
-
-	return filePath, nil
-}
-
 // Binary copy all raw chunks into a single raw file. start and end are inclusive. Returns the merged media path.
-func (cs *ChannelState) MergeRawAudio(start, end int, uniqueID string) (string, error) {
-	rawFilePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%s.raw", uniqueID))
+func (cs *ChannelState) MergeRawAudio(mediaFolder string, start, end int, uniqueID string) (string, error) {
+	rawFilePath := filepath.Join(mediaFolder, fmt.Sprintf("%s.raw", uniqueID))
 
 	// Merge raw media into a single raw file
 	outputFile, err := os.Create(rawFilePath)
@@ -167,7 +151,7 @@ func (cs *ChannelState) MergeRawAudio(start, end int, uniqueID string) (string, 
 	defer outputFile.Close()
 
 	for i := start; i <= end; i++ {
-		inputFilename := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.raw", i))
+		inputFilename := filepath.Join(mediaFolder, fmt.Sprintf("%d.raw", i))
 		inputFile, err := os.Open(inputFilename)
 		if os.IsNotExist(err) {
 			return "", fmt.Errorf("file '%s' not found", inputFilename)
@@ -187,7 +171,51 @@ func (cs *ChannelState) MergeRawAudio(start, end int, uniqueID string) (string, 
 	return rawFilePath, nil
 }
 
-func (cs *ChannelState) ResetAudioFile() {
-	os.RemoveAll(cs.MediaFolder)
-	os.MkdirAll(cs.MediaFolder, 0755)
+// rotateFolders handles the rotation of media folders, keeping a specified number of past streams.
+func rotateFolders(baseMediaFolder string, numPastStreams int, activeId string, key string) {
+	// 1. List all folders in BaseMediaFolder
+	files, err := os.ReadDir(baseMediaFolder)
+	if err == nil {
+		var streamFolders []os.DirEntry
+		for _, file := range files {
+			if file.IsDir() {
+				streamFolders = append(streamFolders, file)
+			}
+		}
+
+		// 2. Sort folders by modification time (oldest first).
+		type folderInfo struct {
+			Name    string
+			ModTime time.Time
+		}
+		var folders []folderInfo
+		for _, f := range streamFolders {
+			info, err := f.Info()
+			if err == nil {
+				folders = append(folders, folderInfo{Name: f.Name(), ModTime: info.ModTime()})
+			}
+		}
+
+		// Sort by ModTime descending (newest first)
+		sort.Slice(folders, func(i, j int) bool {
+			return folders[i].ModTime.After(folders[j].ModTime)
+		})
+
+		// 3. Keep NumPastStreams + 1 (current)
+		// If NumPastStreams == 0, keep 1 (current).
+		keepCount := numPastStreams + 1
+		if len(folders) > keepCount {
+			for i := keepCount; i < len(folders); i++ {
+				// Don't delete if it's somehow the current active one (safety check)
+				if folders[i].Name == activeId {
+					continue
+				}
+				pathToDelete := filepath.Join(baseMediaFolder, folders[i].Name)
+				slog.Info("deleting old stream folder", "key", key, "path", pathToDelete)
+				os.RemoveAll(pathToDelete)
+			}
+		}
+	} else {
+		slog.Warn("failed to list base media folder for rotation", "key", key, "err", err)
+	}
 }

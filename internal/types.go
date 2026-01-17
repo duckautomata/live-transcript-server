@@ -116,7 +116,12 @@ type ChannelState struct {
 	ClientsLock       sync.Mutex
 	Clients           []*websocket.Conn
 	ClientConnections int
-	MediaFolder       string
+	// ActiveMediaFolder is the folder where the current active stream media is stored.
+	// This changes when a new stream is activated.
+	ActiveMediaFolder string
+	// BaseMediaFolder is the root folder for this channel where all stream folders are created.
+	BaseMediaFolder string
+	NumPastStreams  int
 }
 
 // App holds the application-wide dependencies and configuration.
@@ -130,7 +135,7 @@ type App struct {
 	TempDir     string
 }
 
-func NewApp(apiKey string, db *sql.DB, channelsConfig []string, tempDir string) *App {
+func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, tempDir string) *App {
 	app := &App{
 		ApiKey: apiKey,
 		DB:     db,
@@ -146,12 +151,15 @@ func NewApp(apiKey string, db *sql.DB, channelsConfig []string, tempDir string) 
 		TempDir:     tempDir,
 	}
 
-	for _, key := range channelsConfig {
-		app.Channels[key] = &ChannelState{
-			Key:               key,
-			Clients:           make([]*websocket.Conn, 0, 1000),
-			MediaFolder:       filepath.Join(app.TempDir, key, "media"),
+	for _, config := range channelsConfig {
+		baseMediaFolder := filepath.Join(app.TempDir, config.Name)
+		app.Channels[config.Name] = &ChannelState{
+			Key:             config.Name,
+			Clients:         make([]*websocket.Conn, 0, 1000),
+			BaseMediaFolder: baseMediaFolder,
+			// ActiveMediaFolder will be set on stream activation
 			ClientConnections: 0,
+			NumPastStreams:    config.NumPastStreams,
 		}
 	}
 

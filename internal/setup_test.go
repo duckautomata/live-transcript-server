@@ -24,7 +24,11 @@ func setupTestApp(t *testing.T, channels []string) (*App, *http.ServeMux, *sql.D
 	}
 
 	apiKey := "test-api-key"
-	app := NewApp(apiKey, db, channels, t.TempDir())
+	var channelConfigs []ChannelConfig
+	for _, c := range channels {
+		channelConfigs = append(channelConfigs, ChannelConfig{Name: c, NumPastStreams: 1})
+	}
+	app := NewApp(apiKey, db, channelConfigs, t.TempDir())
 
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)

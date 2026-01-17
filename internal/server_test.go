@@ -348,6 +348,10 @@ func TestServer_MediaUpload(t *testing.T) {
 	}
 	defer func() { FfmpegConvert = originalFfmpegConvert }()
 
+	// We MUST insert a stream first for this test to pass with new logic.
+	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: "stream_media", IsLive: true, MediaType: "none"})
+	// Now the handler will find this stream and set ActiveMediaFolder to BaseMediaFolder/stream_media
+
 	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/media/0", key), body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("X-API-Key", apiKey)
@@ -360,7 +364,7 @@ func TestServer_MediaUpload(t *testing.T) {
 	}
 
 	// Check if file exists
-	rawPath := filepath.Join(app.Channels[key].MediaFolder, "0.raw")
+	rawPath := filepath.Join(app.Channels[key].BaseMediaFolder, "stream_media", "0.raw")
 	if _, err := os.Stat(rawPath); os.IsNotExist(err) {
 		t.Errorf("expected raw file to exist at %s", rawPath)
 	}
@@ -465,7 +469,11 @@ func TestServer_Sync(t *testing.T) {
 
 	// Verify Media Resync
 	// 1. Create a dummy media file for line 1 (ID 1)
-	mediaPath := filepath.Join(app.Channels[key].MediaFolder, "1.m4a")
+	// We are in "stream3" (activeID from UpsertStream above)
+	// So path should be Base/stream3/1.m4a
+	mediaPath := filepath.Join(app.Channels[key].BaseMediaFolder, "stream3", "1.m4a")
+	// Ensure directory exists
+	os.MkdirAll(filepath.Dir(mediaPath), 0755)
 	if err := os.WriteFile(mediaPath, []byte("dummy"), 0644); err != nil {
 		t.Fatalf("failed to create dummy media file: %v", err)
 	}
@@ -506,7 +514,7 @@ func TestServer_Sync(t *testing.T) {
 
 	// 4. Verify Raw File Resync
 	// Create a dummy raw file for line 2 (ID 2)
-	rawPath := filepath.Join(app.Channels[key].MediaFolder, "2.raw")
+	rawPath := filepath.Join(app.Channels[key].BaseMediaFolder, "stream3", "2.raw")
 	if err := os.WriteFile(rawPath, []byte("dummy raw"), 0644); err != nil {
 		t.Fatalf("failed to create dummy raw file: %v", err)
 	}
@@ -558,7 +566,7 @@ func TestServer_Persistence(t *testing.T) {
 	apiKey := "key"
 	// Use manual setup to mimic restart behavior easily (just accessing DB)
 
-	app := NewApp(apiKey, db, []string{key}, dir)
+	app := NewApp(apiKey, db, []ChannelConfig{{Name: key, NumPastStreams: 1}}, dir)
 	// Directly call activate via App method if we export it or via channel state lookup
 	// For now, let's use the DB operations directly to verify persistence of the DB logic itself,
 	// but the test is "Server_Persistence", suggesting valid server flow.

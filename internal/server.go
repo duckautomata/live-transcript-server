@@ -23,9 +23,9 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	}
 
 	for _, cs := range app.Channels {
-		err := os.MkdirAll(cs.MediaFolder, 0755)
+		err := os.MkdirAll(cs.BaseMediaFolder, 0755)
 		if err != nil {
-			slog.Error("cannot create media folder", "key", cs.Key, "func", "RegisterRoutes", "err", err)
+			slog.Error("cannot create base media folder", "key", cs.Key, "func", "RegisterRoutes", "err", err)
 		}
 	}
 
@@ -143,7 +143,15 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 			return false
 		}
 
-		cs.ResetAudioFile()
+		// Set new active stream folder
+		cs.ActiveMediaFolder = filepath.Join(cs.BaseMediaFolder, activeId)
+		if err := os.MkdirAll(cs.ActiveMediaFolder, 0755); err != nil {
+			slog.Error("failed to create media folder", "key", cs.Key, "path", cs.ActiveMediaFolder, "err", err)
+			return false
+		}
+
+		// Rotation Logic
+		rotateFolders(cs.BaseMediaFolder, cs.NumPastStreams, activeId, cs.Key)
 		data := EventNewStreamData{
 			ActiveID:    newStream.ActiveID,
 			ActiveTitle: newStream.ActiveTitle,
@@ -279,12 +287,25 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 	// If we do, set MediaAvailable to true.
 	for i := range data.Transcript {
 		line := &data.Transcript[i]
-		m4aPath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.m4a", line.ID))
-		rawPath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.raw", line.ID))
-		if _, err := os.Stat(m4aPath); err == nil {
-			line.MediaAvailable = true
-		} else if _, err := os.Stat(rawPath); err == nil {
-			line.MediaAvailable = true
+
+		// Check for media in ActiveMediaFolder
+		if cs.ActiveMediaFolder != "" {
+			m4aPath := filepath.Join(cs.ActiveMediaFolder, fmt.Sprintf("%d.m4a", line.ID))
+			rawPath := filepath.Join(cs.ActiveMediaFolder, fmt.Sprintf("%d.raw", line.ID))
+			if _, err := os.Stat(m4aPath); err == nil {
+				line.MediaAvailable = true
+			} else if _, err := os.Stat(rawPath); err == nil {
+				line.MediaAvailable = true
+			}
+		} else if data.ActiveID != "" {
+			cs.ActiveMediaFolder = filepath.Join(cs.BaseMediaFolder, data.ActiveID)
+			m4aPath := filepath.Join(cs.ActiveMediaFolder, fmt.Sprintf("%d.m4a", line.ID))
+			rawPath := filepath.Join(cs.ActiveMediaFolder, fmt.Sprintf("%d.raw", line.ID))
+			if _, err := os.Stat(m4aPath); err == nil {
+				line.MediaAvailable = true
+			} else if _, err := os.Stat(rawPath); err == nil {
+				line.MediaAvailable = true
+			}
 		}
 	}
 
@@ -339,7 +360,8 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("failed to get last line id", "err", err)
 		return
 	}
-
+	// Save raw file logic removed from lineHandler as it handles JSON only.
+	// Uploads are handled by mediaHandler.
 	expectedID := lastID + 1
 	// Special case: if DB is empty (lastID = -1), we expect 0.
 	// This works because -1 + 1 = 0. And we expect the first line to be 0.
@@ -396,14 +418,28 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
-		http.Error(w, "Error retrieving file", http.StatusBadRequest)
+		http.Error(w, "Unable to get file", http.StatusBadRequest)
 		Http400Errors.Inc()
 		return
 	}
 	defer file.Close()
 
-	// Save raw file
-	rawFilePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.raw", id))
+	// Use ActiveMediaFolder for uploads
+	if cs.ActiveMediaFolder == "" {
+		// Try to recover from DB
+		stream, err := app.GetStream(r.Context(), cs.Key)
+		if err == nil && stream != nil {
+			cs.ActiveMediaFolder = filepath.Join(cs.BaseMediaFolder, stream.ActiveID)
+			os.MkdirAll(cs.ActiveMediaFolder, 0755)
+		} else {
+			http.Error(w, "No active stream", http.StatusBadRequest)
+			Http400Errors.Inc()
+			slog.Warn("media upload attempted with no active stream", "key", cs.Key)
+			return
+		}
+	}
+
+	rawFilePath := filepath.Join(cs.ActiveMediaFolder, fmt.Sprintf("%d.raw", id))
 	dst, err := os.Create(rawFilePath)
 	if err != nil {
 		http.Error(w, "Unable to create file", http.StatusInternalServerError)
@@ -605,22 +641,16 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 
 	stream, err := app.GetStream(r.Context(), cs.Key)
 	mediaType := "none"
-	activeID := ""
 	if err == nil && stream != nil {
 		mediaType = stream.MediaType
-		activeID = stream.ActiveID
 	}
 
 	// Helper to extract id and format
 	filename := r.PathValue("filename")
 	requestedStreamID := r.PathValue("streamID")
 
-	if requestedStreamID != activeID {
-		http.Error(w, "Stream ID mismatch or inactive", http.StatusNotFound)
-		Http400Errors.Inc()
-		slog.Warn("stream id mismatch", "key", cs.Key, "func", "streamHandler", "requestedStreamID", requestedStreamID, "activeID", activeID)
-		return
-	}
+	// We allow streaming from past streams if they exist.
+	// if requestedStreamID != activeID { ... }
 
 	if mediaType == "none" {
 		http.Error(w, "Media stream is disabled for this stream", http.StatusMethodNotAllowed)
@@ -643,7 +673,7 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 		Http400Errors.Inc()
 		return
 	}
-	filePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%s%s", idStr, ext))
+	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, fmt.Sprintf("%s%s", idStr, ext))
 
 	// Check if the file exists
 	_, err = os.Stat(filePath)
@@ -738,7 +768,7 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filePath := filepath.Join(cs.MediaFolder, fmt.Sprintf("%d.jpg", id))
+	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, fmt.Sprintf("%d.jpg", id))
 
 	// Check if the file exists
 	_, err = os.Stat(filePath)
@@ -795,26 +825,12 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		StreamID string `json:"stream_id"`
 		Start    int    `json:"start"`
 		End      int    `json:"end"`
-		Name     string `json:"name"` // Optional, used for metrics or logging?
 		Type     string `json:"type"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 		Http400Errors.Inc()
-		return
-	}
-
-	// Verify StreamID
-	activeID := ""
-	if stream != nil {
-		activeID = stream.ActiveID
-	}
-
-	if req.StreamID != activeID {
-		http.Error(w, "Stream ID mismatch or inactive", http.StatusBadRequest)
-		Http400Errors.Inc()
-		slog.Warn("stream id mismatch", "key", cs.Key, "func", "postClipHandler", "requestedStreamID", req.StreamID, "activeID", activeID)
 		return
 	}
 
@@ -845,39 +861,46 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if start < 0 || end <= start || end-start >= app.MaxClipSize {
-		slog.Warn("invalid start or end id", "key", cs.Key, "func", "postClipHandler", "start", start, "end", end, "requestedClipSize", 1+end-start, "maxClipSize", app.MaxClipSize, "err", err)
+		slog.Warn("invalid start or end id", "key", cs.Key, "func", "postClipHandler", "start", start, "end", end, "requestedClipSize", 1+end-start, "maxClipSize", app.MaxClipSize)
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		Http400Errors.Inc()
 		return
 	}
 
 	uniqueID := fmt.Sprintf("%d-%d-%d", start, end, time.Now().UnixNano())
-	mergedMediaPath, err := cs.MergeRawAudio(start, end, uniqueID)
+	streamFolder := filepath.Join(cs.BaseMediaFolder, req.StreamID)
+	if _, err := os.Stat(streamFolder); err != nil {
+		http.Error(w, "Stream not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("stream not found", "key", cs.Key, "func", "postClipHandler", "streamID", req.StreamID)
+		return
+	}
+	mergedRawPath, err := cs.MergeRawAudio(streamFolder, req.Start, req.End, uniqueID)
 	if err != nil {
-		os.Remove(mergedMediaPath)
+		os.Remove(mergedRawPath)
 		http.Error(w, "Server error", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		slog.Error("unable to merge raw audio", "key", cs.Key, "func", "postClipHandler", "startID", start, "endID", end, "err", err)
 		return
 	}
-	defer os.Remove(mergedMediaPath) // Delete the merged raw file when done
+	defer os.Remove(mergedRawPath) // Delete the merged raw file when done
 
-	mediaFilePath := filepath.Join(cs.MediaFolder, uniqueID+clipExt)
+	mediaFilePath := filepath.Join(streamFolder, uniqueID+clipExt)
 
 	// Note: audio has to be recoded to m4a otherwise it will be broken. Video can be remixed to a different container without any compatibility issues.
 	if reqMediaType == "mp4" {
-		err = FfmpegRemux(mergedMediaPath, mediaFilePath)
+		err = FfmpegRemux(mergedRawPath, mediaFilePath)
 		if err == nil {
 			// Also create m4a
-			m4aPath := filepath.Join(cs.MediaFolder, uniqueID+".m4a")
-			if err := FfmpegConvert(mergedMediaPath, m4aPath); err != nil {
+			m4aPath := filepath.Join(streamFolder, uniqueID+".m4a")
+			if err := FfmpegConvert(mergedRawPath, m4aPath); err != nil {
 				slog.Error("failed to create sidecar m4a for clip", "key", cs.Key, "id", uniqueID, "err", err)
 				Http500Errors.Inc()
 				// We don't fail the request, just log it. The MP4 is good.
 			}
 		}
 	} else {
-		err = FfmpegConvert(mergedMediaPath, mediaFilePath)
+		err = FfmpegConvert(mergedRawPath, mediaFilePath)
 	}
 
 	if err != nil {
@@ -925,20 +948,14 @@ func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stream, err := app.GetStream(r.Context(), cs.Key)
-	activeID := ""
-	if err == nil && stream != nil {
-		activeID = stream.ActiveID
-	}
-
 	// Parse path parameters
 	filename := r.PathValue("filename")
 	requestedStreamID := r.PathValue("streamID")
 
-	if requestedStreamID != activeID {
-		http.Error(w, "Stream ID mismatch or inactive", http.StatusNotFound)
+	if _, err := os.Stat(filepath.Join(cs.BaseMediaFolder, requestedStreamID)); err != nil {
+		http.Error(w, "Stream not found", http.StatusNotFound)
 		Http400Errors.Inc()
-		slog.Warn("stream id mismatch", "key", cs.Key, "func", "downloadHandler", "requestedStreamID", requestedStreamID, "activeID", activeID)
+		slog.Warn("stream not found", "key", cs.Key, "func", "downloadHandler", "streamID", requestedStreamID)
 		return
 	}
 
@@ -965,7 +982,8 @@ func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filePath := filepath.Join(cs.MediaFolder, idStr+ext)
+	// Check if file exists in BaseMediaFolder/{streamID}
+	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, idStr+ext)
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "File not found", http.StatusNotFound)
@@ -1005,20 +1023,12 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Helper to get active stream
-	stream, err := app.GetStream(r.Context(), cs.Key)
-	activeID := ""
-	if err == nil && stream != nil {
-		activeID = stream.ActiveID
-	}
-
-	if req.StreamID != activeID {
-		http.Error(w, "Stream ID mismatch or inactive", http.StatusBadRequest)
+	if _, err := os.Stat(filepath.Join(cs.BaseMediaFolder, req.StreamID)); err != nil {
+		http.Error(w, "Stream not found", http.StatusNotFound)
 		Http400Errors.Inc()
-		slog.Warn("stream id mismatch", "key", cs.Key, "func", "postTrimHandler", "requestedStreamID", req.StreamID, "activeID", activeID)
+		slog.Warn("stream not found", "key", cs.Key, "func", "postTrimHandler", "streamID", req.StreamID)
 		return
 	}
-
 	// Validate inputs
 	if req.ID == "" || req.Filename == "" {
 		http.Error(w, "Missing required parameters", http.StatusBadRequest)
@@ -1030,7 +1040,7 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 	extensions := []string{".m4a", ".mp4", ".mp3"}
 
 	for _, e := range extensions {
-		path := filepath.Join(cs.MediaFolder, req.ID+e)
+		path := filepath.Join(cs.BaseMediaFolder, req.StreamID, req.ID+e)
 		if _, err := os.Stat(path); err == nil {
 			srcPath = path
 			break

@@ -11,5 +11,9 @@ credentials:
 
 channels:
   # List of keys the server will work with.
-  - key1
-  - key2
+  # numPastStreams is the number of past streams to keep.
+  # If numPastStreams is 0, it will keep only the current stream.
+  - name: key1
+    numPastStreams: 5
+  - name: key2
+    numPastStreams: 0
