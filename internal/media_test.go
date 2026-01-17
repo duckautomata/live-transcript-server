@@ -22,6 +22,13 @@ func TestMediaAvailability(t *testing.T) {
 	// Seed data to ensure stream exists for sync
 	seedExampleData(t, app, "test")
 
+	// Mock FfmpegConvert
+	originalFfmpegConvert := FfmpegConvert
+	FfmpegConvert = func(inputFilePath, outputFilePath string) error {
+		return os.WriteFile(outputFilePath, []byte("converted"), 0644)
+	}
+	defer func() { FfmpegConvert = originalFfmpegConvert }()
+
 	// Create a mock server
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -108,9 +115,7 @@ func TestMediaAvailability(t *testing.T) {
 
 	// If 500 (ffmpeg missing), manual broadcast
 	if resp.StatusCode != http.StatusOK {
-		t.Logf("mediaHandler failed (likely ffmpeg missing): status %v. Triggering manual broadcast.", resp.StatusCode)
-		var cs *ChannelState = app.Channels["test"]
-		app.broadcastNewMedia(cs, []int{2})
+		t.Fatalf("mediaHandler failed: status %v body: %v", resp.StatusCode, resp.Body)
 	} else {
 		// Validated DB update only if handler success
 		l, err = app.GetLastLine(context.Background(), "test", "stream-1")

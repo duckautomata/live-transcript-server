@@ -698,25 +698,9 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stream, err := app.GetStream(r.Context(), cs.Key)
-	mediaType := "none"
-	if err == nil && stream != nil {
-		mediaType = stream.MediaType
-	}
-
 	// Helper to extract id and format
 	filename := r.PathValue("filename")
 	requestedStreamID := r.PathValue("streamID")
-
-	// We allow streaming from past streams if they exist.
-	// if requestedStreamID != activeID { ... }
-
-	if mediaType == "none" {
-		http.Error(w, "Media stream is disabled for this stream", http.StatusMethodNotAllowed)
-		Http400Errors.Inc()
-		slog.Warn("cannot retrieve media. Media type is none", "key", cs.Key, "func", "streamHandler")
-		return
-	}
 	processStartTime := time.Now()
 
 	ext := filepath.Ext(filename)
@@ -735,7 +719,7 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, fmt.Sprintf("%s%s", idStr, ext))
 
 	// Check if the file exists
-	_, err = os.Stat(filePath)
+	_, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "File not found", http.StatusNotFound)
@@ -979,13 +963,13 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		StreamVideoClipped.WithLabelValues(cs.Key).Inc()
 	}
 
-	if time.Since(processStartTime).Seconds() > 1 {
+	if time.Since(processStartTime).Seconds() > 5 {
 		slog.Warn("slow clip processing time", "key", cs.Key, "func", "postClipHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "start", start, "end", end, "mediaType", reqMediaType)
 	}
 
 	writeJSON(w, map[string]string{
-		"status": "success",
-		"id":     uniqueID,
+		"status":  "success",
+		"clip_id": uniqueID,
 	})
 }
 
@@ -1023,7 +1007,7 @@ func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Check for optional name query param
 	queryName := r.URL.Query().Get("name")
-	downloadFilename := filename
+	downloadFilename := requestedStreamID + filename
 	if queryName != "" {
 		downloadFilename = sanitize.BaseName(queryName) + ext
 	}
@@ -1070,10 +1054,9 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse JSON body
 	var req struct {
 		StreamID string  `json:"stream_id"`
-		ID       string  `json:"id"`
+		ClipID   string  `json:"clip_id"`
 		Start    float64 `json:"start"`
 		End      float64 `json:"end"`
-		Filename string  `json:"filename"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1089,17 +1072,17 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Validate inputs
-	if req.ID == "" || req.Filename == "" {
+	if req.ClipID == "" {
 		http.Error(w, "Missing required parameters", http.StatusBadRequest)
 		return
 	}
 
 	// Find source file
 	var srcPath string
-	extensions := []string{".m4a", ".mp4", ".mp3"}
+	extensions := []string{".mp4", ".mp3", ".m4a"}
 
 	for _, e := range extensions {
-		path := filepath.Join(cs.BaseMediaFolder, req.StreamID, req.ID+e)
+		path := filepath.Join(cs.BaseMediaFolder, req.StreamID, req.ClipID+e)
 		if _, err := os.Stat(path); err == nil {
 			srcPath = path
 			break
@@ -1113,7 +1096,8 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Trim to a temporary file, then overwrite the original
-	tempTrimmedPath := srcPath + ".tmp"
+	ext := filepath.Ext(srcPath)
+	tempTrimmedPath := strings.TrimSuffix(srcPath, ext) + "-tmp" + ext
 	if err := FfmpegTrim(srcPath, tempTrimmedPath, req.Start, req.End); err != nil {
 		slog.Error("failed to trim file", "err", err)
 		http.Error(w, "Failed to trim file", http.StatusInternalServerError)
@@ -1132,8 +1116,8 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Success. The file is saved on disk. Client can now download it using the ID.
 	writeJSON(w, map[string]string{
-		"status": "success",
-		"id":     req.ID,
+		"status":  "success",
+		"clip_id": req.ClipID,
 	})
 }
 

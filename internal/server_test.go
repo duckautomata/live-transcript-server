@@ -775,14 +775,14 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	}
 	var clipResp map[string]string
 	json.NewDecoder(rr.Body).Decode(&clipResp)
-	if clipResp["id"] == "" {
-		t.Error("clipHandler: expected id in response")
+	if clipResp["clip_id"] == "" {
+		t.Error("clipHandler: expected clip_id in response")
 	}
 
 	// 6. Test trimHandler (POST)
 	trimReq := map[string]interface{}{
 		"stream_id": "s1",
-		"id":        "1", // Trimming filed ID 1
+		"clip_id":   "1", // Trimming filed ID 1
 		"start":     0.0,
 		"end":       5.0,
 		"filename":  "trimmed_output",
@@ -800,8 +800,8 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	if trimResp["status"] != "success" {
 		t.Errorf("trimHandler: expected success, got %s", trimResp["status"])
 	}
-	if trimResp["id"] != "1" {
-		t.Errorf("trimHandler: expected id '1' (in-place replacement), got '%s'", trimResp["id"])
+	if trimResp["clip_id"] != "1" {
+		t.Errorf("trimHandler: expected clip_id '1' (in-place replacement), got '%s'", trimResp["clip_id"])
 	}
 }
 
