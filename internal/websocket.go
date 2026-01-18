@@ -37,10 +37,40 @@ func isClientDisconnectError(err error) bool {
 	return false
 }
 
-func (cs *ChannelState) readLoop(conn *websocket.Conn) error {
+// writePump pumps messages from the hub to the websocket connection.
+//
+// A goroutine running writePump must be started for each connection. The
+// application ensures that there is at most one writer to a connection by
+// executing all writes from this goroutine.
+func (c *Client) writePump(cs *ChannelState) {
+	defer func() {
+		cs.closeSocket(c)
+	}()
+
+	for {
+		msg, ok := <-c.send
+		if !ok {
+			// The hub closed the channel.
+			c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
+		}
+
+		if err := c.conn.WriteJSON(msg); err != nil {
+			if isClientDisconnectError(err) {
+				slog.Debug("client disconnected before message was sent", "key", cs.Key, "err", err)
+			} else {
+				slog.Error("failed to write message to client", "key", cs.Key, "err", err)
+				WebsocketError.Inc()
+			}
+			return
+		}
+	}
+}
+
+func (cs *ChannelState) readLoop(client *Client) error {
 	for {
 		var msg WebSocketMessage
-		if err := conn.ReadJSON(&msg); err != nil {
+		if err := client.conn.ReadJSON(&msg); err != nil {
 			if isClientDisconnectError(err) {
 				return nil
 			}
@@ -67,8 +97,10 @@ func (cs *ChannelState) readLoop(conn *websocket.Conn) error {
 				},
 			}
 
-			if err := conn.WriteJSON(pongMsg); err != nil {
-				slog.Error("failed to send pong", "key", cs.Key, "func", "readLoop", "err", err)
+			select {
+			case client.send <- pongMsg:
+			default:
+				slog.Error("failed to send pong: buffer full", "key", cs.Key, "func", "readLoop")
 			}
 		}
 	}
@@ -117,8 +149,8 @@ func (app *App) broadcastNewMedia(cs *ChannelState, ids []int) {
 	cs.broadcast(msg)
 }
 
-// Send full transcript to conn
-func (app *App) syncClient(ctx context.Context, cs *ChannelState, conn *websocket.Conn) {
+// Send full transcript to client
+func (app *App) syncClient(ctx context.Context, cs *ChannelState, client *Client) {
 	stream, err := app.GetStream(ctx, cs.Key)
 	if err != nil {
 		slog.Error("failed to get stream for sync", "key", cs.Key, "err", err)
@@ -156,14 +188,12 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, conn *websocke
 	}
 	startTime := time.Now()
 	MessagesTotal.Inc()
-	if err := conn.WriteJSON(outData); err != nil {
-		if isClientDisconnectError(err) {
-			slog.Debug("client disconnected before sync message was sent", "key", cs.Key, "err", err)
-		} else {
-			slog.Error("failed to write sync message to client", "key", cs.Key, "err", err)
-			WebsocketError.Inc()
-		}
-		cs.closeSocket(conn)
+
+	select {
+	case client.send <- outData:
+	default:
+		slog.Error("failed to send sync message: buffer full", "key", cs.Key)
+		cs.closeSocket(client)
 		return
 	}
 
@@ -174,14 +204,11 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, conn *websocke
 			Event: EventPastStreams,
 			Data:  EventPastStreamsData{Streams: pastStreams},
 		}
-		if err := conn.WriteJSON(pastStreamsMsg); err != nil {
-			if isClientDisconnectError(err) {
-				slog.Debug("client disconnected before past streams message was sent", "key", cs.Key, "err", err)
-			} else {
-				slog.Error("failed to write past streams message to client", "key", cs.Key, "err", err)
-				WebsocketError.Inc()
-			}
-			cs.closeSocket(conn)
+		select {
+		case client.send <- pastStreamsMsg:
+		default:
+			slog.Error("failed to send past streams message: buffer full", "key", cs.Key)
+			cs.closeSocket(client)
 			return
 		}
 	}
@@ -189,41 +216,36 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, conn *websocke
 	MessageProcessingDuration.Observe(time.Since(startTime).Seconds())
 }
 
-func (cs *ChannelState) broadcast(msg any) {
+func (cs *ChannelState) broadcast(msg WebSocketMessage) {
 	startTime := time.Now()
 	// MessageSize.Observe(float64(len(msg))) // Size metric is hard with any
 	cs.ClientsLock.Lock()
 	for _, c := range cs.Clients {
 		MessagesTotal.Inc()
-		go func(msg any, c *websocket.Conn) {
-			if err := c.WriteJSON(msg); err != nil {
-				if isClientDisconnectError(err) {
-					slog.Debug("client disconnected before message was sent", "key", cs.Key, "err", err)
-				} else {
-					slog.Error("failed to write message to client", "key", cs.Key, "err", err)
-					WebsocketError.Inc()
-				}
-				cs.closeSocket(c)
-			}
-		}(msg, c)
+		select {
+		case c.send <- msg:
+		default:
+			go cs.closeSocket(c)
+		}
 	}
 	cs.ClientsLock.Unlock()
 	MessageProcessingDuration.Observe(time.Since(startTime).Seconds())
 }
 
-func (cs *ChannelState) closeSocket(conn *websocket.Conn) error {
+func (cs *ChannelState) closeSocket(client *Client) error {
 	cs.ClientsLock.Lock()
 	defer cs.ClientsLock.Unlock()
 
 	for i, c := range cs.Clients {
-		if c == conn {
+		if c == client {
 			cs.Clients = slices.Delete(cs.Clients, i, i+1)
 			cs.ClientConnections--
 
 			ActiveConnections.Dec()
 			ClientsPerKey.WithLabelValues(cs.Key).Dec()
 
-			return conn.Close()
+			close(client.send)
+			return client.conn.Close()
 		}
 	}
 	// Connection already closed or not found
@@ -261,18 +283,23 @@ func (app *App) wsHandler(w http.ResponseWriter, r *http.Request) {
 	ClientsPerKey.WithLabelValues(cs.Key).Inc()
 	startTime := time.Now()
 
+	client := &Client{conn: conn, send: make(chan WebSocketMessage, 256)}
+
 	cs.ClientsLock.Lock()
 	cs.ClientConnections++
-	cs.Clients = append(cs.Clients, conn)
+	cs.Clients = append(cs.Clients, client)
 	cs.ClientsLock.Unlock()
+
+	go client.writePump(cs)
+
 	defer func() {
 		ConnectionDuration.Observe(time.Since(startTime).Seconds())
-		cs.closeSocket(conn)
+		cs.closeSocket(client)
 	}()
 
-	app.syncClient(r.Context(), cs, conn)
+	app.syncClient(r.Context(), cs, client)
 
-	err = cs.readLoop(conn)
+	err = cs.readLoop(client)
 	if err != nil {
 		slog.Error("error in clients readloop", "key", cs.Key, "func", "wsHandler", "err", err)
 		WebsocketError.Inc()

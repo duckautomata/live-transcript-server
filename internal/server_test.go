@@ -732,8 +732,8 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Errorf("downloadHandler: expected OK, got %v", rr.Code)
 	}
-	if rr.Header().Get("Content-Disposition") != "attachment; filename=\"1.m4a\"" {
-		t.Errorf("downloadHandler: expected attachment; filename=\"1.m4a\", got %s", rr.Header().Get("Content-Disposition"))
+	if rr.Header().Get("Content-Disposition") != "attachment; filename=\"s1_1.m4a\"" {
+		t.Errorf("downloadHandler: expected attachment; filename=\"s1_1.m4a\", got %s", rr.Header().Get("Content-Disposition"))
 	}
 
 	// 3b. Test downloadHandler with custom name

@@ -11,6 +11,12 @@ import (
 
 // ===== Data Models =====
 
+// Client is a middleman between the websocket connection and the hub.
+type Client struct {
+	conn *websocket.Conn
+	send chan WebSocketMessage
+}
+
 type Segment struct {
 	Timestamp int    `json:"timestamp"`
 	Text      string `json:"text"`
@@ -120,7 +126,7 @@ type EventPastStreamsData struct {
 type ChannelState struct {
 	Key               string
 	ClientsLock       sync.Mutex
-	Clients           []*websocket.Conn
+	Clients           []*Client
 	ClientConnections int
 	// ActiveMediaFolder is the folder where the current active stream media is stored.
 	// This changes when a new stream is activated.
@@ -161,7 +167,7 @@ func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, tempDir s
 		baseMediaFolder := filepath.Join(app.TempDir, config.Name)
 		app.Channels[config.Name] = &ChannelState{
 			Key:             config.Name,
-			Clients:         make([]*websocket.Conn, 0, 1000),
+			Clients:         make([]*Client, 0, 1000),
 			BaseMediaFolder: baseMediaFolder,
 			// ActiveMediaFolder will be set on stream activation
 			ClientConnections: 0,

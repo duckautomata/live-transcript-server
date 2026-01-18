@@ -1007,7 +1007,7 @@ func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Check for optional name query param
 	queryName := r.URL.Query().Get("name")
-	downloadFilename := requestedStreamID + filename
+	downloadFilename := requestedStreamID + "_" + filename
 	if queryName != "" {
 		downloadFilename = sanitize.BaseName(queryName) + ext
 	}
