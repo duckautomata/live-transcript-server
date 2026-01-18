@@ -281,7 +281,7 @@ func TestServer_LineUpdate(t *testing.T) {
 		},
 	}
 	body, _ := json.Marshal(line0)
-	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/line", key), bytes.NewBuffer(body))
+	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/line/stream2", key), bytes.NewBuffer(body))
 	req.Header.Set("X-API-Key", apiKey)
 	rr := httptest.NewRecorder()
 
@@ -312,7 +312,7 @@ func TestServer_LineUpdate(t *testing.T) {
 		},
 	}
 	body, _ = json.Marshal(line2)
-	req, _ = http.NewRequest("POST", fmt.Sprintf("/%s/line", key), bytes.NewBuffer(body))
+	req, _ = http.NewRequest("POST", fmt.Sprintf("/%s/line/stream2", key), bytes.NewBuffer(body))
 	req.Header.Set("X-API-Key", apiKey)
 	rr = httptest.NewRecorder()
 
@@ -350,9 +350,10 @@ func TestServer_MediaUpload(t *testing.T) {
 
 	// We MUST insert a stream first for this test to pass with new logic.
 	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: "stream_media", IsLive: true, MediaType: "none"})
-	// Now the handler will find this stream and set ActiveMediaFolder to BaseMediaFolder/stream_media
+	// Ensure folder exists
+	os.MkdirAll(filepath.Join(app.Channels[key].BaseMediaFolder, "stream_media"), 0755)
 
-	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/media/0", key), body)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/media/stream_media/0", key), body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("X-API-Key", apiKey)
 	rr := httptest.NewRecorder()
@@ -390,7 +391,7 @@ func TestServer_MediaUpload(t *testing.T) {
 	}
 	part.Write([]byte("dummy audio data"))
 	writer.Close()
-	req, _ = http.NewRequest("POST", fmt.Sprintf("/%s/media/0", key), body)
+	req, _ = http.NewRequest("POST", fmt.Sprintf("/%s/media/stream_media/0", key), body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("X-API-Key", apiKey)
 	rr = httptest.NewRecorder()
@@ -800,8 +801,11 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	if trimResp["status"] != "success" {
 		t.Errorf("trimHandler: expected success, got %s", trimResp["status"])
 	}
-	if trimResp["clip_id"] != "1" {
-		t.Errorf("trimHandler: expected clip_id '1' (in-place replacement), got '%s'", trimResp["clip_id"])
+	if trimResp["clip_id"] == "" {
+		t.Errorf("trimHandler: expected valid clip_id, got empty")
+	}
+	if trimResp["clip_id"] == "1" {
+		t.Errorf("trimHandler: expected new clip_id, got same as input '1'")
 	}
 }
 

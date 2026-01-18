@@ -2,6 +2,7 @@ package internal
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,7 +76,7 @@ func TestWebsocketBroadcast(t *testing.T) {
 	ws1.ReadJSON(&initMsg)
 
 	reqBody := `{"id": 2, "timestamp": 1000, "segments": [{"timestamp": 1000, "text": "Broadcast Test"}]}`
-	req, _ := http.NewRequest("POST", server.URL+"/"+key+"/line", strings.NewReader(reqBody))
+	req, _ := http.NewRequest("POST", server.URL+"/"+key+"/line/stream-1", strings.NewReader(reqBody))
 	req.Header.Set("X-API-Key", app.ApiKey)
 	resp, err := server.Client().Do(req)
 	if err != nil {
@@ -275,6 +276,11 @@ func TestIsClientDisconnectError(t *testing.T) {
 		{
 			name:     "Normal Closure",
 			err:      &websocket.CloseError{Code: websocket.CloseNormalClosure},
+			expected: true,
+		},
+		{
+			name:     "Net Closed Connection",
+			err:      net.ErrClosed,
 			expected: true,
 		},
 		{

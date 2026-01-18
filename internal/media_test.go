@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -21,6 +22,8 @@ func TestMediaAvailability(t *testing.T) {
 
 	// Seed data to ensure stream exists for sync
 	seedExampleData(t, app, "test")
+	// Ensure folder exists for stream-1 (used in seedExampleData)
+	os.MkdirAll(filepath.Join(app.Channels["test"].BaseMediaFolder, "stream-1"), 0755)
 
 	// Mock FfmpegConvert
 	originalFfmpegConvert := FfmpegConvert
@@ -60,7 +63,7 @@ func TestMediaAvailability(t *testing.T) {
 		Segments:  []Segment{{Timestamp: 1000, Text: "Test Line"}},
 	}
 	body, _ := json.Marshal(line)
-	req, _ := http.NewRequest("POST", server.URL+"/test/line", bytes.NewBuffer(body))
+	req, _ := http.NewRequest("POST", server.URL+"/test/line/stream-1", bytes.NewBuffer(body))
 	req.Header.Set("X-API-Key", app.ApiKey)
 
 	resp, err := server.Client().Do(req)
@@ -103,7 +106,7 @@ func TestMediaAvailability(t *testing.T) {
 	part.Write(rawContent)
 	writer.Close()
 
-	req, _ = http.NewRequest("POST", server.URL+"/test/media/2", bodyBuf)
+	req, _ = http.NewRequest("POST", server.URL+"/test/media/stream-1/2", bodyBuf)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("X-API-Key", app.ApiKey)
 

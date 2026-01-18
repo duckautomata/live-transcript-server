@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kennygrant/sanitize"
+	"github.com/lithammer/shortuuid/v4"
 )
 
 func (app *App) RegisterRoutes(mux *http.ServeMux) {
@@ -35,8 +36,8 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /{channel}/activate", app.apiKeyMiddleware(app.activateHandler))
 	mux.HandleFunc("POST /{channel}/deactivate", app.apiKeyMiddleware(app.deactivateHandler))
 	mux.HandleFunc("POST /{channel}/sync", app.apiKeyMiddleware(app.syncHandler))
-	mux.HandleFunc("POST /{channel}/line", app.apiKeyMiddleware(app.lineHandler))
-	mux.HandleFunc("POST /{channel}/media/{id}", app.apiKeyMiddleware(app.mediaHandler))
+	mux.HandleFunc("POST /{channel}/line/{streamID}", app.apiKeyMiddleware(app.lineHandler))
+	mux.HandleFunc("POST /{channel}/media/{streamID}/{id}", app.apiKeyMiddleware(app.mediaHandler))
 	mux.HandleFunc("GET /{channel}/statuscheck", app.apiKeyMiddleware(app.statuscheckHandler))
 
 	// Public routes
@@ -180,16 +181,18 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 			slog.Error("failed to get all streams for rotation", "key", cs.Key, "err", err)
 		}
 
-		// Broadcast pastStreams event
+		// Broadcast pastStreams event if there is any
 		pastStreams, err := app.GetPastStreams(ctx, cs.Key, activeId)
-		if err == nil {
+		if err != nil {
+			slog.Error("failed to get past streams for broadcast", "key", cs.Key, "err", err)
+		} else {
+			// an empty slice will be a nil pointer (null in the json message)
+			// client should be able to interpret a null array as empty.
 			pastStreamsMsg := WebSocketMessage{
 				Event: EventPastStreams,
 				Data:  EventPastStreamsData{Streams: pastStreams},
 			}
 			cs.broadcast(pastStreamsMsg)
-		} else {
-			slog.Error("failed to get past streams for broadcast", "key", cs.Key, "err", err)
 		}
 
 		data := EventNewStreamData{
@@ -393,16 +396,15 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 	uploadTime := time.Since(uploadStartTime).Milliseconds()
 	processStartTime := time.Now()
 
-	// Get Active Stream to determine where to append line
-	stream, err := app.GetStream(r.Context(), cs.Key)
-	if err != nil || stream == nil {
-		http.Error(w, "No active stream found", http.StatusNotFound)
+	streamID := r.PathValue("streamID")
+	if streamID == "" {
+		http.Error(w, "Stream ID required", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Warn("no active stream for line append", "key", cs.Key, "func", "lineHandler")
+		slog.Warn("stream id required", "key", cs.Key, "func", "lineHandler")
 		return
 	}
 
-	lastID, err := app.GetLastLineID(r.Context(), cs.Key, stream.ActiveID)
+	lastID, err := app.GetLastLineID(r.Context(), cs.Key, streamID)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
@@ -423,14 +425,14 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := app.InsertTranscriptLine(r.Context(), cs.Key, stream.ActiveID, data); err != nil {
+	if err := app.InsertTranscriptLine(r.Context(), cs.Key, streamID, data); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		slog.Error("failed to insert transcript line", "err", err)
 		return
 	}
 
-	app.broadcastNewLine(r.Context(), cs, stream.ActiveID, uploadTime, &data)
+	app.broadcastNewLine(r.Context(), cs, streamID, uploadTime, &data)
 	if time.Since(processStartTime).Seconds() > 1 {
 		slog.Warn("slow processing time", "key", cs.Key, "func", "lineHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.ID)
 	}
@@ -471,22 +473,17 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Use ActiveMediaFolder for uploads
-	if cs.ActiveMediaFolder == "" {
-		// Try to recover from DB
-		stream, err := app.GetStream(r.Context(), cs.Key)
-		if err == nil && stream != nil {
-			cs.ActiveMediaFolder = filepath.Join(cs.BaseMediaFolder, stream.ActiveID)
-			os.MkdirAll(cs.ActiveMediaFolder, 0755)
-		} else {
-			http.Error(w, "No active stream", http.StatusBadRequest)
-			Http400Errors.Inc()
-			slog.Warn("media upload attempted with no active stream", "key", cs.Key)
-			return
-		}
+	streamID := r.PathValue("streamID")
+	// Use ActiveMediaFolder for uploads based on streamID
+	targetMediaFolder := filepath.Join(cs.BaseMediaFolder, streamID)
+	if _, err := os.Stat(targetMediaFolder); os.IsNotExist(err) {
+		http.Error(w, "incorrect streamId", http.StatusBadRequest)
+		Http400Errors.Inc()
+		slog.Warn("media upload attempted for non-existent stream folder", "key", cs.Key, "streamID", streamID)
+		return
 	}
 
-	rawFilePath := filepath.Join(cs.ActiveMediaFolder, fmt.Sprintf("%d.raw", id))
+	rawFilePath := filepath.Join(targetMediaFolder, fmt.Sprintf("%d.raw", id))
 	dst, err := os.Create(rawFilePath)
 	if err != nil {
 		http.Error(w, "Unable to create file", http.StatusInternalServerError)
@@ -531,20 +528,14 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	// Update DB and broadcast
 	success := true
 	// Get Active Stream explicitly for DB updates
-	streamForDB, err := app.GetStream(r.Context(), cs.Key)
-	activeID := ""
-	if err == nil && streamForDB != nil {
-		activeID = streamForDB.ActiveID
-	}
-
-	if activeID != "" {
-		if err := app.SetMediaAvailable(r.Context(), cs.Key, activeID, id, true); err != nil {
+	if streamID != "" {
+		if err := app.SetMediaAvailable(r.Context(), cs.Key, streamID, id, true); err != nil {
 			if err.Error() == "line not found" {
 				// This usually fails if the media was uploaded before the line was added.
 				// Wait 500ms then try again to give the line time to be added.
 				slog.Warn("line not found, retrying", "key", cs.Key, "id", id)
 				time.Sleep(500 * time.Millisecond)
-				if err := app.SetMediaAvailable(r.Context(), cs.Key, activeID, id, true); err != nil {
+				if err := app.SetMediaAvailable(r.Context(), cs.Key, streamID, id, true); err != nil {
 					slog.Error("failed to set media available on retry", "key", cs.Key, "id", id, "err", err)
 					Http500Errors.Inc()
 					success = false
@@ -560,10 +551,10 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// We don't fail the request because the file is saved and converted.
-	if success && activeID != "" {
+	if success && streamID != "" {
 		// Broadcast new media availability
 		// Get last 100 available IDs
-		ids, err := app.GetLastAvailableMediaIDs(r.Context(), cs.Key, activeID, 100)
+		ids, err := app.GetLastAvailableMediaIDs(r.Context(), cs.Key, streamID, 100)
 		if err != nil {
 			slog.Error("failed to get last available media ids. Fallback to single id", "key", cs.Key, "err", err)
 			ids = []int{id}
@@ -724,7 +715,7 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 		if os.IsNotExist(err) {
 			http.Error(w, "File not found", http.StatusNotFound)
 			Http400Errors.Inc()
-			slog.Warn("file not found for the requested id", "key", cs.Key, "func", "streamHandler", "id", idStr, "ext", ext)
+			slog.Warn("file not found for the requested id", "key", cs.Key, "func", "streamHandler", "requestedStreamID", requestedStreamID, "filename", filename, "id", idStr, "ext", ext)
 			return
 		}
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -767,20 +758,6 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stream, err := app.GetStream(r.Context(), cs.Key)
-	mediaType := "none"
-	activeID := ""
-	if err == nil && stream != nil {
-		mediaType = stream.MediaType
-		activeID = stream.ActiveID
-	}
-
-	if mediaType != "video" {
-		http.Error(w, "Frame download is disabled for this stream", http.StatusMethodNotAllowed)
-		Http400Errors.Inc()
-		slog.Warn("cannot retrieve frame. Media type is not video", "key", cs.Key, "func", "getFrameHandler", "mediaType", mediaType)
-		return
-	}
 	processStartTime := time.Now()
 
 	// Helper to extract id and format
@@ -788,10 +765,10 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 	requestedStreamID := r.PathValue("streamID")
 	ext := filepath.Ext(filename)
 
-	if requestedStreamID != "" && requestedStreamID != activeID {
-		http.Error(w, "Stream ID mismatch", http.StatusNotFound)
+	if requestedStreamID == "" {
+		http.Error(w, "Stream ID required", http.StatusNotFound)
 		Http400Errors.Inc()
-		slog.Warn("stream id mismatch", "key", cs.Key, "func", "getFrameHandler", "requestedStreamID", requestedStreamID, "activeID", activeID)
+		slog.Warn("stream id required", "key", cs.Key, "func", "getFrameHandler", "requestedStreamID", requestedStreamID)
 		return
 	}
 
@@ -910,7 +887,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	uniqueID := fmt.Sprintf("%d-%d-%d", start, end, time.Now().UnixNano())
+	uniqueID := shortuuid.New()
 	streamFolder := filepath.Join(cs.BaseMediaFolder, req.StreamID)
 	if _, err := os.Stat(streamFolder); err != nil {
 		http.Error(w, "Stream not found", http.StatusNotFound)
@@ -1095,29 +1072,24 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Trim to a temporary file, then overwrite the original
+	// Generate new ID for the trimmed file
+	newClipID := shortuuid.New()
 	ext := filepath.Ext(srcPath)
-	tempTrimmedPath := strings.TrimSuffix(srcPath, ext) + "-tmp" + ext
-	if err := FfmpegTrim(srcPath, tempTrimmedPath, req.Start, req.End); err != nil {
+	newClipPath := filepath.Join(cs.BaseMediaFolder, req.StreamID, newClipID+ext)
+
+	// Trim to the new file
+	if err := FfmpegTrim(srcPath, newClipPath, req.Start, req.End); err != nil {
 		slog.Error("failed to trim file", "err", err)
 		http.Error(w, "Failed to trim file", http.StatusInternalServerError)
 		Http500Errors.Inc()
-		return
-	}
-
-	// Overwrite the original
-	if err := os.Rename(tempTrimmedPath, srcPath); err != nil {
-		slog.Error("failed to overwrite original file with trimmed version", "err", err)
-		http.Error(w, "Failed to save trimmed file", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		os.Remove(tempTrimmedPath) // Clean up
+		os.Remove(newClipPath) // Cleanup if it was partially created
 		return
 	}
 
 	// Success. The file is saved on disk. Client can now download it using the ID.
 	writeJSON(w, map[string]string{
 		"status":  "success",
-		"clip_id": req.ClipID,
+		"clip_id": newClipID,
 	})
 }
 

@@ -22,6 +22,11 @@ func isClientDisconnectError(err error) bool {
 		return true
 	}
 
+	// 1.5 Check for net.ErrClosed (use of closed network connection)
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+
 	// 2. Check for underlying network/OS errors (Broken Pipe or Connection Reset)
 	// This handles "writev: broken pipe" and "read: connection reset by peer"
 	var opErr *net.OpError
