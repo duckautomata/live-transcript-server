@@ -1,11 +1,20 @@
 # latest
-Using version [2.2](#22-2026-01-10)
+Using version [2.3](#23-2026-01-20)
 
 # Major version 2
-Using version [2.2](#22-2026-01-10)
+Using version [2.3](#23-2026-01-20)
 
 # Major version 1
 Using version [1.6](#16-2025-12-18)
+
+## 2.3 (2026-01-20)
+**Changes**
+- Added R2 storage option.
+- Fixed websocket bugs
+- Fixed websocket connection drops causing errors.
+- Changed API structure to simplify requests.
+- Added past streams event and saves past streams.
+- Fixed trim bug.
 
 ## 2.2 (2026-01-10)
 **Changes**
