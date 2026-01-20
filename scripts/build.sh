@@ -4,6 +4,7 @@
 #
 # Usage: ./scripts/build.sh <version>
 # Example: ./scripts/build.sh 1.2
+#          ./scripts/build.sh dev
 
 # --- Configuration ---
 IMAGE_NAME="duckautomata/live-transcript-server"
@@ -27,29 +28,45 @@ fi
 
 VERSION=$1
 
-# Validate the version format using a regular expression.
-if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+$ ]]; then
+# Validates the version format.
+if [ "$VERSION" == "dev" ]; then
+    IS_DEV=true
+elif [[ $VERSION =~ ^[0-9]+\.[0-9]+$ ]]; then
+    IS_DEV=false
+else
     echo "Error: Invalid version format: '${VERSION}'"
-    echo "   Please use the format 'major.minor' (e.g., '1.2' or '10.4')."
+    echo "   Please use the format 'major.minor' (e.g., '1.2' or '10.4') or 'dev'."
     exit 1
 fi
 
 # --- Tag Generation ---
-# Extract the major version (e.g., '1' from '1.2')
-MAJOR_VERSION=$(echo "$VERSION" | cut -d. -f1)
-
 # Generate Build Time
 BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Construct the full tags
-SPECIFIC_TAG="${IMAGE_NAME}:${VERSION}"
-MAJOR_TAG="${IMAGE_NAME}:${MAJOR_VERSION}"
-LATEST_TAG="${IMAGE_NAME}:latest"
-
 echo -e "\nWill build image with the following tags:"
-echo "   - Specific: ${SPECIFIC_TAG}"
-echo "   - Major:    ${MAJOR_TAG}"
-echo "   - Latest:   ${LATEST_TAG}"
+
+TAG_ARGS=""
+
+if [ "$IS_DEV" = "true" ]; then
+    DEV_TAG="${IMAGE_NAME}:dev"
+    echo "   - Dev:      ${DEV_TAG}"
+    TAG_ARGS="-t ${DEV_TAG}"
+else
+    # Extract the major version (e.g., '1' from '1.2')
+    MAJOR_VERSION=$(echo "$VERSION" | cut -d. -f1)
+
+    # Construct the full tags
+    SPECIFIC_TAG="${IMAGE_NAME}:${VERSION}"
+    MAJOR_TAG="${IMAGE_NAME}:${MAJOR_VERSION}"
+    LATEST_TAG="${IMAGE_NAME}:latest"
+
+    echo "   - Specific: ${SPECIFIC_TAG}"
+    echo "   - Major:    ${MAJOR_TAG}"
+    echo "   - Latest:   ${LATEST_TAG}"
+
+    TAG_ARGS="-t ${SPECIFIC_TAG} -t ${MAJOR_TAG} -t ${LATEST_TAG}"
+fi
+
 echo "-----------------------------------"
 
 # --- Docker Command ---
@@ -65,12 +82,11 @@ fi
 
 # Build the image and apply all tags in a single, efficient command.
 echo "Building Docker image..."
+# shellcheck disable=SC2086
 if ! $DOCKER_CMD build \
     --build-arg VERSION="${VERSION}" \
     --build-arg BUILD_TIME="${BUILD_TIME}" \
-    -t "${SPECIFIC_TAG}" \
-    -t "${MAJOR_TAG}" \
-    -t "${LATEST_TAG}" \
+    $TAG_ARGS \
     .; then
     echo "Docker build failed. Aborting."
     exit 1
@@ -83,13 +99,18 @@ $DOCKER_CMD images --filter=reference="${IMAGE_NAME}"
 read -p "Push these tags to the registry? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo " Pushing ${SPECIFIC_TAG}..."
-    $DOCKER_CMD push "${SPECIFIC_TAG}"
+    if [ "$IS_DEV" = "true" ]; then
+        echo " Pushing ${DEV_TAG}..."
+        $DOCKER_CMD push "${DEV_TAG}"
+    else
+        echo " Pushing ${SPECIFIC_TAG}..."
+        $DOCKER_CMD push "${SPECIFIC_TAG}"
 
-    echo " Pushing ${MAJOR_TAG}..."
-    $DOCKER_CMD push "${MAJOR_TAG}"
+        echo " Pushing ${MAJOR_TAG}..."
+        $DOCKER_CMD push "${MAJOR_TAG}"
 
-    echo " Pushing ${LATEST_TAG}..."
-    $DOCKER_CMD push "${LATEST_TAG}"
+        echo " Pushing ${LATEST_TAG}..."
+        $DOCKER_CMD push "${LATEST_TAG}"
+    fi
     echo "Push complete."
 fi

@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -139,36 +141,127 @@ var FfmpegTrim = func(inputFilePath, outputFilePath string, start, end float64) 
 	return nil
 }
 
-// Binary copy all raw chunks into a single raw file. start and end are inclusive. Returns the merged media path.
-func (cs *ChannelState) MergeRawAudio(mediaFolder string, start, end int, uniqueID string) (string, error) {
-	rawFilePath := filepath.Join(mediaFolder, fmt.Sprintf("%s.raw", uniqueID))
+// MergeRawAudio merges raw audio files from storage into a single raw file.
+// It downloads the files to a temp directory in parallel, concatenates them, and returns the path to the merged file.
+func (app *App) MergeRawAudio(ctx context.Context, channelKey, streamID string, fileIDs []string, outputName string) (string, error) {
+	if len(fileIDs) == 0 {
+		return "", fmt.Errorf("no files to merge")
+	}
 
-	// Merge raw media into a single raw file
-	outputFile, err := os.Create(rawFilePath)
+	mergedFilePath := filepath.Join(app.TempDir, fmt.Sprintf("%s.raw", outputName))
+	mergedFile, err := os.Create(mergedFilePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to create output file: %w", err)
+		return "", fmt.Errorf("failed to create merged file: %v", err)
 	}
-	defer outputFile.Close()
+	defer mergedFile.Close()
 
-	for i := start; i <= end; i++ {
-		inputFilename := filepath.Join(mediaFolder, fmt.Sprintf("%d.raw", i))
-		inputFile, err := os.Open(inputFilename)
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("file '%s' not found", inputFilename)
-		}
+	// Temporary directory for chunks to ensure thread safety and easy cleanup
+	tempDir, err := os.MkdirTemp(app.TempDir, fmt.Sprintf("merge_%s_*", outputName))
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp dir for merge: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
 
-		if err != nil {
-			return "", fmt.Errorf("failed to open input file %s: %w", inputFilename, err)
-		}
-
-		_, err = io.Copy(outputFile, inputFile)
-		inputFile.Close() // Close explicitly inside loop
-		if err != nil {
-			return "", fmt.Errorf("failed to copy from %s to output: %w", inputFilename, err)
-		}
+	type downloadResult struct {
+		index int
+		path  string
+		err   error
 	}
 
-	return rawFilePath, nil
+	results := make([]string, len(fileIDs))
+
+	// Concurrency control
+	concurrency := 5
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	errChan := make(chan error, 1)
+
+	for i, fileID := range fileIDs {
+		wg.Add(1)
+		go func(i int, fileID string) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			// Check if we should abort due to previous error
+			select {
+			case <-errChan:
+				return
+			default:
+			}
+
+			// Path: activeChannel/streamID/raw/fileID.raw
+			key := fmt.Sprintf("%s/%s/raw/%s.raw", channelKey, streamID, fileID)
+			tempPath := filepath.Join(tempDir, fmt.Sprintf("%d_%s.raw", i, fileID))
+
+			// Download file from storage
+			reader, err := app.Storage.Get(ctx, key)
+			if err != nil {
+				select {
+				case errChan <- fmt.Errorf("failed to get raw file %s: %w", key, err):
+				default:
+				}
+				return
+			}
+			defer reader.Close()
+
+			f, err := os.Create(tempPath)
+			if err != nil {
+				select {
+				case errChan <- fmt.Errorf("failed to create temp file %s: %w", tempPath, err):
+				default:
+				}
+				return
+			}
+			defer f.Close()
+
+			if _, err := io.Copy(f, reader); err != nil {
+				select {
+				case errChan <- fmt.Errorf("failed to write temp file %s: %w", tempPath, err):
+				default:
+				}
+				return
+			}
+
+			// Store success path (thread-safe logic handled by index assignment essentially,
+			// but we are just writing to slice index which is safe if indices are distinct)
+			results[i] = tempPath
+		}(i, fileID)
+	}
+
+	wg.Wait()
+
+	// Check for errors
+	select {
+	case err := <-errChan:
+		return "", err
+	default:
+	}
+
+	// Concatenate files in order
+	for _, path := range results {
+		if path == "" {
+			return "", fmt.Errorf("unexpected missing file path in merge results")
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to open chunk %s for merging: %v", path, err)
+		}
+		if _, err := io.Copy(mergedFile, f); err != nil {
+			f.Close()
+			return "", fmt.Errorf("failed to append chunk %s to merged file: %v", path, err)
+		}
+		f.Close()
+	}
+
+	return mergedFilePath, nil
 }
 
 // rotateFolders handles the rotation of media folders, keeping a specified number of past streams.

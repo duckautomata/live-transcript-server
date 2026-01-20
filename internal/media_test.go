@@ -141,8 +141,14 @@ func TestMediaAvailability(t *testing.T) {
 
 	// Verify Data
 	dataMap := msg.Data.(map[string]interface{})
-	ids := dataMap["ids"].([]interface{})
-	if len(ids) != 1 || int(ids[0].(float64)) != 2 {
-		t.Errorf("expected ids [2], got %v", ids)
+	files := dataMap["files"].(map[string]interface{})
+	// map[string]interface{} because JSON unmarshals int keys as string?
+	// Or unmarshals into map[string]interface{}.
+	// Wait, int keys in JSON is valid only if quoted? No, keys are strings in JSON.
+	// Go encoding/json will unmarshal to map[string]interface{}.
+	// "2" -> "fileID".
+	if _, ok := files["2"]; !ok {
+		t.Errorf("expected key '2' in files map, got %v", files)
 	}
+	// We don't check value since it is generated UUID.
 }

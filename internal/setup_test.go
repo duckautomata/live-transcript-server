@@ -28,7 +28,7 @@ func setupTestApp(t *testing.T, channels []string) (*App, *http.ServeMux, *sql.D
 	for _, c := range channels {
 		channelConfigs = append(channelConfigs, ChannelConfig{Name: c, NumPastStreams: 1})
 	}
-	app := NewApp(apiKey, db, channelConfigs, t.TempDir())
+	app := NewApp(apiKey, db, channelConfigs, StorageConfig{Type: "local"}, t.TempDir())
 
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)

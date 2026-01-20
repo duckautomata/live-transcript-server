@@ -2,17 +2,21 @@ package internal
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"live-transcript-server/internal/storage"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/kennygrant/sanitize"
 	"github.com/lithammer/shortuuid/v4"
 )
@@ -42,8 +46,8 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 
 	// Public routes
 	mux.HandleFunc("GET /{channel}/websocket", app.wsHandler)
-	mux.HandleFunc("GET /{channel}/stream/{streamID}/{filename}", app.streamHandler)
-	mux.HandleFunc("GET /{channel}/download/{streamID}/{filename}", app.downloadHandler)
+	mux.HandleFunc("GET /{channel}/stream/{streamID}/{type}/{filename}", app.streamHandler)
+	mux.HandleFunc("GET /{channel}/download/{streamID}/{type}/{filename}", app.downloadHandler)
 	mux.HandleFunc("GET /{channel}/frame/{streamID}/{filename}", app.getFrameHandler)
 	mux.HandleFunc("GET /{channel}/transcript/{streamID}", app.getTranscriptHandler)
 	mux.HandleFunc("POST /{channel}/clip", app.postClipHandler)
@@ -97,6 +101,52 @@ func CorsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, storageConfig StorageConfig, tempDir string) *App {
+	app := &App{
+		ApiKey: apiKey,
+		DB:     db,
+		Upgrader: websocket.Upgrader{
+			ReadBufferSize:    1024,
+			WriteBufferSize:   1024,
+			EnableCompression: true,
+			CheckOrigin:       func(r *http.Request) bool { return true },
+		},
+		Channels:    make(map[string]*ChannelState),
+		MaxConn:     10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
+		MaxClipSize: 30,
+		TempDir:     tempDir,
+	}
+
+	for _, cc := range channelsConfig {
+		baseFolder := filepath.Join(tempDir, cc.Name)
+		os.MkdirAll(baseFolder, 0755)
+
+		cs := &ChannelState{
+			Key:             cc.Name,
+			BaseMediaFolder: baseFolder,
+			NumPastStreams:  cc.NumPastStreams,
+		}
+		app.Channels[cc.Name] = cs
+	}
+
+	var store storage.Storage
+	var err error
+	ctx := context.Background()
+
+	if storageConfig.Type == "r2" {
+		store, err = storage.NewR2Storage(ctx, storageConfig.R2.AccountId, storageConfig.R2.AccessKeyId, storageConfig.R2.SecretAccessKey, storageConfig.R2.Bucket, storageConfig.R2.PublicUrl)
+	} else {
+		// Default to local storage
+		store, err = storage.NewLocalStorage(tempDir, "")
+	}
+
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialize storage: %v", err))
+	}
+	app.Storage = store
+	return app
+}
+
 // Activate a stream and send a message to all clients.
 // Returns true if the stream was activated and a message was sent, false otherwise.
 func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId string, activeTitle string, startTime string, mediaType string) bool {
@@ -147,34 +197,82 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 		}
 
 		// Set new active stream folder
-		cs.ActiveMediaFolder = filepath.Join(cs.BaseMediaFolder, activeId)
-		if err := os.MkdirAll(cs.ActiveMediaFolder, 0755); err != nil {
-			slog.Error("failed to create media folder", "key", cs.Key, "path", cs.ActiveMediaFolder, "err", err)
-			return false
+		if app.Storage.IsLocal() {
+			cs.ActiveMediaFolder = filepath.Join(cs.BaseMediaFolder, activeId)
+			if err := os.MkdirAll(cs.ActiveMediaFolder, 0755); err != nil {
+				slog.Error("failed to create media folder", "key", cs.Key, "path", cs.ActiveMediaFolder, "err", err)
+				return false
+			}
 		}
 
 		// Rotation Logic: Query DB for all streams to apply retention policy
 		allStreams, err := app.GetAllStreams(ctx, cs.Key)
 		if err == nil {
 			// allStreams is sorted by start_time DESC (newest first).
-			// We want to keep 'keepCount' streams (active + NumPastStreams).
-			keepCount := cs.NumPastStreams + 1
-			if len(allStreams) > keepCount {
-				for i := keepCount; i < len(allStreams); i++ {
-					streamToDelete := allStreams[i]
-					// Delete from DB (Stream meta)
-					if err := app.DeleteStream(ctx, cs.Key, streamToDelete.ActiveID); err != nil {
-						slog.Error("failed to delete stream from db", "key", cs.Key, "streamID", streamToDelete.ActiveID, "err", err)
-						continue
+
+			if app.Storage.IsLocal() {
+				// Local Storage: Keep 'keepCount' streams (active + NumPastStreams).
+				keepCount := cs.NumPastStreams + 1
+				if len(allStreams) > keepCount {
+					for i := keepCount; i < len(allStreams); i++ {
+						streamToDelete := allStreams[i]
+						// Delete from DB (Stream meta)
+						if err := app.DeleteStream(ctx, cs.Key, streamToDelete.ActiveID); err != nil {
+							slog.Error("failed to delete stream from db", "key", cs.Key, "streamID", streamToDelete.ActiveID, "err", err)
+							continue
+						}
+						// Delete Transcript from DB
+						if err := app.DeleteTranscript(ctx, cs.Key, streamToDelete.ActiveID); err != nil {
+							slog.Error("failed to delete transcript from db", "key", cs.Key, "streamID", streamToDelete.ActiveID, "err", err)
+						}
+						// Delete from Storage
+						// Run efficiently in background to avoid blocking the request
+						go func(channelKey, activeID string) {
+							// Create a background context for the deletion
+							bgCtx := context.Background()
+
+							storageKey := fmt.Sprintf("%s/%s", channelKey, activeID)
+							slog.Info("deleting old stream storage (async)", "key", channelKey, "storageKey", storageKey)
+							if err := app.Storage.DeleteFolder(bgCtx, storageKey); err != nil {
+								slog.Error("failed to delete stream folder from storage", "key", channelKey, "storageKey", storageKey, "err", err)
+							} else {
+								slog.Info("successfully deleted old stream storage", "key", channelKey, "storageKey", storageKey)
+							}
+						}(cs.Key, streamToDelete.ActiveID)
 					}
-					// Delete Transcript from DB
-					if err := app.DeleteTranscript(ctx, cs.Key, streamToDelete.ActiveID); err != nil {
-						slog.Error("failed to delete transcript from db", "key", cs.Key, "streamID", streamToDelete.ActiveID, "err", err)
-					}
-					// Delete from Filesystem
-					pathToDelete := filepath.Join(cs.BaseMediaFolder, streamToDelete.ActiveID)
-					slog.Info("deleting old stream folder", "key", cs.Key, "path", pathToDelete)
-					os.RemoveAll(pathToDelete)
+				}
+			} else {
+				// R2 Storage: Check existence of streams in storage.
+				// If a stream is missing from R2 (e.g. deleted by lifecycle policy), remove it from DB.
+				// We check all past streams (skip the first one which is the new active stream).
+				if len(allStreams) > 1 {
+					go func(channelKey string, streams []Stream) {
+						bgCtx := context.Background()
+						// Iterate over all past streams
+						for i := 1; i < len(streams); i++ {
+							streamToCheck := streams[i]
+							storageKey := fmt.Sprintf("%s/%s", channelKey, streamToCheck.ActiveID)
+
+							exists, err := app.Storage.StreamExists(bgCtx, storageKey)
+							if err != nil {
+								slog.Error("failed to check if stream exists in storage", "key", channelKey, "streamID", streamToCheck.ActiveID, "err", err)
+								continue
+							}
+
+							if !exists {
+								slog.Info("stream not found in storage (likely deleted by lifecycle), removing from db", "key", channelKey, "streamID", streamToCheck.ActiveID)
+
+								// Delete from DB (Stream meta)
+								if err := app.DeleteStream(bgCtx, channelKey, streamToCheck.ActiveID); err != nil {
+									slog.Error("failed to delete stream from db", "key", channelKey, "streamID", streamToCheck.ActiveID, "err", err)
+								}
+								// Delete Transcript from DB
+								if err := app.DeleteTranscript(bgCtx, channelKey, streamToCheck.ActiveID); err != nil {
+									slog.Error("failed to delete transcript from db", "key", channelKey, "streamID", streamToCheck.ActiveID, "err", err)
+								}
+							}
+						}
+					}(cs.Key, allStreams)
 				}
 			}
 		} else {
@@ -194,13 +292,13 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 			}
 			cs.broadcast(pastStreamsMsg)
 		}
-
 		data := EventNewStreamData{
-			ActiveID:    newStream.ActiveID,
-			ActiveTitle: newStream.ActiveTitle,
-			StartTime:   newStream.StartTime,
-			MediaType:   newStream.MediaType,
-			IsLive:      newStream.IsLive,
+			ActiveID:     newStream.ActiveID,
+			ActiveTitle:  newStream.ActiveTitle,
+			StartTime:    newStream.StartTime,
+			MediaType:    newStream.MediaType,
+			MediaBaseURL: app.Storage.GetURL(""),
+			IsLive:       newStream.IsLive,
 		}
 		msg = WebSocketMessage{
 			Event: EventNewStream,
@@ -326,29 +424,19 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check database for all available media files
+	availableFiles, err := app.GetLastAvailableMediaFiles(r.Context(), cs.Key, data.ActiveID, -1)
+	if err != nil {
+		slog.Error("failed to get available media files", "key", cs.Key, "err", err)
+	}
+
 	// For every line in the transcript, check if we have the media file.
 	// If we do, set MediaAvailable to true.
 	for i := range data.Transcript {
 		line := &data.Transcript[i]
-
-		// Check for media in ActiveMediaFolder
-		if cs.ActiveMediaFolder != "" {
-			m4aPath := filepath.Join(cs.ActiveMediaFolder, fmt.Sprintf("%d.m4a", line.ID))
-			rawPath := filepath.Join(cs.ActiveMediaFolder, fmt.Sprintf("%d.raw", line.ID))
-			if _, err := os.Stat(m4aPath); err == nil {
-				line.MediaAvailable = true
-			} else if _, err := os.Stat(rawPath); err == nil {
-				line.MediaAvailable = true
-			}
-		} else if data.ActiveID != "" {
-			cs.ActiveMediaFolder = filepath.Join(cs.BaseMediaFolder, data.ActiveID)
-			m4aPath := filepath.Join(cs.ActiveMediaFolder, fmt.Sprintf("%d.m4a", line.ID))
-			rawPath := filepath.Join(cs.ActiveMediaFolder, fmt.Sprintf("%d.raw", line.ID))
-			if _, err := os.Stat(m4aPath); err == nil {
-				line.MediaAvailable = true
-			} else if _, err := os.Stat(rawPath); err == nil {
-				line.MediaAvailable = true
-			}
+		if fileID, ok := availableFiles[line.ID]; ok {
+			line.MediaAvailable = true
+			line.FileID = fileID
 		}
 	}
 
@@ -474,92 +562,119 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	streamID := r.PathValue("streamID")
-	// Use ActiveMediaFolder for uploads based on streamID
-	targetMediaFolder := filepath.Join(cs.BaseMediaFolder, streamID)
-	if _, err := os.Stat(targetMediaFolder); os.IsNotExist(err) {
-		http.Error(w, "incorrect streamId", http.StatusBadRequest)
+	// Verify stream exists in DB
+	exists, err := app.StreamExists(r.Context(), cs.Key, streamID)
+	if err != nil {
+		slog.Error("failed to check stream exists", "key", cs.Key, "func", "mediaHandler", "err", err)
+		Http500Errors.Inc()
+		return
+	}
+	if !exists {
+		slog.Warn("stream does not exist", "key", cs.Key, "func", "mediaHandler", "streamID", streamID)
 		Http400Errors.Inc()
-		slog.Warn("media upload attempted for non-existent stream folder", "key", cs.Key, "streamID", streamID)
 		return
 	}
 
-	rawFilePath := filepath.Join(targetMediaFolder, fmt.Sprintf("%d.raw", id))
-	dst, err := os.Create(rawFilePath)
+	// Create temp file
+	tempRawHost := filepath.Join(app.TempDir, fmt.Sprintf("%s_%s_%d.raw", cs.Key, streamID, id))
+	dst, err := os.Create(tempRawHost)
 	if err != nil {
-		http.Error(w, "Unable to create file", http.StatusInternalServerError)
+		http.Error(w, "Unable to create temp file", http.StatusInternalServerError)
 		Http500Errors.Inc()
-		slog.Error("unable to create raw file", "key", cs.Key, "func", "mediaHandler", "err", err)
+		slog.Error("unable to create temp raw file", "key", cs.Key, "func", "mediaHandler", "err", err)
 		return
 	}
 
 	if _, err := io.Copy(dst, file); err != nil {
 		dst.Close()
+		os.Remove(tempRawHost)
 		http.Error(w, "Unable to save file", http.StatusInternalServerError)
 		Http500Errors.Inc()
-		slog.Error("unable to save raw file", "key", cs.Key, "func", "mediaHandler", "err", err)
+		slog.Error("unable to save temp raw file", "key", cs.Key, "func", "mediaHandler", "err", err)
 		return
 	}
-	dst.Close() // Close explicitly to flush write
+	dst.Close()
+	defer os.Remove(tempRawHost) // Clean up
 
 	// Convert to m4a
-	m4aFile := ChangeExtension(rawFilePath, ".m4a")
-	if err := FfmpegConvert(rawFilePath, m4aFile); err != nil {
-		os.Remove(rawFilePath)
-		os.Remove(m4aFile)
+	tempM4aHost := ChangeExtension(tempRawHost, ".m4a")
+	if err := FfmpegConvert(tempRawHost, tempM4aHost); err != nil {
 		http.Error(w, "Unable to convert media", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		slog.Error("unable to convert media", "key", cs.Key, "func", "mediaHandler", "err", err)
 		return
 	}
+	defer os.Remove(tempM4aHost)
 
-	// Extract first frame if video
-	stream, err := app.GetStream(r.Context(), cs.Key)
-	if err == nil && stream != nil && stream.MediaType == "video" {
-		jpgFile := ChangeExtension(rawFilePath, ".jpg")
-		if err := FfmpegExtractFrame(rawFilePath, jpgFile, 480); err != nil {
-			slog.Error("unable to extract frame", "key", cs.Key, "func", "mediaHandler", "err", err)
-			// Don't fail the request if frame extraction fails
+	// Upload Raw
+	fileID := shortuuid.New()
+	rawKey := fmt.Sprintf("%s/%s/raw/%s.raw", cs.Key, streamID, fileID)
+	rawReader, _ := os.Open(tempRawHost) // Should exist
+	defer rawReader.Close()
+	if _, err := app.Storage.Save(r.Context(), rawKey, rawReader); err != nil {
+		slog.Error("failed to upload raw file", "key", cs.Key, "err", err)
+		http.Error(w, "Storage Error", http.StatusInternalServerError)
+		return
+	}
+
+	// Upload M4A
+	m4aKey := fmt.Sprintf("%s/%s/audio/%s.m4a", cs.Key, streamID, fileID)
+	m4aReader, _ := os.Open(tempM4aHost)
+	defer m4aReader.Close()
+	if _, err := app.Storage.Save(r.Context(), m4aKey, m4aReader); err != nil {
+		slog.Error("failed to upload m4a file", "key", cs.Key, "err", err)
+		http.Error(w, "Storage Error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		return
+	}
+
+	// Extract Frame
+	// Fetch stream info to check media type
+	stream, err := app.GetStreamByID(r.Context(), cs.Key, streamID)
+	if err != nil {
+		slog.Warn("failed to get stream for frame extraction", "key", cs.Key, "streamID", streamID, "err", err)
+	}
+
+	if stream != nil && stream.MediaType == "video" {
+		tempJpgHost := ChangeExtension(tempRawHost, ".jpg")
+		if err := FfmpegExtractFrame(tempRawHost, tempJpgHost, 480); err == nil {
+			defer os.Remove(tempJpgHost)
+			jpgKey := fmt.Sprintf("%s/%s/frame/%s.jpg", cs.Key, streamID, fileID)
+			jpgReader, _ := os.Open(tempJpgHost)
+			defer jpgReader.Close()
+			if _, err := app.Storage.Save(r.Context(), jpgKey, jpgReader); err != nil {
+				slog.Error("failed to upload frame", "key", cs.Key, "err", err)
+			}
 		}
 	}
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Media received and processed successfully"))
 
-	// Update DB and broadcast
+	// Update DB
 	success := true
-	// Get Active Stream explicitly for DB updates
-	if streamID != "" {
-		if err := app.SetMediaAvailable(r.Context(), cs.Key, streamID, id, true); err != nil {
-			if err.Error() == "line not found" {
-				// This usually fails if the media was uploaded before the line was added.
-				// Wait 500ms then try again to give the line time to be added.
-				slog.Warn("line not found, retrying", "key", cs.Key, "id", id)
-				time.Sleep(500 * time.Millisecond)
-				if err := app.SetMediaAvailable(r.Context(), cs.Key, streamID, id, true); err != nil {
-					slog.Error("failed to set media available on retry", "key", cs.Key, "id", id, "err", err)
-					Http500Errors.Inc()
-					success = false
-				}
-			} else {
-				slog.Error("failed to set media available", "key", cs.Key, "id", id, "err", err)
+	if err := app.SetMediaAvailable(r.Context(), cs.Key, streamID, id, fileID, true); err != nil {
+		if err.Error() == "line not found" {
+			time.Sleep(500 * time.Millisecond)
+			if err := app.SetMediaAvailable(r.Context(), cs.Key, streamID, id, fileID, true); err != nil {
+				slog.Error("failed to set media available on retry", "key", cs.Key, "id", id, "err", err)
 				Http500Errors.Inc()
 				success = false
 			}
+		} else {
+			slog.Error("failed to set media available", "key", cs.Key, "id", id, "err", err)
+			Http500Errors.Inc()
+			success = false
 		}
-	} else {
-		slog.Warn("cannot set media available: no active stream", "key", cs.Key, "id", id)
 	}
 
-	// We don't fail the request because the file is saved and converted.
 	if success && streamID != "" {
-		// Broadcast new media availability
-		// Get last 100 available IDs
-		ids, err := app.GetLastAvailableMediaIDs(r.Context(), cs.Key, streamID, 100)
+		files, err := app.GetLastAvailableMediaFiles(r.Context(), cs.Key, streamID, 100)
 		if err != nil {
-			slog.Error("failed to get last available media ids. Fallback to single id", "key", cs.Key, "err", err)
-			ids = []int{id}
+			slog.Error("failed to get last available media files", "key", cs.Key, "err", err)
+			files = map[int]string{id: fileID}
 		}
-		app.broadcastNewMedia(cs, ids)
+		app.broadcastNewMedia(cs, streamID, files)
 	}
 }
 
@@ -689,10 +804,24 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if storage is local. If R2, this endpoint is disabled.
+	if !app.Storage.IsLocal() {
+		http.Error(w, "Endpoint disabled for remote storage", http.StatusBadRequest)
+		return
+	}
+
 	// Helper to extract id and format
 	filename := r.PathValue("filename")
 	requestedStreamID := r.PathValue("streamID")
+	mediaType := r.PathValue("type")
 	processStartTime := time.Now()
+
+	// Validate mediaType
+	allowedMediaTypes := []string{"audio", "clips"}
+	if !slices.Contains(allowedMediaTypes, mediaType) {
+		http.Error(w, "Invalid media type", http.StatusBadRequest)
+		return
+	}
 
 	ext := filepath.Ext(filename)
 	idStr := strings.TrimSuffix(filename, ext)
@@ -707,7 +836,8 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 		Http400Errors.Inc()
 		return
 	}
-	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, fmt.Sprintf("%s%s", idStr, ext))
+	// Local Storage Path: BaseMediaFolder/streamID/type/filename
+	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, mediaType, fmt.Sprintf("%s%s", idStr, ext))
 
 	// Check if the file exists
 	_, err := os.Stat(filePath)
@@ -715,7 +845,7 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 		if os.IsNotExist(err) {
 			http.Error(w, "File not found", http.StatusNotFound)
 			Http400Errors.Inc()
-			slog.Warn("file not found for the requested id", "key", cs.Key, "func", "streamHandler", "requestedStreamID", requestedStreamID, "filename", filename, "id", idStr, "ext", ext)
+			slog.Warn("file not found for the requested id", "key", cs.Key, "func", "streamHandler", "requestedStreamID", requestedStreamID, "type", mediaType, "filename", filename, "id", idStr, "ext", ext)
 			return
 		}
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -758,12 +888,19 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if storage is local. If R2, this endpoint is disabled.
+	if !app.Storage.IsLocal() {
+		http.Error(w, "Endpoint disabled for remote storage", http.StatusBadRequest)
+		return
+	}
+
 	processStartTime := time.Now()
 
 	// Helper to extract id and format
 	filename := r.PathValue("filename")
 	requestedStreamID := r.PathValue("streamID")
 	ext := filepath.Ext(filename)
+	processStartTime = time.Now()
 
 	if requestedStreamID == "" {
 		http.Error(w, "Stream ID required", http.StatusNotFound)
@@ -778,20 +915,10 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("invalid extension", "key", cs.Key, "func", "getFrameHandler", "ext", ext)
 		return
 	}
-
-	idStr := strings.TrimSuffix(filename, ".jpg")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		Http400Errors.Inc()
-		slog.Warn("unable to convert id to int", "key", cs.Key, "func", "getFrameHandler", "id", idStr, "err", err)
-		return
-	}
-
-	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, fmt.Sprintf("%d.jpg", id))
+	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, "frame", filename)
 
 	// Check if the file exists
-	_, err = os.Stat(filePath)
+	_, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "No frame found", http.StatusNotFound)
@@ -800,7 +927,7 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		Http500Errors.Inc()
-		slog.Error("unable to check frame file", "key", cs.Key, "func", "getFrameHandler", "id", id, "err", err)
+		slog.Error("unable to check frame file", "key", cs.Key, "func", "getFrameHandler", "filename", filename, "err", err)
 		return
 	}
 
@@ -808,7 +935,7 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 	StreamFramesDownloads.WithLabelValues(cs.Key).Inc()
 
 	if time.Since(processStartTime).Seconds() > 1 {
-		slog.Warn("slow frame processing time", "key", cs.Key, "func", "getFrameHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "id", idStr)
+		slog.Warn("slow frame processing time", "key", cs.Key, "func", "getFrameHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "filename", filename)
 	}
 
 	w.Header().Set("Cache-Control", "public, max-age=31536000") // Cache for 1 year, as frames are immutable for an ID. The browser will grab new frames when the stream id changes.
@@ -888,14 +1015,26 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	uniqueID := shortuuid.New()
-	streamFolder := filepath.Join(cs.BaseMediaFolder, req.StreamID)
-	if _, err := os.Stat(streamFolder); err != nil {
-		http.Error(w, "Stream not found", http.StatusNotFound)
-		Http400Errors.Inc()
-		slog.Warn("stream not found", "key", cs.Key, "func", "postClipHandler", "streamID", req.StreamID)
+
+	// Get FileIDs for the range
+	fileIDs, err := app.GetFileIDsInRange(r.Context(), cs.Key, req.StreamID, start, end)
+	if err != nil {
+		slog.Error("failed to get file ids for clip", "key", cs.Key, "err", err)
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		Http500Errors.Inc()
 		return
 	}
-	mergedRawPath, err := cs.MergeRawAudio(streamFolder, req.Start, req.End, uniqueID)
+
+	// Check if all requested IDs were found
+	expectedCount := end - start + 1
+	if len(fileIDs) != expectedCount {
+		slog.Warn("missing file ids for clip", "key", cs.Key, "func", "postClipHandler", "expected", expectedCount, "got", len(fileIDs))
+		http.Error(w, "Missing media files for requested range", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		return
+	}
+
+	mergedRawPath, err := app.MergeRawAudio(r.Context(), cs.Key, req.StreamID, fileIDs, uniqueID)
 	if err != nil {
 		os.Remove(mergedRawPath)
 		http.Error(w, "Server error", http.StatusInternalServerError)
@@ -905,30 +1044,56 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.Remove(mergedRawPath) // Delete the merged raw file when done
 
-	mediaFilePath := filepath.Join(streamFolder, uniqueID+clipExt)
+	// Convert/Remux to Temp File
+	tempMediaFile := filepath.Join(app.TempDir, uniqueID+clipExt)
+	sidecarFile := ""
 
 	// Note: audio has to be recoded to m4a otherwise it will be broken. Video can be remixed to a different container without any compatibility issues.
 	if reqMediaType == "mp4" {
-		err = FfmpegRemux(mergedRawPath, mediaFilePath)
+		err = FfmpegRemux(mergedRawPath, tempMediaFile)
 		if err == nil {
-			// Also create m4a
-			m4aPath := filepath.Join(streamFolder, uniqueID+".m4a")
-			if err := FfmpegConvert(mergedRawPath, m4aPath); err != nil {
-				slog.Error("failed to create sidecar m4a for clip", "key", cs.Key, "id", uniqueID, "err", err)
-				Http500Errors.Inc()
-				// We don't fail the request, just log it. The MP4 is good.
+			// Generate sidecar m4a in case the client has a slow connection, they can use the audio to clip while the video is loading.
+			sidecarFile = filepath.Join(app.TempDir, uniqueID+".m4a")
+			if err := FfmpegConvert(mergedRawPath, sidecarFile); err != nil {
+				slog.Error("failed to generate sidecar m4a", "key", cs.Key, "err", err)
+				// Don't fail the entire request, just log it. The mp4 is still good.
+				os.Remove(sidecarFile)
+				sidecarFile = ""
+			} else {
+				defer os.Remove(sidecarFile)
 			}
 		}
 	} else {
-		err = FfmpegConvert(mergedRawPath, mediaFilePath)
+		err = FfmpegConvert(mergedRawPath, tempMediaFile)
 	}
 
 	if err != nil {
-		os.Remove(mediaFilePath)
+		os.Remove(tempMediaFile)
 		slog.Error("unable to convert raw media to new extension", "key", cs.Key, "func", "postClipHandler", "extension", clipExt, "err", err)
 		http.Error(w, "Server error", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		return
+	}
+	defer os.Remove(tempMediaFile)
+
+	// Upload Clip
+	clipKey := fmt.Sprintf("%s/%s/clips/%s%s", cs.Key, req.StreamID, uniqueID, clipExt)
+	clipReader, _ := os.Open(tempMediaFile)
+	defer clipReader.Close()
+	if _, err := app.Storage.Save(r.Context(), clipKey, clipReader); err != nil {
+		slog.Error("failed to upload clip", "key", cs.Key, "err", err)
+		http.Error(w, "Storage Error", http.StatusInternalServerError)
+		return
+	}
+
+	// Upload m4a sidecar file
+	if sidecarFile != "" {
+		sidecarKey := fmt.Sprintf("%s/%s/clips/%s.m4a", cs.Key, req.StreamID, uniqueID)
+		f, _ := os.Open(sidecarFile)
+		defer f.Close()
+		if _, err := app.Storage.Save(r.Context(), sidecarKey, f); err != nil {
+			slog.Error("failed to upload sidecar m4a", "key", sidecarKey, "err", err)
+		}
 	}
 
 	switch clipExt {
@@ -971,6 +1136,20 @@ func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse path parameters
 	filename := r.PathValue("filename")
 	requestedStreamID := r.PathValue("streamID")
+	mediaType := r.PathValue("type")
+
+	// Check if storage is local. If R2, this endpoint is disabled.
+	if !app.Storage.IsLocal() {
+		http.Error(w, "Endpoint disabled for remote storage", http.StatusBadRequest)
+		return
+	}
+
+	// Validate mediaType
+	validMediaTypes := []string{"audio", "clips", "frame"}
+	if !slices.Contains(validMediaTypes, mediaType) {
+		http.Error(w, "Invalid media type", http.StatusBadRequest)
+		return
+	}
 
 	if _, err := os.Stat(filepath.Join(cs.BaseMediaFolder, requestedStreamID)); err != nil {
 		http.Error(w, "Stream not found", http.StatusNotFound)
@@ -1002,8 +1181,8 @@ func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if file exists in BaseMediaFolder/{streamID}
-	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, idStr+ext)
+	// Check if file exists in BaseMediaFolder/{streamID}/{type}
+	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, mediaType, idStr+ext)
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "File not found", http.StatusNotFound)
@@ -1028,68 +1207,88 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse JSON body
-	var req struct {
-		StreamID string  `json:"stream_id"`
-		ClipID   string  `json:"clip_id"`
-		Start    float64 `json:"start"`
-		End      float64 `json:"end"`
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request", http.StatusMethodNotAllowed)
+		Http400Errors.Inc()
+		slog.Warn("invalid request. Method is not a POST", "key", cs.Key, "func", "postTrimHandler", "method", r.Method)
+		return
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Parse JSON body
+	var trimReq struct {
+		StreamID   string  `json:"stream_id"`
+		ClipID     string  `json:"clip_id"`
+		FileFormat string  `json:"file_format"`
+		Start      float64 `json:"start"`
+		End        float64 `json:"end"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&trimReq); err != nil {
 		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 		Http400Errors.Inc()
 		return
 	}
 
-	if _, err := os.Stat(filepath.Join(cs.BaseMediaFolder, req.StreamID)); err != nil {
-		http.Error(w, "Stream not found", http.StatusNotFound)
+	start := trimReq.Start
+	end := trimReq.End
+
+	if start < 0 || end <= start {
+		http.Error(w, "Invalid start or end time", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Warn("stream not found", "key", cs.Key, "func", "postTrimHandler", "streamID", req.StreamID)
-		return
-	}
-	// Validate inputs
-	if req.ClipID == "" {
-		http.Error(w, "Missing required parameters", http.StatusBadRequest)
 		return
 	}
 
-	// Find source file
-	var srcPath string
-	extensions := []string{".mp4", ".mp3", ".m4a"}
-
-	for _, e := range extensions {
-		path := filepath.Join(cs.BaseMediaFolder, req.StreamID, req.ClipID+e)
-		if _, err := os.Stat(path); err == nil {
-			srcPath = path
-			break
-		}
+	if !slices.Contains([]string{"m4a", "mp3", "mp4"}, trimReq.FileFormat) {
+		http.Error(w, "Invalid file format", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
 	}
 
-	if srcPath == "" {
+	uniqueID := shortuuid.New()
+	sourceKey := fmt.Sprintf("%s/%s/clips/%s.%s", cs.Key, trimReq.StreamID, trimReq.ClipID, trimReq.FileFormat)
+
+	// Download Source to Temp
+	tempSource := filepath.Join(app.TempDir, fmt.Sprintf("src_%s.%s", uniqueID, trimReq.FileFormat))
+	reader, err := app.Storage.Get(r.Context(), sourceKey)
+	if err != nil {
+		slog.Error("failed to download source for trim", "key", sourceKey, "err", err)
 		http.Error(w, "Source file not found", http.StatusNotFound)
-		Http400Errors.Inc()
 		return
 	}
 
-	// Generate new ID for the trimmed file
-	newClipID := shortuuid.New()
-	ext := filepath.Ext(srcPath)
-	newClipPath := filepath.Join(cs.BaseMediaFolder, req.StreamID, newClipID+ext)
+	outFile, err := os.Create(tempSource)
+	if err != nil {
+		reader.Close()
+		http.Error(w, "Server Error", http.StatusInternalServerError)
+		return
+	}
+	_, err = io.Copy(outFile, reader)
+	reader.Close()
+	outFile.Close()
+	defer os.Remove(tempSource)
 
-	// Trim to the new file
-	if err := FfmpegTrim(srcPath, newClipPath, req.Start, req.End); err != nil {
-		slog.Error("failed to trim file", "err", err)
-		http.Error(w, "Failed to trim file", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		os.Remove(newClipPath) // Cleanup if it was partially created
+	// Trim
+	tempDest := filepath.Join(app.TempDir, fmt.Sprintf("trim_%s.%s", uniqueID, trimReq.FileFormat))
+	if err := FfmpegTrim(tempSource, tempDest, start, end); err != nil {
+		http.Error(w, "Trim failed", http.StatusInternalServerError)
+		slog.Error("ffmpeg trim failed", "err", err)
+		return
+	}
+	defer os.Remove(tempDest)
+
+	// Upload
+	destKey := fmt.Sprintf("%s/%s/clips/%s.%s", cs.Key, trimReq.StreamID, uniqueID, trimReq.FileFormat)
+	f, _ := os.Open(tempDest)
+	defer f.Close()
+	if _, err := app.Storage.Save(r.Context(), destKey, f); err != nil {
+		http.Error(w, "Upload failed", http.StatusInternalServerError)
+		slog.Error("failed to upload trimmed clip", "err", err)
 		return
 	}
 
-	// Success. The file is saved on disk. Client can now download it using the ID.
 	writeJSON(w, map[string]string{
 		"status":  "success",
-		"clip_id": newClipID,
+		"clip_id": uniqueID,
 	})
 }
 

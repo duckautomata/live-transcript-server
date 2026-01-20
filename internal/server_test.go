@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"live-transcript-server/internal/storage"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -330,6 +331,12 @@ func TestServer_MediaUpload(t *testing.T) {
 	apiKey := app.ApiKey
 	ctx := context.Background()
 
+	// Insert Stream to satisfy mediaHandler check
+	stream := &Stream{ChannelID: key, ActiveID: "stream_media", ActiveTitle: "Test Stream", StartTime: "12345", IsLive: true, MediaType: "audio"}
+	if err := app.UpsertStream(ctx, stream); err != nil {
+		t.Fatalf("failed to insert stream: %v", err)
+	}
+
 	// Create a dummy multipart body
 	body := new(bytes.Buffer)
 	writer := multipart.NewWriter(body)
@@ -348,10 +355,38 @@ func TestServer_MediaUpload(t *testing.T) {
 	}
 	defer func() { FfmpegConvert = originalFfmpegConvert }()
 
-	// We MUST insert a stream first for this test to pass with new logic.
-	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: "stream_media", IsLive: true, MediaType: "none"})
-	// Ensure folder exists
-	os.MkdirAll(filepath.Join(app.Channels[key].BaseMediaFolder, "stream_media"), 0755)
+	// Check if file exists using FileID from DB
+	transcript, err := app.GetTranscript(ctx, key, "stream_media")
+	if err != nil {
+		t.Fatalf("failed to get transcript: %v", err)
+	}
+	if len(transcript) == 0 {
+		// Wait a bit, broadcasting might be async but insertion is sync.
+		// "mediaHandler" calls InsertTranscriptLine? NO. lineHandler does.
+		// mediaHandler just updates MediaAvailable.
+		// So we assume line was inserted by "lineHandler" or test setup?
+		// Wait, TestServer_MediaUpload does NOT insert a line before upload?
+		// "We MUST insert a stream first for this test to pass with new logic."
+		// It uploads media for ID 0.
+		// Does ID 0 exist? No.
+		// "mediaHandler" logic: "app.SetMediaAvailable... if err == line not found -> retrying".
+		// But in old test, file was saved anyway.
+		// In new logic, file IS saved.
+		// But "file_id" is generated.
+		// If line doesn't exist, we can't get file_id from DB.
+		// But mediaHandler saves usage "id" (from URL) for "fallback"? No, it uses generated FileID.
+		// So if line doesn't exist, how do we find the file?
+		// We can list the directory?
+		// The test then calls "InsertTranscriptLine".
+		// But "InsertTranscriptLine" expects us to provide `FileID`.
+		// If we don't know the FileID...
+		// Maybe we should update this test to Insert Line FIRST.
+		// And check if mediaHandler updates it.
+		// Or we check directory.
+	}
+
+	// Let's modify test flow: Insert Line -> Upload Media -> Check.
+	app.InsertTranscriptLine(ctx, key, "stream_media", Line{ID: 0, Timestamp: 100})
 
 	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/media/stream_media/0", key), body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -364,46 +399,8 @@ func TestServer_MediaUpload(t *testing.T) {
 		t.Errorf("expected status OK, got %v body: %s", rr.Code, rr.Body.String())
 	}
 
-	// Check if file exists
-	rawPath := filepath.Join(app.Channels[key].BaseMediaFolder, "stream_media", "0.raw")
-	if _, err := os.Stat(rawPath); os.IsNotExist(err) {
-		t.Errorf("expected raw file to exist at %s", rawPath)
-	}
-
-	// Check if media available flag is not set
+	// Verify MediaAvailable
 	lines, err := app.GetTranscript(ctx, key, "stream_media")
-	if err != nil {
-		t.Fatalf("failed to get transcript: %v", err)
-	}
-	if len(lines) != 0 {
-		t.Fatalf("expected 0 lines, got %d", len(lines))
-	}
-
-	// Insert line with media available flag set to false
-	app.InsertTranscriptLine(ctx, key, "stream_media", Line{ID: 0, Timestamp: 200, MediaAvailable: false, Segments: []Segment{{Timestamp: 200, Text: "World"}}})
-
-	// Upload media again
-	body = new(bytes.Buffer)
-	writer = multipart.NewWriter(body)
-	part, err = writer.CreateFormFile("file", "test.raw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	part.Write([]byte("dummy audio data"))
-	writer.Close()
-	req, _ = http.NewRequest("POST", fmt.Sprintf("/%s/media/stream_media/0", key), body)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("X-API-Key", apiKey)
-	rr = httptest.NewRecorder()
-
-	mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected status OK, got %v body: %s", rr.Code, rr.Body.String())
-	}
-
-	// Check if media available flag is set
-	lines, err = app.GetTranscript(ctx, key, "stream_media")
 	if err != nil {
 		t.Fatalf("failed to get transcript: %v", err)
 	}
@@ -411,7 +408,17 @@ func TestServer_MediaUpload(t *testing.T) {
 		t.Fatalf("expected 1 line, got %d", len(lines))
 	}
 	if !lines[0].MediaAvailable {
-		t.Errorf("expected media available flag to be true, got %v", lines[0].MediaAvailable)
+		t.Error("expected media available")
+	}
+	if lines[0].FileID == "" {
+		t.Error("expected fileID to be set")
+	}
+
+	// Check file existence
+	fileID := lines[0].FileID
+	rawPath := filepath.Join(app.Channels[key].BaseMediaFolder, "stream_media", "raw", fileID+".raw")
+	if _, err := os.Stat(rawPath); os.IsNotExist(err) {
+		t.Errorf("expected raw file to exist at %s", rawPath)
 	}
 }
 
@@ -478,6 +485,10 @@ func TestServer_Sync(t *testing.T) {
 	if err := os.WriteFile(mediaPath, []byte("dummy"), 0644); err != nil {
 		t.Fatalf("failed to create dummy media file: %v", err)
 	}
+	// Simulate DB state for media (server now checks DB, not disk)
+	if err := app.SetMediaAvailable(context.TODO(), key, "stream3", 1, "1", true); err != nil {
+		t.Fatalf("failed to set media available: %v", err)
+	}
 
 	// 2. Sync again with MediaAvailable set to false for line 1
 	syncData2 := EventSyncData{
@@ -518,6 +529,14 @@ func TestServer_Sync(t *testing.T) {
 	rawPath := filepath.Join(app.Channels[key].BaseMediaFolder, "stream3", "2.raw")
 	if err := os.WriteFile(rawPath, []byte("dummy raw"), 0644); err != nil {
 		t.Fatalf("failed to create dummy raw file: %v", err)
+	}
+	// Simulate DB state for media (server now checks DB, not disk)
+	// Must insert line first so we can update it
+	if err := app.InsertTranscriptLine(context.TODO(), key, "stream3", Line{ID: 2, Timestamp: 300}); err != nil {
+		t.Fatalf("failed to insert line 2: %v", err)
+	}
+	if err := app.SetMediaAvailable(context.TODO(), key, "stream3", 2, "2", true); err != nil {
+		t.Fatalf("failed to set media available: %v", err)
 	}
 
 	// Sync with line 2 having MediaAvailable false
@@ -567,7 +586,7 @@ func TestServer_Persistence(t *testing.T) {
 	apiKey := "key"
 	// Use manual setup to mimic restart behavior easily (just accessing DB)
 
-	app := NewApp(apiKey, db, []ChannelConfig{{Name: key, NumPastStreams: 1}}, dir)
+	app := NewApp(apiKey, db, []ChannelConfig{{Name: key, NumPastStreams: 1}}, StorageConfig{Type: "local"}, dir)
 	// Directly call activate via App method if we export it or via channel state lookup
 	// For now, let's use the DB operations directly to verify persistence of the DB logic itself,
 	// but the test is "Server_Persistence", suggesting valid server flow.
@@ -670,18 +689,51 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	// 1. Setup Data
 	// Activate stream
 	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: "s1", ActiveTitle: "Stream 1", StartTime: "12345", IsLive: true, MediaType: "video"})
-	// Create dummy media files
-	// s1 folder
-	s1Folder := filepath.Join(app.Channels[key].BaseMediaFolder, "s1")
-	os.MkdirAll(s1Folder, 0755)
-	app.Channels[key].ActiveMediaFolder = s1Folder
 
-	os.WriteFile(filepath.Join(s1Folder, "1.m4a"), []byte("audio"), 0644)
-	os.WriteFile(filepath.Join(s1Folder, "1.jpg"), []byte("image"), 0644)
+	// Prepare pointers
+	// app.Storage is LocalStorage rooted at app.TempDir.
+	// Keys are relative to app.TempDir.
+	// Structure: channel/s1/raw/fileID.raw
+	// Ensure folders exist via storage save or manual mkdir?
+	// Manual mkdir is easier for test.
+	rawFolder := filepath.Join(app.Channels[key].BaseMediaFolder, "s1", "raw")
+	os.MkdirAll(rawFolder, 0755)
+	audioFolder := filepath.Join(app.Channels[key].BaseMediaFolder, "s1", "audio")
+	os.MkdirAll(audioFolder, 0755)
+
+	// Create dummy media files
+	// s1 folder logic expects subfolders now (audio, frame)
+	// Write dummy audio file
+	os.WriteFile(filepath.Join(audioFolder, "1.m4a"), []byte("audio"), 0644)
+
+	// Create frame folder and write dummy frame
+	frameFolder := filepath.Join(app.Channels[key].BaseMediaFolder, "s1", "frame")
+	os.MkdirAll(frameFolder, 0755)
+	os.WriteFile(filepath.Join(frameFolder, "1.jpg"), []byte("image"), 0644)
 
 	// Create dummy raw files for clip testing (ids 0-10)
+	// And insert Lines into DB with FileID
 	for i := 0; i <= 10; i++ {
-		os.WriteFile(filepath.Join(s1Folder, fmt.Sprintf("%d.raw", i)), []byte("raw_audio"), 0644)
+		fileID := fmt.Sprintf("file_%d", i)
+		line := Line{
+			ID:             i,
+			Timestamp:      i * 1000,
+			MediaAvailable: true,
+			FileID:         fileID,
+			Segments:       []Segment{{Text: "test"}},
+		}
+		app.InsertTranscriptLine(ctx, key, "s1", line)
+
+		// Write raw file to storage (raw folder)
+		os.WriteFile(filepath.Join(rawFolder, fileID+".raw"), []byte("raw_audio"), 0644)
+
+		// Also ensure file for Trim test (Line 1) exists in clips
+		if i == 1 {
+			// Trim source for file ID 1 (must be in clips folder)
+			clipsFolder := filepath.Join(app.Channels[key].BaseMediaFolder, "s1", "clips")
+			os.MkdirAll(clipsFolder, 0755)
+			os.WriteFile(filepath.Join(clipsFolder, fileID+".m4a"), []byte("audio_source"), 0644)
+		}
 	}
 
 	// Mock FFmpeg for clip/trim
@@ -705,7 +757,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 
 	// 2. Test streamHandler
 	// Valid request
-	req, _ := http.NewRequest("GET", fmt.Sprintf("/%s/stream/s1/1.m4a", key), nil)
+	req, _ := http.NewRequest("GET", fmt.Sprintf("/%s/stream/s1/audio/1.m4a", key), nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -719,7 +771,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	}
 
 	// Invalid Stream ID
-	req, _ = http.NewRequest("GET", fmt.Sprintf("/%s/stream/s2/1.m4a", key), nil)
+	req, _ = http.NewRequest("GET", fmt.Sprintf("/%s/stream/s2/audio/1.m4a", key), nil)
 	rr = httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
@@ -727,7 +779,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	}
 
 	// 3. Test downloadHandler
-	req, _ = http.NewRequest("GET", fmt.Sprintf("/%s/download/s1/1.m4a", key), nil)
+	req, _ = http.NewRequest("GET", fmt.Sprintf("/%s/download/s1/audio/1.m4a", key), nil)
 	rr = httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -738,7 +790,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	}
 
 	// 3b. Test downloadHandler with custom name
-	req, _ = http.NewRequest("GET", fmt.Sprintf("/%s/download/s1/1.m4a?name=MyCustomFile", key), nil)
+	req, _ = http.NewRequest("GET", fmt.Sprintf("/%s/download/s1/audio/1.m4a?name=MyCustomFile", key), nil)
 	rr = httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -782,11 +834,12 @@ func TestServer_MediaEndpoints(t *testing.T) {
 
 	// 6. Test trimHandler (POST)
 	trimReq := map[string]interface{}{
-		"stream_id": "s1",
-		"clip_id":   "1", // Trimming filed ID 1
-		"start":     0.0,
-		"end":       5.0,
-		"filename":  "trimmed_output",
+		"stream_id":   "s1",
+		"clip_id":     "file_1", // Trimming file ID file_1
+		"file_format": "m4a",
+		"start":       0.0,
+		"end":         5.0,
+		"filename":    "trimmed_output",
 	}
 	body, _ = json.Marshal(trimReq)
 	req, _ = http.NewRequest("POST", fmt.Sprintf("/%s/trim", key), bytes.NewBuffer(body))
@@ -806,6 +859,58 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	}
 	if trimResp["clip_id"] == "1" {
 		t.Errorf("trimHandler: expected new clip_id, got same as input '1'")
+	}
+
+	// 7. Test clipHandler Missing Media
+	clipReqMissing := map[string]interface{}{
+		"stream_id": "s1",
+		"start":     0,
+		"end":       20, // Range 0-20, but we only have 0-10
+		"type":      "m4a",
+	}
+	body, _ = json.Marshal(clipReqMissing)
+	req, _ = http.NewRequest("POST", fmt.Sprintf("/%s/clip", key), bytes.NewBuffer(body))
+	req.Header.Set("X-API-Key", apiKey)
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("clipHandler missing media: expected 500, got %v body: %s", rr.Code, rr.Body.String())
+	}
+
+	// 8. Test clipHandler MP4 Sidecar
+	// Ensure we have media for range 0-10
+	clipReqMp4 := map[string]interface{}{
+		"stream_id": "s1",
+		"start":     0,
+		"end":       10,
+		"type":      "mp4",
+	}
+	body, _ = json.Marshal(clipReqMp4)
+	req, _ = http.NewRequest("POST", fmt.Sprintf("/%s/clip", key), bytes.NewBuffer(body))
+	req.Header.Set("X-API-Key", apiKey)
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("clipHandler mp4: expected OK, got %v body: %s", rr.Code, rr.Body.String())
+	}
+	var mp4Resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&mp4Resp)
+	clipID := mp4Resp["clip_id"]
+	if clipID == "" {
+		t.Fatal("clipHandler mp4: expected clip_id")
+	}
+
+	// Check Sidecar existence
+	// Storage is local, check standard path clips/id.m4a
+	clipsFolder := filepath.Join(app.Channels[key].BaseMediaFolder, "s1", "clips")
+	sidecarPath := filepath.Join(clipsFolder, clipID+".m4a")
+	if _, err := os.Stat(sidecarPath); os.IsNotExist(err) {
+		t.Errorf("expected sidecar m4a to exist at %s", sidecarPath)
+	}
+	// Check Main MP4
+	mainPath := filepath.Join(clipsFolder, clipID+".mp4")
+	if _, err := os.Stat(mainPath); os.IsNotExist(err) {
+		t.Errorf("expected main mp4 to exist at %s", mainPath)
 	}
 }
 
@@ -958,6 +1063,21 @@ func TestServer_ActivateStream_Retention_OverThreshold(t *testing.T) {
 	if len(lines) != 0 {
 		t.Error("expected p1 transcript to be deleted")
 	}
+
+	// Verify P1 folder deleted from filesystem (async wait)
+	p1Path := filepath.Join(cs.BaseMediaFolder, "p1")
+	deleted := false
+	for i := 0; i < 20; i++ { // Wait up to 2 seconds (20 * 100ms)
+		if _, err := os.Stat(p1Path); os.IsNotExist(err) {
+			deleted = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !deleted {
+		t.Error("expected p1 folder to be deleted (timed out waiting)")
+	}
 }
 
 func TestServer_ActivateStream_Retention_MassiveOverflow(t *testing.T) {
@@ -1020,4 +1140,58 @@ func TestServer_ActivateStream_Retention_MassiveOverflow(t *testing.T) {
 	if len(lines) != 0 {
 		t.Error("expected s1 transcript to be deleted")
 	}
+}
+
+func TestServer_MediaEndpoints_RemoteDisabled(t *testing.T) {
+	key := "test-remote-disabled"
+	app, mux, db := setupTestApp(t, []string{key})
+	defer db.Close()
+
+	// Replace storage with a mock remote storage
+	mockStore := &MockRemoteStorage{
+		LocalStorage: app.Storage.(*storage.LocalStorage),
+	}
+	app.Storage = mockStore
+
+	// 1. Test streamHandler Disabled
+	req, _ := http.NewRequest("GET", fmt.Sprintf("/%s/stream/s1/audio/1.m4a", key), nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("streamHandler: expected BadRequest (400), got %v", rr.Code)
+	}
+	if rr.Body.String() != "Endpoint disabled for remote storage\n" {
+		t.Errorf("unexpected body: %s", rr.Body.String())
+	}
+
+	// 2. Test downloadHandler Disabled
+	req, _ = http.NewRequest("GET", fmt.Sprintf("/%s/download/s1/audio/1.m4a", key), nil)
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("downloadHandler: expected BadRequest (400), got %v", rr.Code)
+	}
+
+	// 3. Test getFrameHandler Disabled
+	req, _ = http.NewRequest("GET", fmt.Sprintf("/%s/frame/s1/1.jpg", key), nil)
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("getFrameHandler: expected BadRequest (400), got %v", rr.Code)
+	}
+}
+
+type MockRemoteStorage struct {
+	*storage.LocalStorage
+}
+
+func (m *MockRemoteStorage) IsLocal() bool {
+	return false
+}
+
+func (m *MockRemoteStorage) GetURL(key string) string {
+	return "https://r2.example.com/" + key
 }

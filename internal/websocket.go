@@ -140,10 +140,11 @@ func (app *App) broadcastNewLine(ctx context.Context, cs *ChannelState, activeID
 	cs.broadcast(msg)
 }
 
-// broadcastNewMedia sends a newMedia event to all clients with the list of latest available media IDs.
-func (app *App) broadcastNewMedia(cs *ChannelState, ids []int) {
+// broadcastNewMedia sends a newMedia event to all clients with the map of latest available media Files.
+func (app *App) broadcastNewMedia(cs *ChannelState, streamID string, files map[int]string) {
 	data := EventNewMediaData{
-		AvailableIDs: ids,
+		StreamID: streamID,
+		Files:    files,
 	}
 
 	msg := WebSocketMessage{
@@ -172,12 +173,13 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, client *Client
 	}
 
 	syncData := &EventSyncData{
-		ActiveID:    stream.ActiveID,
-		ActiveTitle: stream.ActiveTitle,
-		StartTime:   stream.StartTime,
-		MediaType:   stream.MediaType,
-		IsLive:      stream.IsLive,
-		Transcript:  make([]Line, 0),
+		ActiveID:     stream.ActiveID,
+		ActiveTitle:  stream.ActiveTitle,
+		StartTime:    stream.StartTime,
+		MediaType:    stream.MediaType,
+		MediaBaseURL: app.Storage.GetURL(""),
+		IsLive:       stream.IsLive,
+		Transcript:   make([]Line, 0),
 	}
 
 	transcript, err := app.GetTranscript(ctx, cs.Key, stream.ActiveID)

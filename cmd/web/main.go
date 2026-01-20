@@ -73,7 +73,7 @@ func main() {
 		slog.Error("unable to read in config", "func", "main", "err", err)
 		os.Exit(1)
 	}
-	app := internal.NewApp(config.Credentials.ApiKey, db, config.Channels, "tmp")
+	app := internal.NewApp(config.Credentials.ApiKey, db, config.Channels, config.Storage, "tmp")
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)
 

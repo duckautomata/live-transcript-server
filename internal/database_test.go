@@ -224,7 +224,7 @@ func TestDB_TranscriptOperations(t *testing.T) {
 	}
 }
 
-func TestDB_GetLastAvailableMediaIDs(t *testing.T) {
+func TestDB_GetLastAvailableMediaFiles(t *testing.T) {
 	app := setupTestDB(t)
 	defer app.DB.Close()
 
@@ -232,12 +232,12 @@ func TestDB_GetLastAvailableMediaIDs(t *testing.T) {
 	channelID := "test-media-ids"
 
 	// Test Empty
-	lastIDs, err := app.GetLastAvailableMediaIDs(ctx, channelID, "test-stream", 10)
+	files, err := app.GetLastAvailableMediaFiles(ctx, channelID, "test-stream", 10)
 	if err != nil {
-		t.Fatalf("failed to get last media IDs (empty): %v", err)
+		t.Fatalf("failed to get last media files (empty): %v", err)
 	}
-	if len(lastIDs) != 0 {
-		t.Error("expected empty last media IDs for empty db")
+	if len(files) != 0 {
+		t.Error("expected empty last media files for empty db")
 	}
 
 	// Test with data but no media available
@@ -250,72 +250,48 @@ func TestDB_GetLastAvailableMediaIDs(t *testing.T) {
 		t.Fatalf("failed to replace transcript: %v", err)
 	}
 
-	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, "test-stream", 10)
+	files, err = app.GetLastAvailableMediaFiles(ctx, channelID, "test-stream", 10)
 	if err != nil {
-		t.Fatalf("failed to get last media IDs: %v", err)
+		t.Fatalf("failed to get last media files: %v", err)
 	}
-	if len(lastIDs) != 0 {
-		t.Errorf("expected 0 last media IDs, got %d", len(lastIDs))
+	if len(files) != 0 {
+		t.Errorf("expected 0 last media files, got %d", len(files))
 	}
 
 	// Test with some media available
 	lines = []Line{
-		{ID: 0, Timestamp: 100, MediaAvailable: true, Segments: []Segment{{Text: "First"}}},
+		{ID: 0, Timestamp: 100, MediaAvailable: true, FileID: "f0", Segments: []Segment{{Text: "First"}}},
 		{ID: 2, Timestamp: 300, MediaAvailable: false, Segments: []Segment{{Text: "Third"}}},
-		{ID: 1, Timestamp: 200, MediaAvailable: true, Segments: []Segment{{Text: "Second"}}},
+		{ID: 1, Timestamp: 200, MediaAvailable: true, FileID: "f1", Segments: []Segment{{Text: "Second"}}},
 	}
 	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
 		t.Fatalf("failed to replace transcript: %v", err)
 	}
 
-	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, "test-stream", 10)
+	files, err = app.GetLastAvailableMediaFiles(ctx, channelID, "test-stream", 10)
 	if err != nil {
-		t.Fatalf("failed to get last media IDs: %v", err)
+		t.Fatalf("failed to get last media files: %v", err)
 	}
-	if len(lastIDs) != 2 {
-		t.Errorf("expected 2 last media IDs, got %d", len(lastIDs))
+	if len(files) != 2 {
+		t.Errorf("expected 2 last media files, got %d", len(files))
 	}
-	if lastIDs[0] != 0 || lastIDs[1] != 1 {
-		t.Errorf("expected last media IDs [0, 1], got %v", lastIDs)
-	}
-
-	// Test with more media available than limit
-	lines = []Line{
-		{ID: 0, Timestamp: 100, MediaAvailable: true, Segments: []Segment{{Text: "First"}}},
-		{ID: 2, Timestamp: 300, MediaAvailable: false, Segments: []Segment{{Text: "Third"}}},
-		{ID: 1, Timestamp: 200, MediaAvailable: true, Segments: []Segment{{Text: "Second"}}},
-	}
-	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
-		t.Fatalf("failed to replace transcript: %v", err)
+	if files[0] != "f0" || files[1] != "f1" {
+		t.Errorf("expected last media files [0:f0, 1:f1], got %v", files)
 	}
 
-	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, "test-stream", 1)
+	// Test with limit
+	files, err = app.GetLastAvailableMediaFiles(ctx, channelID, "test-stream", 1)
 	if err != nil {
-		t.Fatalf("failed to get last media IDs: %v", err)
+		t.Fatalf("failed to get last media files: %v", err)
 	}
-	if len(lastIDs) != 1 {
-		t.Errorf("expected 1 last media ID, got %d", len(lastIDs))
+	if len(files) != 1 {
+		t.Errorf("expected 1 last media file, got %d", len(files))
 	}
-	if lastIDs[0] != 1 {
-		t.Errorf("expected last media ID 1, got %d", lastIDs[0])
-	}
-
-	// Test with no limit
-	lines = []Line{
-		{ID: 0, Timestamp: 100, MediaAvailable: true, Segments: []Segment{{Text: "First"}}},
-		{ID: 2, Timestamp: 300, MediaAvailable: false, Segments: []Segment{{Text: "Third"}}},
-		{ID: 1, Timestamp: 200, MediaAvailable: true, Segments: []Segment{{Text: "Second"}}},
-	}
-	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
-		t.Fatalf("failed to replace transcript: %v", err)
-	}
-
-	lastIDs, err = app.GetLastAvailableMediaIDs(ctx, channelID, "test-stream", 0)
-	if err != nil {
-		t.Fatalf("failed to get last media IDs: %v", err)
-	}
-	if len(lastIDs) != 0 {
-		t.Errorf("expected 0 last media IDs, got %d", len(lastIDs))
+	// It should return the latest one (ID 1, FileID f1) or ID 0?
+	// GetLastAvailableMediaFiles query: "... ORDER BY line_id DESC LIMIT ?"
+	// So it should return ID 1.
+	if val, ok := files[1]; !ok || val != "f1" {
+		t.Errorf("expected last media file ID 1:f1, got %v", files)
 	}
 }
 
@@ -486,5 +462,131 @@ func TestDB_DeleteStream(t *testing.T) {
 	}
 	if s != nil {
 		t.Errorf("expected nil stream after deletion, got %v", s)
+	}
+}
+
+func TestDB_StreamExists(t *testing.T) {
+	app := setupTestDB(t)
+	defer app.DB.Close()
+
+	ctx := context.Background()
+
+	// 1. Check non-existent locally
+	exists, err := app.StreamExists(ctx, "ch1", "s1")
+	if err != nil {
+		t.Fatalf("StreamExists failed: %v", err)
+	}
+	if exists {
+		t.Error("Expected stream to not exist")
+	}
+
+	// 2. Insert stream
+	s1 := &Stream{ChannelID: "ch1", ActiveID: "s1", ActiveTitle: "Title 1", StartTime: "1000", IsLive: true, MediaType: "audio"}
+	if err := app.UpsertStream(ctx, s1); err != nil {
+		t.Fatalf("UpsertStream failed: %v", err)
+	}
+
+	// 3. Check existence
+	exists, err = app.StreamExists(ctx, "ch1", "s1")
+	if err != nil {
+		t.Fatalf("StreamExists failed: %v", err)
+	}
+	if !exists {
+		t.Error("Expected stream to exist")
+	}
+
+	// 4. Check diff channel
+	exists, err = app.StreamExists(ctx, "ch2", "s1")
+	if err != nil {
+		t.Fatalf("StreamExists failed: %v", err)
+	}
+	if exists {
+		t.Error("Expected stream (ch2, s1) to not exist")
+	}
+}
+
+func TestDB_GetStreamByID(t *testing.T) {
+	app := setupTestDB(t)
+	defer app.DB.Close()
+
+	ctx := context.Background()
+
+	// 1. Check non-existent
+	s, err := app.GetStreamByID(ctx, "ch1", "s1")
+	if err != nil {
+		t.Fatalf("GetStreamByID failed: %v", err)
+	}
+	if s != nil {
+		t.Error("Expected nil stream")
+	}
+
+	// 2. Insert stream
+	s1 := &Stream{ChannelID: "ch1", ActiveID: "s1", ActiveTitle: "Title 1", StartTime: "1000", IsLive: true, MediaType: "audio"}
+	if err := app.UpsertStream(ctx, s1); err != nil {
+		t.Fatalf("UpsertStream failed: %v", err)
+	}
+
+	// 3. Check existence
+	s, err = app.GetStreamByID(ctx, "ch1", "s1")
+	if err != nil {
+		t.Fatalf("GetStreamByID failed: %v", err)
+	}
+	if s == nil {
+		t.Fatal("Expected stream to exist")
+	}
+	if s.ActiveTitle != "Title 1" {
+		t.Errorf("Expected title 'Title 1', got %s", s.ActiveTitle)
+	}
+
+	// 4. Check diff channel
+	s, err = app.GetStreamByID(ctx, "ch2", "s1")
+	if err != nil {
+		t.Fatalf("GetStreamByID failed: %v", err)
+	}
+	if s != nil {
+		t.Error("Expected stream to not exist for ch2")
+	}
+}
+
+func TestDB_GetFileIDsInRange_Ordering(t *testing.T) {
+	app := setupTestDB(t)
+	defer app.DB.Close()
+
+	ctx := context.Background()
+	channelID := "test-ordering"
+	activeID := "s1"
+
+	// 1. Insert lines in random order
+	// Insert ID 3, then 1, then 2
+	lines := []Line{
+		{ID: 3, Timestamp: 300, FileID: "file1", MediaAvailable: true, Segments: []Segment{{Text: "3"}}},
+		{ID: 1, Timestamp: 100, FileID: "file2", MediaAvailable: true, Segments: []Segment{{Text: "1"}}},
+		{ID: 2, Timestamp: 200, FileID: "file3", MediaAvailable: true, Segments: []Segment{{Text: "2"}}},
+	}
+
+	for _, l := range lines {
+		if err := app.InsertTranscriptLine(ctx, channelID, activeID, l); err != nil {
+			t.Fatalf("InsertTranscriptLine failed: %v", err)
+		}
+	}
+
+	// 2. Query range 1-3
+	fileIDs, err := app.GetFileIDsInRange(ctx, channelID, activeID, 1, 3)
+	if err != nil {
+		t.Fatalf("GetFileIDsInRange failed: %v", err)
+	}
+
+	// 3. Verify Order
+	if len(fileIDs) != 3 {
+		t.Fatalf("Expected 3 file IDs, got %d", len(fileIDs))
+	}
+	if fileIDs[0] != "file2" {
+		t.Errorf("Index 0: expected file2, got %s", fileIDs[0])
+	}
+	if fileIDs[1] != "file3" {
+		t.Errorf("Index 1: expected file3, got %s", fileIDs[1])
+	}
+	if fileIDs[2] != "file1" {
+		t.Errorf("Index 2: expected file1, got %s", fileIDs[2])
 	}
 }

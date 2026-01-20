@@ -1,8 +1,11 @@
 package internal
 
 import (
+	"context"
+	"fmt"
+	"live-transcript-server/internal/storage"
 	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,16 +30,31 @@ func TestChangeExtension(t *testing.T) {
 
 func TestMergeRawAudio(t *testing.T) {
 	tmpDir := t.TempDir()
-	cs := &ChannelState{}
 
-	// Create dummy raw files
-	data1 := []byte("Part1")
-	data2 := []byte("Part2")
+	// Setup App with LocalStorage
+	storage, _ := storage.NewLocalStorage(tmpDir, "")
+	app := &App{
+		TempDir: tmpDir,
+		Storage: storage,
+	}
 
-	os.WriteFile(filepath.Join(tmpDir, "1.raw"), data1, 0644)
-	os.WriteFile(filepath.Join(tmpDir, "2.raw"), data2, 0644)
+	channelKey := "testchannel"
+	streamID := "stream1"
 
-	mergedPath, err := cs.MergeRawAudio(tmpDir, 1, 2, "merged")
+	// Create dummy raw files in storage structure
+	// Key: channelKey/streamID/raw/fileID.raw
+	file1ID := "file1"
+	file2ID := "file2"
+
+	file1Key := fmt.Sprintf("%s/%s/raw/%s.raw", channelKey, streamID, file1ID)
+	file2Key := fmt.Sprintf("%s/%s/raw/%s.raw", channelKey, streamID, file2ID)
+
+	app.Storage.Save(context.TODO(), file1Key, strings.NewReader("Part1"))
+	app.Storage.Save(context.TODO(), file2Key, strings.NewReader("Part2"))
+
+	fileIDs := []string{file1ID, file2ID}
+
+	mergedPath, err := app.MergeRawAudio(context.TODO(), channelKey, streamID, fileIDs, "merged")
 	if err != nil {
 		t.Fatalf("MergeRawAudio failed: %v", err)
 	}

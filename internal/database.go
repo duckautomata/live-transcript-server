@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"slices"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -54,6 +53,7 @@ func InitDB(path string) (*sql.DB, error) {
 		channel_id TEXT,
 		active_id TEXT,
 		line_id INTEGER,
+		file_id TEXT,
 		timestamp INTEGER,
 		segments TEXT,
 		media_available BOOLEAN DEFAULT 0,
@@ -96,6 +96,21 @@ func (a *App) GetStream(ctx context.Context, channelID string) (*Stream, error) 
 		return nil, err
 	}
 
+	return &s, nil
+}
+
+// GetStreamByID returns a specific stream by channelID and activeID.
+// Returns nil, nil if no stream is found.
+func (a *App) GetStreamByID(ctx context.Context, channelID string, activeID string) (*Stream, error) {
+	row := a.DB.QueryRowContext(ctx, "SELECT channel_id, active_id, active_title, start_time, is_live, media_type FROM streams WHERE channel_id = ? AND active_id = ?", channelID, activeID)
+	var s Stream
+	err := row.Scan(&s.ChannelID, &s.ActiveID, &s.ActiveTitle, &s.StartTime, &s.IsLive, &s.MediaType)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &s, nil
 }
 
@@ -198,7 +213,7 @@ func (a *App) ReplaceTranscript(ctx context.Context, channelID string, activeID 
 	}
 
 	// 2. Insert new lines
-	stmt, err := tx.PrepareContext(ctx, "INSERT INTO transcripts (channel_id, active_id, line_id, timestamp, segments, media_available) VALUES (?, ?, ?, ?, ?, ?)")
+	stmt, err := tx.PrepareContext(ctx, "INSERT INTO transcripts (channel_id, active_id, line_id, file_id, timestamp, segments, media_available) VALUES (?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
@@ -209,7 +224,7 @@ func (a *App) ReplaceTranscript(ctx context.Context, channelID string, activeID 
 		if err != nil {
 			return err
 		}
-		if _, err := stmt.ExecContext(ctx, channelID, activeID, line.ID, line.Timestamp, string(segmentsBytes), line.MediaAvailable); err != nil {
+		if _, err := stmt.ExecContext(ctx, channelID, activeID, line.ID, line.FileID, line.Timestamp, string(segmentsBytes), line.MediaAvailable); err != nil {
 			return err
 		}
 	}
@@ -245,9 +260,9 @@ func (a *App) InsertTranscriptLine(ctx context.Context, channelID string, active
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `
-	INSERT INTO transcripts (channel_id, active_id, line_id, timestamp, segments, media_available)
-	VALUES (?, ?, ?, ?, ?, ?)
-	`, channelID, activeID, line.ID, line.Timestamp, string(segmentsBytes), line.MediaAvailable)
+	INSERT INTO transcripts (channel_id, active_id, line_id, file_id, timestamp, segments, media_available)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, channelID, activeID, line.ID, line.FileID, line.Timestamp, string(segmentsBytes), line.MediaAvailable)
 	if err != nil {
 		return err
 	}
@@ -257,7 +272,7 @@ func (a *App) InsertTranscriptLine(ctx context.Context, channelID string, active
 
 // GetTranscript retrieves all transcript lines for a channel/stream, ordered by line_id.
 func (a *App) GetTranscript(ctx context.Context, channelID string, activeID string) ([]Line, error) {
-	rows, err := a.DB.QueryContext(ctx, "SELECT line_id, timestamp, segments, media_available FROM transcripts WHERE channel_id = ? AND active_id = ? ORDER BY line_id ASC", channelID, activeID)
+	rows, err := a.DB.QueryContext(ctx, "SELECT line_id, file_id, timestamp, segments, media_available FROM transcripts WHERE channel_id = ? AND active_id = ? ORDER BY line_id ASC", channelID, activeID)
 	if err != nil {
 		return nil, err
 	}
@@ -267,9 +282,11 @@ func (a *App) GetTranscript(ctx context.Context, channelID string, activeID stri
 	for rows.Next() {
 		var l Line
 		var segmentsStr string
-		if err := rows.Scan(&l.ID, &l.Timestamp, &segmentsStr, &l.MediaAvailable); err != nil {
+		var fileID sql.NullString
+		if err := rows.Scan(&l.ID, &fileID, &l.Timestamp, &segmentsStr, &l.MediaAvailable); err != nil {
 			return nil, err
 		}
+		l.FileID = fileID.String
 		if err := json.Unmarshal([]byte(segmentsStr), &l.Segments); err != nil {
 			slog.Error("failed to unmarshal segments", "err", err)
 			l.Segments = []Segment{}
@@ -298,11 +315,13 @@ func (a *App) GetLastLineID(ctx context.Context, channelID string, activeID stri
 // GetLastLine retrieves the last transcript line for a channel/stream.
 // Returns nil, nil if no lines exist.
 func (a *App) GetLastLine(ctx context.Context, channelID string, activeID string) (*Line, error) {
-	row := a.DB.QueryRowContext(ctx, "SELECT line_id, timestamp, segments, media_available FROM transcripts WHERE channel_id = ? AND active_id = ? ORDER BY line_id DESC LIMIT 1", channelID, activeID)
+	row := a.DB.QueryRowContext(ctx, "SELECT line_id, file_id, timestamp, segments, media_available FROM transcripts WHERE channel_id = ? AND active_id = ? ORDER BY line_id DESC LIMIT 1", channelID, activeID)
 
 	var l Line
 	var segmentsStr string
-	err := row.Scan(&l.ID, &l.Timestamp, &segmentsStr, &l.MediaAvailable)
+	var fileID sql.NullString
+	err := row.Scan(&l.ID, &fileID, &l.Timestamp, &segmentsStr, &l.MediaAvailable)
+	l.FileID = fileID.String
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -319,14 +338,14 @@ func (a *App) GetLastLine(ctx context.Context, channelID string, activeID string
 }
 
 // SetMediaAvailable updates the media_available status of a transcript line for a specific stream.
-func (a *App) SetMediaAvailable(ctx context.Context, channelID string, activeID string, lineID int, available bool) error {
+func (a *App) SetMediaAvailable(ctx context.Context, channelID string, activeID string, lineID int, fileID string, available bool) error {
 	tx, err := a.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(ctx, "UPDATE transcripts SET media_available = ? WHERE channel_id = ? AND active_id = ? AND line_id = ?", available, channelID, activeID, lineID)
+	result, err := tx.ExecContext(ctx, "UPDATE transcripts SET media_available = ?, file_id = ? WHERE channel_id = ? AND active_id = ? AND line_id = ?", available, fileID, channelID, activeID, lineID)
 	if err != nil {
 		return err
 	}
@@ -341,25 +360,62 @@ func (a *App) SetMediaAvailable(ctx context.Context, channelID string, activeID 
 	return tx.Commit()
 }
 
-// GetLastAvailableMediaIDs returns the last 'limit' line IDs that have media available for a specific stream.
-func (a *App) GetLastAvailableMediaIDs(ctx context.Context, channelID string, activeID string, limit int) ([]int, error) {
-	rows, err := a.DB.QueryContext(ctx, "SELECT line_id FROM transcripts WHERE channel_id = ? AND active_id = ? AND media_available = 1 ORDER BY line_id DESC LIMIT ?", channelID, activeID, limit)
+// GetLastAvailableMediaFiles returns the last 'limit' line ID->FileID map that have media available for a specific stream.
+// If limit is -1, returns all available media files.
+func (a *App) GetLastAvailableMediaFiles(ctx context.Context, channelID string, activeID string, limit int) (map[int]string, error) {
+	var rows *sql.Rows
+	var err error
+	if limit == -1 {
+		rows, err = a.DB.QueryContext(ctx, "SELECT line_id, file_id FROM transcripts WHERE channel_id = ? AND active_id = ? AND media_available = 1 ORDER BY line_id DESC", channelID, activeID)
+	} else {
+		rows, err = a.DB.QueryContext(ctx, "SELECT line_id, file_id FROM transcripts WHERE channel_id = ? AND active_id = ? AND media_available = 1 ORDER BY line_id DESC LIMIT ?", channelID, activeID, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var ids []int
+	files := make(map[int]string)
 	for rows.Next() {
 		var id int
-		if err := rows.Scan(&id); err != nil {
+		var fileID sql.NullString
+		if err := rows.Scan(&id, &fileID); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		files[id] = fileID.String
 	}
 
-	// Reverse the list so it is in ascending order
-	slices.Reverse(ids)
+	return files, nil
+}
 
-	return ids, nil
+// GetFileIDsInRange returns the file IDs for lines in the given range [startID, endID].
+func (a *App) GetFileIDsInRange(ctx context.Context, channelID string, activeID string, startID, endID int) ([]string, error) {
+	rows, err := a.DB.QueryContext(ctx, "SELECT file_id FROM transcripts WHERE channel_id = ? AND active_id = ? AND line_id >= ? AND line_id <= ? AND media_available = 1 ORDER BY line_id ASC", channelID, activeID, startID, endID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var fileIDs []string
+	for rows.Next() {
+		var fileID sql.NullString
+		if err := rows.Scan(&fileID); err != nil {
+			return nil, err
+		}
+		if fileID.Valid && fileID.String != "" {
+			fileIDs = append(fileIDs, fileID.String)
+		}
+	}
+	return fileIDs, nil
+}
+
+// StreamExists checks if a stream exists in the database.
+func (a *App) StreamExists(ctx context.Context, channelID string, activeID string) (bool, error) {
+	var exists bool
+	query := "SELECT EXISTS(SELECT 1 FROM streams WHERE channel_id = ? AND active_id = ?)"
+	err := a.DB.QueryRowContext(ctx, query, channelID, activeID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
 }

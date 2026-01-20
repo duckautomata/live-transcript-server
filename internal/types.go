@@ -2,9 +2,9 @@ package internal
 
 import (
 	"database/sql"
-	"net/http"
-	"path/filepath"
 	"sync"
+
+	"live-transcript-server/internal/storage"
 
 	"github.com/gorilla/websocket"
 )
@@ -24,6 +24,7 @@ type Segment struct {
 
 type Line struct {
 	ID             int       `json:"id"`
+	FileID         string    `json:"fileId"`
 	Timestamp      int       `json:"timestamp"`
 	Segments       []Segment `json:"segments"`
 	MediaAvailable bool      `json:"mediaAvailable"`
@@ -72,12 +73,13 @@ type WebSocketMessage struct {
 
 // EventSyncData represents the data sent to sync the client with the server.
 type EventSyncData struct {
-	ActiveID    string `json:"activeId"`
-	ActiveTitle string `json:"activeTitle"`
-	StartTime   string `json:"startTime"`
-	IsLive      bool   `json:"isLive"`
-	MediaType   string `json:"mediaType"`
-	Transcript  []Line `json:"transcript"`
+	ActiveID     string `json:"activeId"`
+	ActiveTitle  string `json:"activeTitle"`
+	StartTime    string `json:"startTime"`
+	IsLive       bool   `json:"isLive"`
+	MediaType    string `json:"mediaType"`
+	MediaBaseURL string `json:"mediaBaseUrl"`
+	Transcript   []Line `json:"transcript"`
 }
 
 // EventNewLineData represents the data sent to notify the client of a new line in the transcript.
@@ -91,11 +93,12 @@ type EventNewLineData struct {
 
 // EventNewStreamData represents the data sent to notify the client of a new stream.
 type EventNewStreamData struct {
-	ActiveID    string `json:"activeId"`
-	ActiveTitle string `json:"activeTitle"`
-	StartTime   string `json:"startTime"`
-	MediaType   string `json:"mediaType"`
-	IsLive      bool   `json:"isLive"`
+	ActiveID     string `json:"activeId"`
+	ActiveTitle  string `json:"activeTitle"`
+	StartTime    string `json:"startTime"`
+	MediaType    string `json:"mediaType"`
+	MediaBaseURL string `json:"mediaBaseUrl"`
+	IsLive       bool   `json:"isLive"`
 }
 
 // EventStatusData represents the data sent to notify the client of a change in the stream status.
@@ -106,8 +109,10 @@ type EventStatusData struct {
 }
 
 // EventNewMediaData represents the data sent to notify the client of available media.
+// EventNewMediaData represents the data sent to notify the client of available media.
 type EventNewMediaData struct {
-	AvailableIDs []int `json:"ids"`
+	StreamID string         `json:"streamId"`
+	Files    map[int]string `json:"files"` // LineID -> FileID
 }
 
 // EventPingPongData represents the data sent when the client pings the server.
@@ -145,35 +150,5 @@ type App struct {
 	MaxConn     int
 	MaxClipSize int
 	TempDir     string
-}
-
-func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, tempDir string) *App {
-	app := &App{
-		ApiKey: apiKey,
-		DB:     db,
-		Upgrader: websocket.Upgrader{
-			ReadBufferSize:    1024,
-			WriteBufferSize:   1024,
-			EnableCompression: true,
-			CheckOrigin:       func(r *http.Request) bool { return true },
-		},
-		Channels:    make(map[string]*ChannelState),
-		MaxConn:     10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
-		MaxClipSize: 30,
-		TempDir:     tempDir,
-	}
-
-	for _, config := range channelsConfig {
-		baseMediaFolder := filepath.Join(app.TempDir, config.Name)
-		app.Channels[config.Name] = &ChannelState{
-			Key:             config.Name,
-			Clients:         make([]*Client, 0, 1000),
-			BaseMediaFolder: baseMediaFolder,
-			// ActiveMediaFolder will be set on stream activation
-			ClientConnections: 0,
-			NumPastStreams:    config.NumPastStreams,
-		}
-	}
-
-	return app
+	Storage     storage.Storage
 }

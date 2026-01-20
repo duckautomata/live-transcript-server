@@ -9,10 +9,20 @@ credentials:
   # credentials used to restrict the activate/deactive/update/upload endpoints
   apiKey: ""
 
+storage:
+  type: "local" # "local" or "r2"
+  r2:
+    accountId: ""
+    accessKeyId: ""
+    secretAccessKey: ""
+    bucket: ""
+    publicUrl: ""
+
 channels:
   # List of keys the server will work with.
   # numPastStreams is the number of past streams to keep.
   # If numPastStreams is 0, it will keep only the current stream.
+  # Note: if using R2, numPastStreams is ignored and the bucket's lifecycle policy is used instead.
   - name: key1
     numPastStreams: 5
   - name: key2
