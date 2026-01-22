@@ -611,7 +611,9 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	rawKey := fmt.Sprintf("%s/%s/raw/%s.raw", cs.Key, streamID, fileID)
 	rawReader, _ := os.Open(tempRawHost) // Should exist
 	defer rawReader.Close()
-	if _, err := app.Storage.Save(r.Context(), rawKey, rawReader); err != nil {
+	// Use a detached context for upload to ensure it completes even if client disconnects
+	uploadCtx := context.WithoutCancel(r.Context())
+	if _, err := app.Storage.Save(uploadCtx, rawKey, rawReader); err != nil {
 		slog.Error("failed to upload raw file", "key", cs.Key, "err", err)
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
 		return
@@ -621,7 +623,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	m4aKey := fmt.Sprintf("%s/%s/audio/%s.m4a", cs.Key, streamID, fileID)
 	m4aReader, _ := os.Open(tempM4aHost)
 	defer m4aReader.Close()
-	if _, err := app.Storage.Save(r.Context(), m4aKey, m4aReader); err != nil {
+	if _, err := app.Storage.Save(uploadCtx, m4aKey, m4aReader); err != nil {
 		slog.Error("failed to upload m4a file", "key", cs.Key, "err", err)
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
 		Http500Errors.Inc()
@@ -642,7 +644,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 			jpgKey := fmt.Sprintf("%s/%s/frame/%s.jpg", cs.Key, streamID, fileID)
 			jpgReader, _ := os.Open(tempJpgHost)
 			defer jpgReader.Close()
-			if _, err := app.Storage.Save(r.Context(), jpgKey, jpgReader); err != nil {
+			if _, err := app.Storage.Save(uploadCtx, jpgKey, jpgReader); err != nil {
 				slog.Error("failed to upload frame", "key", cs.Key, "err", err)
 			}
 		}

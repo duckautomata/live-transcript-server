@@ -79,17 +79,49 @@ func NewR2Storage(ctx context.Context, accountId, accessKeyId, secretAccessKey, 
 
 // Save now uses the concurrent Uploader and detects Content-Type
 func (s *R2Storage) Save(ctx context.Context, key string, data io.Reader) (string, error) {
-	// We need to set the Content-Type for R2 to serve the files correctly. By default, it's set to application/octet-stream - which will download the file instead of playing it.
+	// We need to set the Content-Type for R2 to serve the files correctly.
 	contentType := getContentType(key)
+	var contentLength int64 = -1
 
-	_, err := s.Uploader.Upload(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(s.Bucket),
-		Key:         aws.String(key),
-		Body:        data,
-		ContentType: aws.String(contentType),
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to upload to R2: %w", err)
+	// Try to determine the size of the content
+	if seeker, ok := data.(io.Seeker); ok {
+		// Get current position
+		currentPos, err := seeker.Seek(0, io.SeekCurrent)
+		if err == nil {
+			// Get end position
+			endPos, err := seeker.Seek(0, io.SeekEnd)
+			if err == nil {
+				contentLength = endPos - currentPos
+				// Reset to original position
+				_, _ = seeker.Seek(currentPos, io.SeekStart)
+			}
+		}
+	}
+
+	// 1. If small file (< 20MB) and we know the size, use simple PutObject
+	// This avoids multipart upload overhead and potential issues with R2
+	if contentLength != -1 && contentLength < 20*1024*1024 {
+		_, err := s.Client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(s.Bucket),
+			Key:           aws.String(key),
+			Body:          data,
+			ContentType:   aws.String(contentType),
+			ContentLength: aws.Int64(contentLength),
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to upload to R2 (simple): %w", err)
+		}
+	} else {
+		// 2. Fallback to Uploader for large files or unknown size
+		_, err := s.Uploader.Upload(ctx, &s3.PutObjectInput{
+			Bucket:      aws.String(s.Bucket),
+			Key:         aws.String(key),
+			Body:        data,
+			ContentType: aws.String(contentType),
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to upload to R2 (multipart): %w", err)
+		}
 	}
 
 	return s.GetURL(key), nil
