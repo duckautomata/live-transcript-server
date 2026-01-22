@@ -98,9 +98,7 @@ func (s *R2Storage) Save(ctx context.Context, key string, data io.Reader) (strin
 		}
 	}
 
-	// 1. If small file (< 20MB) and we know the size, use simple PutObject
-	// This avoids multipart upload overhead and potential issues with R2
-	if contentLength != -1 && contentLength < 20*1024*1024 {
+	if contentLength != -1 {
 		_, err := s.Client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:        aws.String(s.Bucket),
 			Key:           aws.String(key),
@@ -112,7 +110,7 @@ func (s *R2Storage) Save(ctx context.Context, key string, data io.Reader) (strin
 			return "", fmt.Errorf("failed to upload to R2 (simple): %w", err)
 		}
 	} else {
-		// 2. Fallback to Uploader for large files or unknown size
+		// 2. Fallback to Uploader for unknown size
 		_, err := s.Uploader.Upload(ctx, &s3.PutObjectInput{
 			Bucket:      aws.String(s.Bucket),
 			Key:         aws.String(key),
