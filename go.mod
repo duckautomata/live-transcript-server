@@ -6,12 +6,11 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.7
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.7
-	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.20.19
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.95.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/kennygrant/sanitize v1.2.4
 	github.com/lithammer/shortuuid/v4 v4.2.0
-	github.com/mattn/go-sqlite3 v1.14.32
+	github.com/mattn/go-sqlite3 v1.14.33
 	github.com/prometheus/client_golang v1.23.2
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -38,10 +37,10 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.66.1 // indirect
-	github.com/prometheus/procfs v0.17.0 // indirect
+	github.com/prometheus/common v0.67.5 // indirect
+	github.com/prometheus/procfs v0.19.2 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
-	golang.org/x/net v0.44.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
+	golang.org/x/net v0.49.0 // indirect
+	golang.org/x/sys v0.40.0 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 )
