@@ -9,8 +9,9 @@ import (
 type Storage interface {
 	// Save saves data to the underlying storage.
 	// key is the relative path/key for the file.
+	// contentLength must be provided for correct handling by object storage.
 	// Returns the public URL or file path.
-	Save(ctx context.Context, key string, data io.Reader) (string, error)
+	Save(ctx context.Context, key string, data io.Reader, contentLength int64) (string, error)
 
 	// Get retrieves data from the underlying storage.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)

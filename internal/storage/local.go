@@ -24,7 +24,7 @@ func NewLocalStorage(baseDir string, publicURL string) (*LocalStorage, error) {
 	}, nil
 }
 
-func (s *LocalStorage) Save(ctx context.Context, key string, data io.Reader) (string, error) {
+func (s *LocalStorage) Save(ctx context.Context, key string, data io.Reader, contentLength int64) (string, error) {
 	fullPath := filepath.Join(s.BaseDir, key)
 	dir := filepath.Dir(fullPath)
 

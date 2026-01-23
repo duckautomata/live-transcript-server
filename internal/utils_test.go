@@ -49,8 +49,8 @@ func TestMergeRawAudio(t *testing.T) {
 	file1Key := fmt.Sprintf("%s/%s/raw/%s.raw", channelKey, streamID, file1ID)
 	file2Key := fmt.Sprintf("%s/%s/raw/%s.raw", channelKey, streamID, file2ID)
 
-	app.Storage.Save(context.TODO(), file1Key, strings.NewReader("Part1"))
-	app.Storage.Save(context.TODO(), file2Key, strings.NewReader("Part2"))
+	app.Storage.Save(context.TODO(), file1Key, strings.NewReader("Part1"), int64(len("Part1")))
+	app.Storage.Save(context.TODO(), file2Key, strings.NewReader("Part2"), int64(len("Part2")))
 
 	fileIDs := []string{file1ID, file2ID}
 

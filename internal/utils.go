@@ -171,7 +171,7 @@ func (app *App) MergeRawAudio(ctx context.Context, channelKey, streamID string, 
 	results := make([]string, len(fileIDs))
 
 	// Concurrency control
-	concurrency := 5
+	concurrency := 16
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	errChan := make(chan error, 1)

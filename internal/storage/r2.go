@@ -11,13 +11,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 type R2Storage struct {
 	Client    *s3.Client
-	Uploader  *manager.Uploader
 	Bucket    string
 	PublicURL string
 }
@@ -63,63 +61,27 @@ func NewR2Storage(ctx context.Context, accountId, accessKeyId, secretAccessKey, 
 		o.DisableLogOutputChecksumValidationSkipped = true
 	})
 
-	// Initialize the Uploader once with optimal settings
-	uploader := manager.NewUploader(client, func(u *manager.Uploader) {
-		u.PartSize = 10 * 1024 * 1024 // 10MB parts (Reduces API calls for 100MB files)
-		u.Concurrency = 5             // Upload 5 parts at once
-	})
-
 	return &R2Storage{
 		Client:    client,
-		Uploader:  uploader,
 		Bucket:    bucket,
 		PublicURL: publicUrl,
 	}, nil
 }
 
-// Save now uses the concurrent Uploader and detects Content-Type
-func (s *R2Storage) Save(ctx context.Context, key string, data io.Reader) (string, error) {
+// Save uploads to R2.
+func (s *R2Storage) Save(ctx context.Context, key string, data io.Reader, contentLength int64) (string, error) {
 	// We need to set the Content-Type for R2 to serve the files correctly.
 	contentType := getContentType(key)
-	var contentLength int64 = -1
 
-	// Try to determine the size of the content
-	if seeker, ok := data.(io.Seeker); ok {
-		// Get current position
-		currentPos, err := seeker.Seek(0, io.SeekCurrent)
-		if err == nil {
-			// Get end position
-			endPos, err := seeker.Seek(0, io.SeekEnd)
-			if err == nil {
-				contentLength = endPos - currentPos
-				// Reset to original position
-				_, _ = seeker.Seek(currentPos, io.SeekStart)
-			}
-		}
-	}
-
-	if contentLength != -1 {
-		_, err := s.Client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:        aws.String(s.Bucket),
-			Key:           aws.String(key),
-			Body:          data,
-			ContentType:   aws.String(contentType),
-			ContentLength: aws.Int64(contentLength),
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to upload to R2 (simple): %w", err)
-		}
-	} else {
-		// 2. Fallback to Uploader for unknown size
-		_, err := s.Uploader.Upload(ctx, &s3.PutObjectInput{
-			Bucket:      aws.String(s.Bucket),
-			Key:         aws.String(key),
-			Body:        data,
-			ContentType: aws.String(contentType),
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to upload to R2 (multipart): %w", err)
-		}
+	_, err := s.Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.Bucket),
+		Key:           aws.String(key),
+		Body:          data,
+		ContentType:   aws.String(contentType),
+		ContentLength: aws.Int64(contentLength),
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to upload to R2: %w", err)
 	}
 
 	return s.GetURL(key), nil

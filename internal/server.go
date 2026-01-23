@@ -613,7 +613,8 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	defer rawReader.Close()
 	// Use a detached context for upload to ensure it completes even if client disconnects
 	uploadCtx := context.WithoutCancel(r.Context())
-	if _, err := app.Storage.Save(uploadCtx, rawKey, rawReader); err != nil {
+	rawInfo, _ := os.Stat(tempRawHost)
+	if _, err := app.Storage.Save(uploadCtx, rawKey, rawReader, rawInfo.Size()); err != nil {
 		slog.Error("failed to upload raw file", "key", cs.Key, "err", err)
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
 		return
@@ -623,7 +624,8 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	m4aKey := fmt.Sprintf("%s/%s/audio/%s.m4a", cs.Key, streamID, fileID)
 	m4aReader, _ := os.Open(tempM4aHost)
 	defer m4aReader.Close()
-	if _, err := app.Storage.Save(uploadCtx, m4aKey, m4aReader); err != nil {
+	m4aInfo, _ := os.Stat(tempM4aHost)
+	if _, err := app.Storage.Save(uploadCtx, m4aKey, m4aReader, m4aInfo.Size()); err != nil {
 		slog.Error("failed to upload m4a file", "key", cs.Key, "err", err)
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
 		Http500Errors.Inc()
@@ -644,7 +646,8 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 			jpgKey := fmt.Sprintf("%s/%s/frame/%s.jpg", cs.Key, streamID, fileID)
 			jpgReader, _ := os.Open(tempJpgHost)
 			defer jpgReader.Close()
-			if _, err := app.Storage.Save(uploadCtx, jpgKey, jpgReader); err != nil {
+			jpgInfo, _ := os.Stat(tempJpgHost)
+			if _, err := app.Storage.Save(uploadCtx, jpgKey, jpgReader, jpgInfo.Size()); err != nil {
 				slog.Error("failed to upload frame", "key", cs.Key, "err", err)
 			}
 		}
@@ -1082,7 +1085,8 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	clipKey := fmt.Sprintf("%s/%s/clips/%s%s", cs.Key, req.StreamID, uniqueID, clipExt)
 	clipReader, _ := os.Open(tempMediaFile)
 	defer clipReader.Close()
-	if _, err := app.Storage.Save(r.Context(), clipKey, clipReader); err != nil {
+	clipInfo, _ := os.Stat(tempMediaFile)
+	if _, err := app.Storage.Save(r.Context(), clipKey, clipReader, clipInfo.Size()); err != nil {
 		slog.Error("failed to upload clip", "key", cs.Key, "err", err)
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
 		return
@@ -1093,7 +1097,8 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		sidecarKey := fmt.Sprintf("%s/%s/clips/%s.m4a", cs.Key, req.StreamID, uniqueID)
 		f, _ := os.Open(sidecarFile)
 		defer f.Close()
-		if _, err := app.Storage.Save(r.Context(), sidecarKey, f); err != nil {
+		sidecarInfo, _ := os.Stat(sidecarFile)
+		if _, err := app.Storage.Save(r.Context(), sidecarKey, f, sidecarInfo.Size()); err != nil {
 			slog.Error("failed to upload sidecar m4a", "key", sidecarKey, "err", err)
 		}
 	}
@@ -1282,7 +1287,8 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 	destKey := fmt.Sprintf("%s/%s/clips/%s.%s", cs.Key, trimReq.StreamID, uniqueID, trimReq.FileFormat)
 	f, _ := os.Open(tempDest)
 	defer f.Close()
-	if _, err := app.Storage.Save(r.Context(), destKey, f); err != nil {
+	destInfo, _ := os.Stat(tempDest)
+	if _, err := app.Storage.Save(r.Context(), destKey, f, destInfo.Size()); err != nil {
 		http.Error(w, "Upload failed", http.StatusInternalServerError)
 		slog.Error("failed to upload trimmed clip", "err", err)
 		return
@@ -1335,4 +1341,77 @@ func writeError(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	writeJSON(w, map[string]string{"error": message})
+}
+
+// StartReconciliationLoop starts a background task that periodically checks R2 storage
+// for missing streams and removes them from the database.
+func (app *App) StartReconciliationLoop() {
+	if app.Storage.IsLocal() {
+		return
+	}
+
+	ticker := time.NewTicker(8 * time.Hour)
+	go func() {
+		for range ticker.C {
+			slog.Info("starting reconciliation loop", "func", "StartReconciliationLoop")
+			ctx := context.Background()
+
+			for _, cs := range app.Channels {
+				// Get all streams
+				streams, err := app.GetAllStreams(ctx, cs.Key)
+				if err != nil {
+					slog.Error("failed to get streams for reconciliation", "key", cs.Key, "err", err)
+					continue
+				}
+
+				// Skip the first one (active stream)
+				if len(streams) <= 1 {
+					continue
+				}
+
+				updatesMade := false
+				for i := 1; i < len(streams); i++ {
+					stream := streams[i]
+					storageKey := fmt.Sprintf("%s/%s", cs.Key, stream.ActiveID)
+
+					exists, err := app.Storage.StreamExists(ctx, storageKey)
+					if err != nil {
+						slog.Error("reconciliation: check failed", "key", cs.Key, "streamID", stream.ActiveID, "err", err)
+						continue
+					}
+
+					if !exists {
+						slog.Info("reconciliation: stream missing in R2, deleting from db", "key", cs.Key, "streamID", stream.ActiveID)
+						if err := app.DeleteStream(ctx, cs.Key, stream.ActiveID); err != nil {
+							slog.Error("reconciliation: failed to delete stream", "key", cs.Key, "streamID", stream.ActiveID, "err", err)
+						}
+						if err := app.DeleteTranscript(ctx, cs.Key, stream.ActiveID); err != nil {
+							slog.Error("reconciliation: failed to delete transcript", "key", cs.Key, "streamID", stream.ActiveID, "err", err)
+						}
+						updatesMade = true
+					}
+				}
+
+				if updatesMade {
+					// Broadcast new list of streams
+
+					// To be safe and consistent with activateStream logic:
+					currentStream, _ := app.GetStream(ctx, cs.Key)
+					activeID := ""
+					if currentStream != nil {
+						activeID = currentStream.ActiveID
+					}
+
+					finalPastStreams, err := app.GetPastStreams(ctx, cs.Key, activeID)
+					if err == nil {
+						msg := WebSocketMessage{
+							Event: EventPastStreams,
+							Data:  EventPastStreamsData{Streams: finalPastStreams},
+						}
+						cs.broadcast(msg)
+					}
+				}
+			}
+		}
+	}()
 }

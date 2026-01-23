@@ -82,6 +82,9 @@ func main() {
 	mux.HandleFunc("GET /version", versionHandler)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
+	// Start background tasks
+	app.StartReconciliationLoop()
+
 	corsHandler := internal.CorsMiddleware(mux)
 	server := &http.Server{
 		Addr:              ":8080",
