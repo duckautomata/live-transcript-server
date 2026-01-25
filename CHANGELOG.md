@@ -1,11 +1,16 @@
 # latest
-Using version [2.3](#23-2026-01-20)
+Using version [2.4](#24-2026-01-25)
 
 # Major version 2
-Using version [2.3](#23-2026-01-20)
+Using version [2.4](#24-2026-01-25)
 
 # Major version 1
 Using version [1.6](#16-2025-12-18)
+
+## 2.4 (2026-01-25)
+**Changes**
+- Fixed websocket race conditions during message sending
+- Improved websocket performance
 
 ## 2.3 (2026-01-20)
 **Changes**

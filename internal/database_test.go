@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -25,9 +26,9 @@ func TestDB_GetLastLine(t *testing.T) {
 
 	// Insert Lines
 	lines := []Line{
-		{ID: 0, Timestamp: 100, Segments: []Segment{{Text: "First"}}},
-		{ID: 2, Timestamp: 300, Segments: []Segment{{Text: "Third"}}},
-		{ID: 1, Timestamp: 200, Segments: []Segment{{Text: "Second"}}},
+		{ID: 0, Timestamp: 100, Segments: json.RawMessage(`[{"text": "First"}]`)},
+		{ID: 2, Timestamp: 300, Segments: json.RawMessage(`[{"text": "Third"}]`)},
+		{ID: 1, Timestamp: 200, Segments: json.RawMessage(`[{"text": "Second"}]`)},
 	}
 	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
 		t.Fatalf("failed to replace transcript: %v", err)
@@ -50,8 +51,15 @@ func TestDB_GetLastLine(t *testing.T) {
 	if len(line.Segments) == 0 {
 		t.Fatal("expected segments, got empty")
 	}
-	if line.Segments[0].Text != "Third" {
-		t.Errorf("expected segment 'Third', got %s", line.Segments[0].Text)
+	var segments []Segment
+	if err := json.Unmarshal(line.Segments, &segments); err != nil {
+		t.Fatalf("failed to unmarshal segments: %v", err)
+	}
+	if len(segments) == 0 {
+		t.Fatal("expected segments, got empty")
+	}
+	if segments[0].Text != "Third" {
+		t.Errorf("expected segment 'Third', got %s", segments[0].Text)
 	}
 }
 
@@ -173,7 +181,7 @@ func TestDB_TranscriptOperations(t *testing.T) {
 	}
 
 	// 1. InsertTranscriptLine
-	line0 := Line{ID: 0, Timestamp: 100, Segments: []Segment{{Text: "Hello"}}}
+	line0 := Line{ID: 0, Timestamp: 100, Segments: json.RawMessage(`[{"text": "Hello"}]`)}
 	if err := app.InsertTranscriptLine(ctx, channelID, "test-stream", line0); err != nil {
 		t.Fatalf("InsertTranscriptLine failed: %v", err)
 	}
@@ -183,7 +191,9 @@ func TestDB_TranscriptOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTranscript failed: %v", err)
 	}
-	if len(lines) != 1 || lines[0].Segments[0].Text != "Hello" {
+	var segments []Segment
+	json.Unmarshal(lines[0].Segments, &segments)
+	if len(lines) != 1 || segments[0].Text != "Hello" {
 		t.Errorf("transcript content mismatch, expected %v, got %v", line0, lines)
 	}
 
@@ -198,8 +208,8 @@ func TestDB_TranscriptOperations(t *testing.T) {
 
 	// 4. ReplaceTranscript
 	newLines := []Line{
-		{ID: 0, Timestamp: 100, Segments: []Segment{{Text: "New Hello"}}},
-		{ID: 1, Timestamp: 200, Segments: []Segment{{Text: "New World"}}},
+		{ID: 0, Timestamp: 100, Segments: json.RawMessage(`[{"text": "New Hello"}]`)},
+		{ID: 1, Timestamp: 200, Segments: json.RawMessage(`[{"text": "New World"}]`)},
 	}
 	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", newLines); err != nil {
 		t.Fatalf("ReplaceTranscript failed: %v", err)
@@ -209,7 +219,8 @@ func TestDB_TranscriptOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTranscript after replace failed: %v", err)
 	}
-	if len(lines) != 2 || lines[1].Segments[0].Text != "New World" {
+	json.Unmarshal(lines[1].Segments, &segments)
+	if len(lines) != 2 || segments[0].Text != "New World" {
 		t.Error("replaced transcript content mismatch")
 	}
 
@@ -242,9 +253,9 @@ func TestDB_GetLastAvailableMediaFiles(t *testing.T) {
 
 	// Test with data but no media available
 	lines := []Line{
-		{ID: 0, Timestamp: 100, Segments: []Segment{{Text: "First"}}},
-		{ID: 2, Timestamp: 300, Segments: []Segment{{Text: "Third"}}},
-		{ID: 1, Timestamp: 200, Segments: []Segment{{Text: "Second"}}},
+		{ID: 0, Timestamp: 100, Segments: json.RawMessage(`[{"text": "First"}]`)},
+		{ID: 2, Timestamp: 300, Segments: json.RawMessage(`[{"text": "Third"}]`)},
+		{ID: 1, Timestamp: 200, Segments: json.RawMessage(`[{"text": "Second"}]`)},
 	}
 	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
 		t.Fatalf("failed to replace transcript: %v", err)
@@ -260,9 +271,9 @@ func TestDB_GetLastAvailableMediaFiles(t *testing.T) {
 
 	// Test with some media available
 	lines = []Line{
-		{ID: 0, Timestamp: 100, MediaAvailable: true, FileID: "f0", Segments: []Segment{{Text: "First"}}},
-		{ID: 2, Timestamp: 300, MediaAvailable: false, Segments: []Segment{{Text: "Third"}}},
-		{ID: 1, Timestamp: 200, MediaAvailable: true, FileID: "f1", Segments: []Segment{{Text: "Second"}}},
+		{ID: 0, Timestamp: 100, MediaAvailable: true, FileID: "f0", Segments: json.RawMessage(`[{"text": "First"}]`)},
+		{ID: 2, Timestamp: 300, MediaAvailable: false, Segments: json.RawMessage(`[{"text": "Third"}]`)},
+		{ID: 1, Timestamp: 200, MediaAvailable: true, FileID: "f1", Segments: json.RawMessage(`[{"text": "Second"}]`)},
 	}
 	if err := app.ReplaceTranscript(ctx, channelID, "test-stream", lines); err != nil {
 		t.Fatalf("failed to replace transcript: %v", err)
@@ -559,9 +570,9 @@ func TestDB_GetFileIDsInRange_Ordering(t *testing.T) {
 	// 1. Insert lines in random order
 	// Insert ID 3, then 1, then 2
 	lines := []Line{
-		{ID: 3, Timestamp: 300, FileID: "file1", MediaAvailable: true, Segments: []Segment{{Text: "3"}}},
-		{ID: 1, Timestamp: 100, FileID: "file2", MediaAvailable: true, Segments: []Segment{{Text: "1"}}},
-		{ID: 2, Timestamp: 200, FileID: "file3", MediaAvailable: true, Segments: []Segment{{Text: "2"}}},
+		{ID: 3, Timestamp: 300, FileID: "file1", MediaAvailable: true, Segments: json.RawMessage(`[{"text": "3"}]`)},
+		{ID: 1, Timestamp: 100, FileID: "file2", MediaAvailable: true, Segments: json.RawMessage(`[{"text": "1"}]`)},
+		{ID: 2, Timestamp: 200, FileID: "file3", MediaAvailable: true, Segments: json.RawMessage(`[{"text": "2"}]`)},
 	}
 
 	for _, l := range lines {

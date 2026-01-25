@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
@@ -60,16 +61,12 @@ func seedExampleData(t *testing.T, app *App, channelID string) {
 		{
 			ID:        0,
 			Timestamp: 100,
-			Segments: []Segment{
-				{Timestamp: 100, Text: "Hello world"},
-			},
+			Segments:  json.RawMessage(`[{"timestamp": 100, "text": "Hello world"}]`),
 		},
 		{
 			ID:        1,
 			Timestamp: 200,
-			Segments: []Segment{
-				{Timestamp: 200, Text: "This is a test"},
-			},
+			Segments:  json.RawMessage(`[{"timestamp": 200, "text": "This is a test"}]`),
 		},
 	}
 	if err := app.ReplaceTranscript(ctx, channelID, "stream-1", lines); err != nil {

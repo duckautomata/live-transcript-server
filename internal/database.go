@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -220,11 +219,8 @@ func (a *App) ReplaceTranscript(ctx context.Context, channelID string, activeID 
 	defer stmt.Close()
 
 	for _, line := range lines {
-		segmentsBytes, err := json.Marshal(line.Segments)
-		if err != nil {
-			return err
-		}
-		if _, err := stmt.ExecContext(ctx, channelID, activeID, line.ID, line.FileID, line.Timestamp, string(segmentsBytes), line.MediaAvailable); err != nil {
+		// Segments is already json.RawMessage ([]byte), so we can cast it to string directly
+		if _, err := stmt.ExecContext(ctx, channelID, activeID, line.ID, line.FileID, line.Timestamp, string(line.Segments), line.MediaAvailable); err != nil {
 			return err
 		}
 	}
@@ -255,14 +251,10 @@ func (a *App) InsertTranscriptLine(ctx context.Context, channelID string, active
 	}
 	defer tx.Rollback()
 
-	segmentsBytes, err := json.Marshal(line.Segments)
-	if err != nil {
-		return err
-	}
 	_, err = tx.ExecContext(ctx, `
 	INSERT INTO transcripts (channel_id, active_id, line_id, file_id, timestamp, segments, media_available)
 	VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, channelID, activeID, line.ID, line.FileID, line.Timestamp, string(segmentsBytes), line.MediaAvailable)
+	`, channelID, activeID, line.ID, line.FileID, line.Timestamp, string(line.Segments), line.MediaAvailable)
 	if err != nil {
 		return err
 	}
@@ -287,10 +279,8 @@ func (a *App) GetTranscript(ctx context.Context, channelID string, activeID stri
 			return nil, err
 		}
 		l.FileID = fileID.String
-		if err := json.Unmarshal([]byte(segmentsStr), &l.Segments); err != nil {
-			slog.Error("failed to unmarshal segments", "err", err)
-			l.Segments = []Segment{}
-		}
+		// Assign directly to json.RawMessage
+		l.Segments = json.RawMessage(segmentsStr)
 		lines = append(lines, l)
 	}
 
@@ -329,10 +319,7 @@ func (a *App) GetLastLine(ctx context.Context, channelID string, activeID string
 		return nil, err
 	}
 
-	if err := json.Unmarshal([]byte(segmentsStr), &l.Segments); err != nil {
-		slog.Error("failed to unmarshal segments", "err", err)
-		l.Segments = []Segment{}
-	}
+	l.Segments = json.RawMessage(segmentsStr)
 
 	return &l, nil
 }

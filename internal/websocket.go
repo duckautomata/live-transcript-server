@@ -102,10 +102,8 @@ func (cs *ChannelState) readLoop(client *Client) error {
 				},
 			}
 
-			select {
-			case client.send <- pongMsg:
-			default:
-				slog.Error("failed to send pong: buffer full", "key", cs.Key, "func", "readLoop")
+			if !client.trySend(pongMsg) {
+				slog.Error("failed to send pong: buffer full or closed", "key", cs.Key, "func", "readLoop")
 			}
 		}
 	}
@@ -155,6 +153,19 @@ func (app *App) broadcastNewMedia(cs *ChannelState, streamID string, files map[i
 	cs.broadcast(msg)
 }
 
+func (c *Client) trySend(msg WebSocketMessage) bool {
+	defer func() {
+		// Recover from panic if channel is closed
+		recover()
+	}()
+	select {
+	case c.send <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
 // Send full transcript to client
 func (app *App) syncClient(ctx context.Context, cs *ChannelState, client *Client) {
 	stream, err := app.GetStream(ctx, cs.Key)
@@ -196,10 +207,8 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, client *Client
 	startTime := time.Now()
 	MessagesTotal.Inc()
 
-	select {
-	case client.send <- outData:
-	default:
-		slog.Error("failed to send sync message: buffer full", "key", cs.Key)
+	if !client.trySend(outData) {
+		slog.Error("failed to send sync message: buffer full or closed", "key", cs.Key)
 		cs.closeSocket(client)
 		return
 	}
@@ -211,10 +220,8 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, client *Client
 			Event: EventPastStreams,
 			Data:  EventPastStreamsData{Streams: pastStreams},
 		}
-		select {
-		case client.send <- pastStreamsMsg:
-		default:
-			slog.Error("failed to send past streams message: buffer full", "key", cs.Key)
+		if !client.trySend(pastStreamsMsg) {
+			slog.Error("failed to send past streams message: buffer full or closed", "key", cs.Key)
 			cs.closeSocket(client)
 			return
 		}
@@ -229,9 +236,7 @@ func (cs *ChannelState) broadcast(msg WebSocketMessage) {
 	cs.ClientsLock.Lock()
 	for _, c := range cs.Clients {
 		MessagesTotal.Inc()
-		select {
-		case c.send <- msg:
-		default:
+		if !c.trySend(msg) {
 			go cs.closeSocket(c)
 		}
 	}

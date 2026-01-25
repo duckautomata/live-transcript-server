@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "Running all benchmarks..."
+go test -bench=. -benchmem -benchtime=5s ./...

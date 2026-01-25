@@ -2,6 +2,7 @@ package internal
 
 import (
 	"database/sql"
+	"encoding/json"
 	"sync"
 
 	"live-transcript-server/internal/storage"
@@ -23,11 +24,11 @@ type Segment struct {
 }
 
 type Line struct {
-	ID             int       `json:"id"`
-	FileID         string    `json:"fileId"`
-	Timestamp      int       `json:"timestamp"`
-	Segments       []Segment `json:"segments"`
-	MediaAvailable bool      `json:"mediaAvailable"`
+	ID             int             `json:"id"`
+	FileID         string          `json:"fileId"`
+	Timestamp      int             `json:"timestamp"`
+	Segments       json.RawMessage `json:"segments"`
+	MediaAvailable bool            `json:"mediaAvailable"`
 }
 
 // Stream represents the state of a stream for a channel in the database.
@@ -84,11 +85,11 @@ type EventSyncData struct {
 
 // EventNewLineData represents the data sent to notify the client of a new line in the transcript.
 type EventNewLineData struct {
-	LineID         int       `json:"lineId"`
-	Timestamp      int       `json:"timestamp"`
-	UploadTime     int64     `json:"uploadTime"`
-	MediaAvailable bool      `json:"mediaAvailable"`
-	Segments       []Segment `json:"segments"`
+	LineID         int             `json:"lineId"`
+	Timestamp      int             `json:"timestamp"`
+	UploadTime     int64           `json:"uploadTime"`
+	MediaAvailable bool            `json:"mediaAvailable"`
+	Segments       json.RawMessage `json:"segments"`
 }
 
 // EventNewStreamData represents the data sent to notify the client of a new stream.

@@ -60,7 +60,7 @@ func TestMediaAvailability(t *testing.T) {
 	line := Line{
 		ID:        2,
 		Timestamp: 1000,
-		Segments:  []Segment{{Timestamp: 1000, Text: "Test Line"}},
+		Segments:  json.RawMessage(`[{"timestamp": 1000, "text": "Test Line"}]`),
 	}
 	body, _ := json.Marshal(line)
 	req, _ := http.NewRequest("POST", server.URL+"/test/line/stream-1", bytes.NewBuffer(body))

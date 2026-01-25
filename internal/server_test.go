@@ -59,9 +59,9 @@ func TestServer_ActivateDeactivate(t *testing.T) {
 
 	// Insert transcripts for tests
 	lines := []Line{
-		{ID: 0, Timestamp: 100, Segments: []Segment{{Text: "First"}}},
-		{ID: 2, Timestamp: 300, Segments: []Segment{{Text: "Third"}}},
-		{ID: 1, Timestamp: 200, Segments: []Segment{{Text: "Second"}}},
+		{ID: 0, Timestamp: 100, Segments: json.RawMessage(`[{"text": "First"}]`)},
+		{ID: 2, Timestamp: 300, Segments: json.RawMessage(`[{"text": "Third"}]`)},
+		{ID: 1, Timestamp: 200, Segments: json.RawMessage(`[{"text": "Second"}]`)},
 	}
 	if err := app.ReplaceTranscript(ctx, key, "stream1", lines); err != nil {
 		t.Fatalf("failed to replace transcript: %v", err)
@@ -277,9 +277,7 @@ func TestServer_LineUpdate(t *testing.T) {
 	line0 := Line{
 		ID:        0,
 		Timestamp: 100,
-		Segments: []Segment{
-			{Timestamp: 100, Text: "Hello"},
-		},
+		Segments:  json.RawMessage(`[{"timestamp": 100, "text": "Hello"}]`),
 	}
 	body, _ := json.Marshal(line0)
 	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/line/stream2", key), bytes.NewBuffer(body))
@@ -308,9 +306,7 @@ func TestServer_LineUpdate(t *testing.T) {
 	line2 := Line{
 		ID:        2, // Should be 1
 		Timestamp: 200,
-		Segments: []Segment{
-			{Timestamp: 200, Text: "World"},
-		},
+		Segments:  json.RawMessage(`[{"timestamp": 200, "text": "World"}]`),
 	}
 	body, _ = json.Marshal(line2)
 	req, _ = http.NewRequest("POST", fmt.Sprintf("/%s/line/stream2", key), bytes.NewBuffer(body))
@@ -440,8 +436,8 @@ func TestServer_Sync(t *testing.T) {
 		IsLive:      true,
 		MediaType:   "none",
 		Transcript: []Line{
-			{ID: 0, Timestamp: 100, Segments: []Segment{{Timestamp: 100, Text: "Resynced 1"}}},
-			{ID: 1, Timestamp: 200, Segments: []Segment{{Timestamp: 200, Text: "Resynced 2"}}},
+			{ID: 0, Timestamp: 100, Segments: json.RawMessage(`[{"timestamp": 100, "text": "Resynced 1"}]`)},
+			{ID: 1, Timestamp: 200, Segments: json.RawMessage(`[{"timestamp": 200, "text": "Resynced 2"}]`)},
 		},
 	}
 	body, _ := json.Marshal(syncData)
@@ -471,8 +467,10 @@ func TestServer_Sync(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines, got %d", len(lines))
 	}
-	if lines[1].Segments[0].Text != "Resynced 2" {
-		t.Errorf("expected segment text 'Resynced 2', got %s", lines[1].Segments[0].Text)
+	var segments []Segment
+	json.Unmarshal(lines[1].Segments, &segments)
+	if segments[0].Text != "Resynced 2" {
+		t.Errorf("expected segment text 'Resynced 2', got %s", segments[0].Text)
 	}
 
 	// Verify Media Resync
@@ -498,7 +496,7 @@ func TestServer_Sync(t *testing.T) {
 		IsLive:      true,
 		MediaType:   "none",
 		Transcript: []Line{
-			{ID: 1, Timestamp: 200, Segments: []Segment{{Timestamp: 200, Text: "Resynced 2 Media Check"}}, MediaAvailable: false},
+			{ID: 1, Timestamp: 200, Segments: json.RawMessage(`[{"timestamp": 200, "text": "Resynced 2 Media Check"}]`), MediaAvailable: false},
 		},
 	}
 	body, _ = json.Marshal(syncData2)
@@ -547,7 +545,7 @@ func TestServer_Sync(t *testing.T) {
 		IsLive:      true,
 		MediaType:   "none",
 		Transcript: []Line{
-			{ID: 2, Timestamp: 300, Segments: []Segment{{Timestamp: 300, Text: "Resynced 2 Raw Check"}}, MediaAvailable: false},
+			{ID: 2, Timestamp: 300, Segments: json.RawMessage(`[{"timestamp": 300, "text": "Resynced 2 Raw Check"}]`), MediaAvailable: false},
 		},
 	}
 	body, _ = json.Marshal(syncData3)
@@ -628,13 +626,13 @@ func TestServer_GetTranscriptEndpoint(t *testing.T) {
 	stream1ID := "stream1"
 	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: stream1ID, IsLive: false})
 	app.ReplaceTranscript(ctx, key, stream1ID, []Line{
-		{ID: 0, Segments: []Segment{{Text: "Stream 1 Line 0"}}},
+		{ID: 0, Segments: json.RawMessage(`[{"text": "Stream 1 Line 0"}]`)},
 	})
 
 	stream2ID := "stream2"
 	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: stream2ID, IsLive: true})
 	app.ReplaceTranscript(ctx, key, stream2ID, []Line{
-		{ID: 0, Segments: []Segment{{Text: "Stream 2 Line 0"}}},
+		{ID: 0, Segments: json.RawMessage(`[{"text": "Stream 2 Line 0"}]`)},
 	})
 
 	// Test Get Stream 1
@@ -647,7 +645,12 @@ func TestServer_GetTranscriptEndpoint(t *testing.T) {
 	}
 	var lines []Line
 	json.Unmarshal(rr.Body.Bytes(), &lines)
-	if len(lines) != 1 || lines[0].Segments[0].Text != "Stream 1 Line 0" {
+	if len(lines) != 1 {
+		t.Fatalf("unexpected content for stream1: %v", lines)
+	}
+	var segments []Segment
+	json.Unmarshal(lines[0].Segments, &segments)
+	if segments[0].Text != "Stream 1 Line 0" {
 		t.Errorf("unexpected content for stream1: %v", lines)
 	}
 
@@ -660,7 +663,11 @@ func TestServer_GetTranscriptEndpoint(t *testing.T) {
 		t.Errorf("expected status OK for stream2, got %v", rr.Code)
 	}
 	json.Unmarshal(rr.Body.Bytes(), &lines)
-	if len(lines) != 1 || lines[0].Segments[0].Text != "Stream 2 Line 0" {
+	if len(lines) != 1 {
+		t.Fatalf("unexpected content for stream2: %v", lines)
+	}
+	json.Unmarshal(lines[0].Segments, &segments)
+	if segments[0].Text != "Stream 2 Line 0" {
 		t.Errorf("unexpected content for stream2: %v", lines)
 	}
 
@@ -720,7 +727,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 			Timestamp:      i * 1000,
 			MediaAvailable: true,
 			FileID:         fileID,
-			Segments:       []Segment{{Text: "test"}},
+			Segments:       json.RawMessage(`[{"text": "test"}]`),
 		}
 		app.InsertTranscriptLine(ctx, key, "s1", line)
 
@@ -927,7 +934,7 @@ func TestServer_ActivateStream_Retention_UnderThreshold(t *testing.T) {
 	// Initialize with 1 Past Stream (p1)
 	p1 := &Stream{ChannelID: key, ActiveID: "p1", StartTime: "2000", IsLive: false}
 	app.UpsertStream(ctx, p1)
-	app.InsertTranscriptLine(ctx, key, "p1", Line{ID: 0, Segments: []Segment{{Text: "P1 Content"}}})
+	app.InsertTranscriptLine(ctx, key, "p1", Line{ID: 0, Segments: json.RawMessage(`[{"text": "P1 Content"}]`)})
 	folder := filepath.Join(cs.BaseMediaFolder, "p1")
 	os.MkdirAll(folder, 0755)
 	app.Channels[key].ActiveMediaFolder = folder
@@ -974,7 +981,7 @@ func TestServer_ActivateStream_Retention_EqualThreshold(t *testing.T) {
 	s1 := &Stream{ChannelID: key, ActiveID: "s1", StartTime: "3000", IsLive: true}
 	app.UpsertStream(ctx, p1)
 	app.UpsertStream(ctx, s1)
-	app.InsertTranscriptLine(ctx, key, "p1", Line{ID: 0, Segments: []Segment{{Text: "P1 Content"}}})
+	app.InsertTranscriptLine(ctx, key, "p1", Line{ID: 0, Segments: json.RawMessage(`[{"text": "P1 Content"}]`)})
 
 	// Create folders
 	os.MkdirAll(filepath.Join(cs.BaseMediaFolder, "p1"), 0755)
@@ -1029,7 +1036,7 @@ func TestServer_ActivateStream_Retention_OverThreshold(t *testing.T) {
 	app.UpsertStream(ctx, s1)
 	app.UpsertStream(ctx, s2)
 
-	app.InsertTranscriptLine(ctx, key, "p1", Line{ID: 0, Segments: []Segment{{Text: "P1 Content"}}})
+	app.InsertTranscriptLine(ctx, key, "p1", Line{ID: 0, Segments: json.RawMessage(`[{"text": "P1 Content"}]`)})
 
 	// Create folders
 	os.MkdirAll(filepath.Join(cs.BaseMediaFolder, "p1"), 0755)
@@ -1103,7 +1110,7 @@ func TestServer_ActivateStream_Retention_MassiveOverflow(t *testing.T) {
 	app.UpsertStream(ctx, s2)
 	app.UpsertStream(ctx, s3)
 
-	app.InsertTranscriptLine(ctx, key, "s1", Line{ID: 0, Segments: []Segment{{Text: "S1 Content"}}})
+	app.InsertTranscriptLine(ctx, key, "s1", Line{ID: 0, Segments: json.RawMessage(`[{"text": "S1 Content"}]`)})
 
 	// Create folders
 	os.MkdirAll(filepath.Join(cs.BaseMediaFolder, "p5"), 0755)
