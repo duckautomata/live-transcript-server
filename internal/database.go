@@ -10,18 +10,41 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func InitDB(path string) (*sql.DB, error) {
+func InitDB(path string, config DatabaseConfig) (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, err
 	}
 
+	// Set defaults if not provided in config
+	if config.JournalMode == "" {
+		config.JournalMode = "WAL"
+	}
+	if config.BusyTimeoutMS == 0 {
+		config.BusyTimeoutMS = 5000
+	}
+	if config.Synchronous == "" {
+		config.Synchronous = "NORMAL"
+	}
+	if config.CacheSizeKB == 0 {
+		config.CacheSizeKB = 200000 // 200MB
+	}
+	if config.TempStore == "" {
+		config.TempStore = "MEMORY"
+	}
+	if config.MmapSizeBytes == 0 {
+		config.MmapSizeBytes = 500000000 // 500MB
+	}
+
 	// Performance optimizations
 	pragmas := []string{
-		"PRAGMA journal_mode=WAL;",
-		"PRAGMA busy_timeout=5000;",
-		"PRAGMA synchronous=NORMAL;",
+		fmt.Sprintf("PRAGMA journal_mode=%s;", config.JournalMode),
+		fmt.Sprintf("PRAGMA busy_timeout=%d;", config.BusyTimeoutMS),
+		fmt.Sprintf("PRAGMA synchronous=%s;", config.Synchronous),
 		"PRAGMA foreign_keys=ON;",
+		fmt.Sprintf("PRAGMA cache_size=%d;", -config.CacheSizeKB), // Negate to specify KB
+		fmt.Sprintf("PRAGMA temp_store=%s;", config.TempStore),
+		fmt.Sprintf("PRAGMA mmap_size=%d;", config.MmapSizeBytes),
 	}
 
 	for _, pragma := range pragmas {

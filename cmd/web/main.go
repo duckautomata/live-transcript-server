@@ -58,21 +58,21 @@ func main() {
 
 	slog.Info("server starting up", "version", Version, "build_time", BuildTime)
 
-	// --- Database Setup ---
-	dbPath := filepath.Join("tmp", "server.db")
-	db, err := internal.InitDB(dbPath)
-	if err != nil {
-		slog.Error("unable to initialize database", "func", "main", "path", dbPath, "err", err)
-		os.Exit(1)
-	}
-	defer db.Close()
-
 	// --- App Setup ---
 	config, err := internal.GetConfig()
 	if err != nil {
 		slog.Error("unable to read in config", "func", "main", "err", err)
 		os.Exit(1)
 	}
+
+	// --- Database Setup ---
+	dbPath := filepath.Join("tmp", "server.db")
+	db, err := internal.InitDB(dbPath, config.Database)
+	if err != nil {
+		slog.Error("unable to initialize database", "func", "main", "path", dbPath, "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
 	app := internal.NewApp(config.Credentials.ApiKey, db, config.Channels, config.Storage, "tmp")
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)

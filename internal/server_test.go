@@ -578,7 +578,7 @@ func TestServer_Sync(t *testing.T) {
 func TestServer_Persistence(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "persist.db")
-	db, _ := InitDB(dbPath)
+	db, _ := InitDB(dbPath, DatabaseConfig{})
 
 	key := "persist-channel"
 	apiKey := "key"
@@ -600,7 +600,7 @@ func TestServer_Persistence(t *testing.T) {
 	db.Close()
 
 	// Re-open DB
-	db2, _ := InitDB(dbPath)
+	db2, _ := InitDB(dbPath, DatabaseConfig{})
 	defer db2.Close()
 	app2 := &App{DB: db2}
 

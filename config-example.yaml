@@ -9,6 +9,14 @@ credentials:
   # credentials used to restrict the activate/deactive/update/upload endpoints
   apiKey: ""
 
+database:
+  journal_mode: "WAL"
+  busy_timeout_ms: 5000
+  synchronous: "NORMAL"
+  cache_size_kb: 200000 # 200MB
+  temp_store: "MEMORY"
+  mmap_size_bytes: 500000000 # 500MB
+
 storage:
   type: "local" # "local" or "r2"
   r2:

@@ -25,10 +25,20 @@ type StorageConfig struct {
 	R2   R2Config `yaml:"r2"`
 }
 
+type DatabaseConfig struct {
+	JournalMode   string `yaml:"journal_mode"`
+	BusyTimeoutMS int    `yaml:"busy_timeout_ms"`
+	Synchronous   string `yaml:"synchronous"`
+	CacheSizeKB   int    `yaml:"cache_size_kb"`
+	TempStore     string `yaml:"temp_store"`
+	MmapSizeBytes int64  `yaml:"mmap_size_bytes"`
+}
+
 type Config struct {
 	Credentials struct {
 		ApiKey string `yaml:"apiKey"`
 	} `yaml:"credentials"`
+	Database DatabaseConfig  `yaml:"database"`
 	Storage  StorageConfig   `yaml:"storage"`
 	Channels []ChannelConfig `yaml:"channels"`
 }
