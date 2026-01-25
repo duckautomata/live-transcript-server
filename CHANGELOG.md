@@ -11,6 +11,7 @@ Using version [1.6](#16-2025-12-18)
 **Changes**
 - Fixed websocket race conditions during message sending
 - Improved websocket performance
+- Switched to alpine and added healthcheck
 
 ## 2.3 (2026-01-20)
 **Changes**
