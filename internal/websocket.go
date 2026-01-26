@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"compress/flate"
 	"context"
 	"errors"
 	"log/slog"
@@ -294,6 +295,10 @@ func (app *App) wsHandler(w http.ResponseWriter, r *http.Request) {
 	TotalConnections.Inc()
 	ClientsPerKey.WithLabelValues(cs.Key).Inc()
 	startTime := time.Now()
+
+	// Enable compression for writes
+	conn.EnableWriteCompression(true)
+	conn.SetCompressionLevel(flate.BestCompression)
 
 	client := &Client{conn: conn, send: make(chan WebSocketMessage, 256)}
 
