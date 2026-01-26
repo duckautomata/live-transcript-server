@@ -92,17 +92,19 @@ func InitDB(path string, config DatabaseConfig) (*sql.DB, error) {
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	// Warm up the database to populate the cache
-	go func() {
-		// Run in background to not block startup, though for small DBs it's fast.
-		// A full table scan forces pages into memory.
-		var count int
-		if err := db.QueryRow("SELECT count(*) FROM transcripts").Scan(&count); err != nil {
-			fmt.Printf("failed to warm up transcripts: %v\n", err) // using fmt as slog not imported here specifically for this, or could import slog
-		}
-		if err := db.QueryRow("SELECT count(*) FROM streams").Scan(&count); err != nil {
-			fmt.Printf("failed to warm up streams: %v\n", err)
-		}
-	}()
+	if config.JournalMode != "MEMORY" {
+		go func() {
+			// Run in background to not block startup, though for small DBs it's fast.
+			// A full table scan forces pages into memory.
+			var count int
+			if err := db.QueryRow("SELECT count(*) FROM transcripts").Scan(&count); err != nil {
+				fmt.Printf("failed to warm up transcripts: %v\n", err) // using fmt as slog not imported here specifically for this, or could import slog
+			}
+			if err := db.QueryRow("SELECT count(*) FROM streams").Scan(&count); err != nil {
+				fmt.Printf("failed to warm up streams: %v\n", err)
+			}
+		}()
+	}
 
 	return db, nil
 }

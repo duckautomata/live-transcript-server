@@ -9,6 +9,8 @@ credentials:
   # credentials used to restrict the activate/deactive/update/upload endpoints
   apiKey: ""
 
+# Database configuration used to tune performance
+# See https://www.sqlite.org/pragma.html for more information
 database:
   journal_mode: "WAL"
   busy_timeout_ms: 5000
