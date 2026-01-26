@@ -1,12 +1,16 @@
 package internal
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -316,5 +320,94 @@ func TestIsClientDisconnectError(t *testing.T) {
 				t.Errorf("isClientDisconnectError() = %v, want %v", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestWebsocketPartialSync(t *testing.T) {
+	key := "test-ws-partial-sync"
+	app, mux, db := setupTestApp(t, []string{key})
+	defer db.Close()
+
+	// Seed with 150 lines
+	ctx := context.Background()
+	// Create stream
+	stream := &Stream{
+		ChannelID:   key,
+		ActiveID:    "stream-partial",
+		ActiveTitle: "Partial Sync Test",
+		StartTime:   fmt.Sprintf("%d", time.Now().Unix()),
+		IsLive:      true,
+		MediaType:   "audio",
+	}
+	app.UpsertStream(ctx, stream)
+
+	lines := make([]Line, 150)
+	for i := 0; i < 150; i++ {
+		lines[i] = Line{
+			ID:        i,
+			Timestamp: i * 1000,
+			Segments:  json.RawMessage(fmt.Sprintf(`[{"timestamp": %d, "text": "Line %d"}]`, i*1000, i)),
+		}
+	}
+	app.ReplaceTranscript(ctx, key, "stream-partial", lines)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/" + key + "/websocket"
+
+	// Connect
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial ws: %v", err)
+	}
+	defer ws.Close()
+
+	// 1. Expect Partial Sync
+	var partialMsg WebSocketMessage
+	if err := ws.ReadJSON(&partialMsg); err != nil {
+		t.Fatalf("failed to read partial msg: %v", err)
+	}
+	if partialMsg.Event != EventPartialSync {
+		t.Fatalf("expected event partialSync, got %s", partialMsg.Event)
+	}
+
+	partialData, ok := partialMsg.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map data for partial sync")
+	}
+	partialTranscript, ok := partialData["transcript"].([]interface{})
+	if !ok {
+		t.Fatalf("expected transcript array in partial sync data, got %T", partialData["transcript"])
+	}
+	if len(partialTranscript) != 100 {
+		t.Errorf("expected 100 lines in partial sync, got %d", len(partialTranscript))
+	}
+
+	// Check the last line of partial sync is the actual last line (ID 149)
+	lastLine := partialTranscript[99].(map[string]interface{})
+	// JSON numbers are float64
+	if id, ok := lastLine["id"].(float64); !ok || int(id) != 149 {
+		t.Errorf("expected last line id 149, got %v", lastLine["id"])
+	}
+
+	// 2. Expect Full Sync
+	var syncMsg WebSocketMessage
+	if err := ws.ReadJSON(&syncMsg); err != nil {
+		t.Fatalf("failed to read sync msg: %v", err)
+	}
+	if syncMsg.Event != EventSync {
+		t.Fatalf("expected event sync, got %s", syncMsg.Event)
+	}
+
+	syncData, ok := syncMsg.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map data for sync")
+	}
+	fullTranscript, ok := syncData["transcript"].([]interface{})
+	if !ok {
+		t.Fatalf("expected transcript array")
+	}
+	if len(fullTranscript) != 150 {
+		t.Errorf("expected 150 lines in full sync, got %d", len(fullTranscript))
 	}
 }

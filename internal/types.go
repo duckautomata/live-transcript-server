@@ -60,6 +60,7 @@ const (
 	EventNewStream   EventType = "newStream"
 	EventStatus      EventType = "status"
 	EventSync        EventType = "sync"
+	EventPartialSync EventType = "partialSync"
 	EventNewMedia    EventType = "newMedia"
 	EventPing        EventType = "ping"
 	EventPong        EventType = "pong"

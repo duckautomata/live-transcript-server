@@ -201,6 +201,22 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, client *Client
 	}
 	syncData.Transcript = transcript
 
+	// Send partial sync if transcript is large
+	if len(transcript) > 100 {
+		partialTranscript := transcript[len(transcript)-100:]
+		partialSyncData := *syncData
+		partialSyncData.Transcript = partialTranscript
+		partialMsg := WebSocketMessage{
+			Event: EventPartialSync,
+			Data:  partialSyncData,
+		}
+		if !client.trySend(partialMsg) {
+			slog.Error("failed to send partial sync message: buffer full or closed", "key", cs.Key)
+			cs.closeSocket(client)
+			return
+		}
+	}
+
 	outData := WebSocketMessage{
 		Event: EventSync,
 		Data:  syncData,
