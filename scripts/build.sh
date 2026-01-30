@@ -86,6 +86,7 @@ echo "Building Docker image..."
 if ! $DOCKER_CMD build \
     --build-arg VERSION="${VERSION}" \
     --build-arg BUILD_TIME="${BUILD_TIME}" \
+    --build-arg CACHEBUST="${BUILD_TIME}" \
     $TAG_ARGS \
     .; then
     echo "Docker build failed. Aborting."

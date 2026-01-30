@@ -1,26 +1,31 @@
+# Global default args, cachebust is used to force-refresh specific steps.
+ARG CACHEBUST=1
+
 # 1. Build Stage
 FROM golang:1.25-alpine AS gobuilder
+ARG CACHEBUST
+ARG VERSION=dev
+ARG BUILD_TIME=unknown
 WORKDIR /app
 
 # Install build tools (required for CGO on Alpine)
-RUN apk add --no-cache build-base
+RUN echo "Cache bust: ${CACHEBUST}" && apk add --no-cache build-base
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN echo "Cache bust: ${CACHEBUST}" && go mod download
 COPY . .
 
-ARG VERSION=dev
-ARG BUILD_TIME=unknown
-
-RUN CGO_ENABLED=1 GOOS=linux go build -o ./bin/main \
+RUN echo "Cache bust: ${CACHEBUST}" && \
+    CGO_ENABLED=1 GOOS=linux go build -o ./bin/main \
     -ldflags="-w -s -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME}" \
     ./cmd/web
 
 # 2. Run Stage
 FROM alpine:latest
+ARG CACHEBUST
 
 # Install dependencies + curl for healthcheck
-RUN apk add --no-cache ffmpeg ca-certificates tzdata curl
+RUN echo "Cache bust: ${CACHEBUST}" && apk add --no-cache ffmpeg ca-certificates tzdata curl
 
 WORKDIR /app
 
