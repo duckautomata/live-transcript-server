@@ -43,6 +43,15 @@ var (
 		Name: "lt_message_processing_duration_seconds",
 		Help: "The duration of message processing.",
 	})
+	MediaProcessingDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "lt_media_processing_duration_seconds",
+		Help: "The duration of media processing steps in seconds.",
+		Buckets: []float64{
+			0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10,
+		},
+	},
+		[]string{"step", "key"},
+	)
 	ServerOOS = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "lt_server_oos",
 		Help: "The total number of times the server was out-of-sync with the client.",

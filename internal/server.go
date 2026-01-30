@@ -547,6 +547,10 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Timings map
+	timings := make(map[string]float64)
+
+	retrieveStart := time.Now()
 	if err := r.ParseMultipartForm(100 << 20); err != nil { // 100 MB max
 		http.Error(w, "Unable to parse form", http.StatusBadRequest)
 		Http400Errors.Inc()
@@ -562,8 +566,13 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	streamID := r.PathValue("streamID")
-	// Verify stream exists in DB
+
+	// Verification
+	verifStart := time.Now()
 	exists, err := app.StreamExists(r.Context(), cs.Key, streamID)
+	timings["verification"] = time.Since(verifStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("verification", cs.Key).Observe(timings["verification"])
+
 	if err != nil {
 		slog.Error("failed to check stream exists", "key", cs.Key, "func", "mediaHandler", "err", err)
 		Http500Errors.Inc()
@@ -596,7 +605,12 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	dst.Close()
 	defer os.Remove(tempRawHost) // Clean up
 
+	// Total retrieve time (including parsing and saving) minus verification time which was interleaved
+	timings["retrieve_file"] = time.Since(retrieveStart).Seconds() - timings["verification"]
+	MediaProcessingDuration.WithLabelValues("retrieve_file", cs.Key).Observe(timings["retrieve_file"])
+
 	// Convert to m4a
+	convertStart := time.Now()
 	tempM4aHost := ChangeExtension(tempRawHost, ".m4a")
 	if err := FfmpegConvert(tempRawHost, tempM4aHost); err != nil {
 		http.Error(w, "Unable to convert media", http.StatusInternalServerError)
@@ -604,9 +618,12 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("unable to convert media", "key", cs.Key, "func", "mediaHandler", "err", err)
 		return
 	}
+	timings["convert_m4a"] = time.Since(convertStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("convert_m4a", cs.Key).Observe(timings["convert_m4a"])
 	defer os.Remove(tempM4aHost)
 
 	// Upload Raw
+	uploadRawStart := time.Now()
 	fileID := shortuuid.New()
 	rawKey := fmt.Sprintf("%s/%s/raw/%s.raw", cs.Key, streamID, fileID)
 	rawReader, _ := os.Open(tempRawHost) // Should exist
@@ -619,8 +636,11 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
 		return
 	}
+	timings["upload_raw"] = time.Since(uploadRawStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("upload_raw", cs.Key).Observe(timings["upload_raw"])
 
 	// Upload M4A
+	uploadM4aStart := time.Now()
 	m4aKey := fmt.Sprintf("%s/%s/audio/%s.m4a", cs.Key, streamID, fileID)
 	m4aReader, _ := os.Open(tempM4aHost)
 	defer m4aReader.Close()
@@ -631,6 +651,8 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		Http500Errors.Inc()
 		return
 	}
+	timings["upload_m4a"] = time.Since(uploadM4aStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("upload_m4a", cs.Key).Observe(timings["upload_m4a"])
 
 	// Extract Frame
 	// Fetch stream info to check media type
@@ -640,9 +662,14 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if stream != nil && stream.MediaType == "video" {
+		extractFrameStart := time.Now()
 		tempJpgHost := ChangeExtension(tempRawHost, ".jpg")
 		if err := FfmpegExtractFrame(tempRawHost, tempJpgHost, 480); err == nil {
+			timings["extract_frame"] = time.Since(extractFrameStart).Seconds()
+			MediaProcessingDuration.WithLabelValues("extract_frame", cs.Key).Observe(timings["extract_frame"])
 			defer os.Remove(tempJpgHost)
+
+			uploadFrameStart := time.Now()
 			jpgKey := fmt.Sprintf("%s/%s/frame/%s.jpg", cs.Key, streamID, fileID)
 			jpgReader, _ := os.Open(tempJpgHost)
 			defer jpgReader.Close()
@@ -650,6 +677,8 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 			if _, err := app.Storage.Save(uploadCtx, jpgKey, jpgReader, jpgInfo.Size()); err != nil {
 				slog.Error("failed to upload frame", "key", cs.Key, "err", err)
 			}
+			timings["upload_frame"] = time.Since(uploadFrameStart).Seconds()
+			MediaProcessingDuration.WithLabelValues("upload_frame", cs.Key).Observe(timings["upload_frame"])
 		}
 	}
 
@@ -657,6 +686,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Media received and processed successfully"))
 
 	// Update DB
+	updateDbStart := time.Now()
 	success := true
 	if err := app.SetMediaAvailable(r.Context(), cs.Key, streamID, id, fileID, true); err != nil {
 		if err.Error() == "line not found" {
@@ -672,6 +702,8 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 			success = false
 		}
 	}
+	timings["update_db"] = time.Since(updateDbStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("update_db", cs.Key).Observe(timings["update_db"])
 
 	if success && streamID != "" {
 		files, err := app.GetLastAvailableMediaFiles(r.Context(), cs.Key, streamID, 100)
@@ -681,6 +713,8 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		app.broadcastNewMedia(cs, streamID, files)
 	}
+
+	slog.Debug("media processing timings", "key", cs.Key, "streamID", streamID, "id", id, "timings", timings)
 }
 
 // Handle an activate request from the worker. Activates a stream and sends a message to all clients.
