@@ -714,7 +714,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		app.broadcastNewMedia(cs, streamID, files)
 	}
 
-	slog.Debug("media processing timings", "key", cs.Key, "streamID", streamID, "id", id, "timings", timings)
+	// slog.Debug("media processing timings", "key", cs.Key, "streamID", streamID, "id", id, "timings", timings)
 }
 
 // Handle an activate request from the worker. Activates a stream and sends a message to all clients.
