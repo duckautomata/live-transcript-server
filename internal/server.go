@@ -1146,7 +1146,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		StreamVideoClipped.WithLabelValues(cs.Key).Inc()
 	}
 
-	if time.Since(processStartTime).Seconds() > 5 {
+	if time.Since(processStartTime).Seconds() > 10 {
 		slog.Warn("slow clip processing time", "key", cs.Key, "func", "postClipHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "start", start, "end", end, "mediaType", reqMediaType)
 	}
 
@@ -1387,7 +1387,7 @@ func (app *App) StartReconciliationLoop() {
 	ticker := time.NewTicker(8 * time.Hour)
 	go func() {
 		for range ticker.C {
-			slog.Info("starting reconciliation loop", "func", "StartReconciliationLoop")
+			slog.Debug("starting reconciliation loop", "func", "StartReconciliationLoop")
 			ctx := context.Background()
 
 			for _, cs := range app.Channels {
