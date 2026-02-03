@@ -473,6 +473,9 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 
 	uploadStartTime := time.Now()
 
+	// Timings map
+	timings := make(map[string]float64)
+	decodeStart := time.Now()
 	decoder := json.NewDecoder(r.Body)
 	var data Line
 	if err := decoder.Decode(&data); err != nil {
@@ -481,6 +484,9 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("unable to decode JSON data", "key", cs.Key, "func", "lineHandler", "err", err)
 		return
 	}
+	timings["decode_json"] = time.Since(decodeStart).Seconds()
+	RequestProcessingDuration.WithLabelValues("lineHandler", "decode_json", cs.Key).Observe(timings["decode_json"])
+
 	uploadTime := time.Since(uploadStartTime).Milliseconds()
 	processStartTime := time.Now()
 
@@ -492,6 +498,7 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dbGetStart := time.Now()
 	lastID, err := app.GetLastLineID(r.Context(), cs.Key, streamID)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -499,6 +506,9 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("failed to get last line id", "err", err)
 		return
 	}
+	timings["db_check"] = time.Since(dbGetStart).Seconds()
+	RequestProcessingDuration.WithLabelValues("lineHandler", "db_check", cs.Key).Observe(timings["db_check"])
+
 	expectedID := lastID + 1
 	// Special case: if DB is empty (lastID = -1), we expect 0.
 	// This works because -1 + 1 = 0. And we expect the first line to be 0.
@@ -513,14 +523,21 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dbInsertStart := time.Now()
 	if err := app.InsertTranscriptLine(r.Context(), cs.Key, streamID, data); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		slog.Error("failed to insert transcript line", "err", err)
 		return
 	}
+	timings["db_insert"] = time.Since(dbInsertStart).Seconds()
+	RequestProcessingDuration.WithLabelValues("lineHandler", "db_insert", cs.Key).Observe(timings["db_insert"])
 
+	broadcastStart := time.Now()
 	app.broadcastNewLine(r.Context(), cs, streamID, uploadTime, &data)
+	timings["broadcast"] = time.Since(broadcastStart).Seconds()
+	RequestProcessingDuration.WithLabelValues("lineHandler", "broadcast", cs.Key).Observe(timings["broadcast"])
+
 	if time.Since(processStartTime).Seconds() > 1 {
 		slog.Warn("slow processing time", "key", cs.Key, "func", "lineHandler", "uploadTimeMs", time.Since(uploadStartTime).Milliseconds(), "processingTimeMs", time.Since(processStartTime).Milliseconds(), "lineId", data.ID)
 	}
@@ -999,6 +1016,9 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Helper to capture timings
+	timings := make(map[string]float64)
+
 	stream, err := app.GetStream(r.Context(), cs.Key)
 	mediaType := "none"
 	if err == nil && stream != nil {
@@ -1014,11 +1034,14 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		Type     string `json:"type"`
 	}
 
+	decodeStart := time.Now()
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 		Http400Errors.Inc()
 		return
 	}
+	timings["decode_json"] = time.Since(decodeStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("decode_json", cs.Key).Observe(timings["decode_json"])
 
 	start := req.Start
 	end := req.End
@@ -1056,6 +1079,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	uniqueID := shortuuid.New()
 
 	// Get FileIDs for the range
+	dbGetStart := time.Now()
 	fileIDs, err := app.GetFileIDsInRange(r.Context(), cs.Key, req.StreamID, start, end)
 	if err != nil {
 		slog.Error("failed to get file ids for clip", "key", cs.Key, "err", err)
@@ -1063,6 +1087,8 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		Http500Errors.Inc()
 		return
 	}
+	timings["db_get_files"] = time.Since(dbGetStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("db_get_files", cs.Key).Observe(timings["db_get_files"])
 
 	// Check if all requested IDs were found
 	expectedCount := end - start + 1
@@ -1073,6 +1099,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mergeAudioStart := time.Now()
 	mergedRawPath, err := app.MergeRawAudio(r.Context(), cs.Key, req.StreamID, fileIDs, uniqueID)
 	if err != nil {
 		os.Remove(mergedRawPath)
@@ -1082,8 +1109,11 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.Remove(mergedRawPath) // Delete the merged raw file when done
+	timings["merge_audio"] = time.Since(mergeAudioStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("merge_audio", cs.Key).Observe(timings["merge_audio"])
 
 	// Convert/Remux to Temp File
+	convertStart := time.Now()
 	tempMediaFile := filepath.Join(app.TempDir, uniqueID+clipExt)
 	sidecarFile := ""
 
@@ -1114,8 +1144,11 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.Remove(tempMediaFile)
+	timings["convert_remux"] = time.Since(convertStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("convert_remux", cs.Key).Observe(timings["convert_remux"])
 
 	// Upload Clip
+	uploadClipStart := time.Now()
 	clipKey := fmt.Sprintf("%s/%s/clips/%s%s", cs.Key, req.StreamID, uniqueID, clipExt)
 	clipReader, _ := os.Open(tempMediaFile)
 	defer clipReader.Close()
@@ -1125,9 +1158,12 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
 		return
 	}
+	timings["upload_clip"] = time.Since(uploadClipStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("upload_clip", cs.Key).Observe(timings["upload_clip"])
 
 	// Upload m4a sidecar file
 	if sidecarFile != "" {
+		uploadSidecarStart := time.Now()
 		sidecarKey := fmt.Sprintf("%s/%s/clips/%s.m4a", cs.Key, req.StreamID, uniqueID)
 		f, _ := os.Open(sidecarFile)
 		defer f.Close()
@@ -1135,6 +1171,8 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		if _, err := app.Storage.Save(r.Context(), sidecarKey, f, sidecarInfo.Size()); err != nil {
 			slog.Error("failed to upload sidecar m4a", "key", sidecarKey, "err", err)
 		}
+		timings["upload_sidecar"] = time.Since(uploadSidecarStart).Seconds()
+		MediaProcessingDuration.WithLabelValues("upload_sidecar", cs.Key).Observe(timings["upload_sidecar"])
 	}
 
 	switch clipExt {
@@ -1255,6 +1293,9 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Helper to capture timings
+	timings := make(map[string]float64)
+
 	// Parse JSON body
 	var trimReq struct {
 		StreamID   string  `json:"stream_id"`
@@ -1264,11 +1305,14 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 		End        float64 `json:"end"`
 	}
 
+	decodeStart := time.Now()
 	if err := json.NewDecoder(r.Body).Decode(&trimReq); err != nil {
 		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 		Http400Errors.Inc()
 		return
 	}
+	timings["decode_json"] = time.Since(decodeStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("decode_json", cs.Key).Observe(timings["decode_json"])
 
 	start := trimReq.Start
 	end := trimReq.End
@@ -1289,6 +1333,7 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 	sourceKey := fmt.Sprintf("%s/%s/clips/%s.%s", cs.Key, trimReq.StreamID, trimReq.ClipID, trimReq.FileFormat)
 
 	// Download Source to Temp
+	downloadStart := time.Now()
 	tempSource := filepath.Join(app.TempDir, fmt.Sprintf("src_%s.%s", uniqueID, trimReq.FileFormat))
 	reader, err := app.Storage.Get(r.Context(), sourceKey)
 	if err != nil {
@@ -1307,8 +1352,11 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 	reader.Close()
 	outFile.Close()
 	defer os.Remove(tempSource)
+	timings["download_source"] = time.Since(downloadStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("download_source", cs.Key).Observe(timings["download_source"])
 
 	// Trim
+	trimStart := time.Now()
 	tempDest := filepath.Join(app.TempDir, fmt.Sprintf("trim_%s.%s", uniqueID, trimReq.FileFormat))
 	if err := FfmpegTrim(tempSource, tempDest, start, end); err != nil {
 		http.Error(w, "Trim failed", http.StatusInternalServerError)
@@ -1316,8 +1364,11 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.Remove(tempDest)
+	timings["trim_processing"] = time.Since(trimStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("trim_processing", cs.Key).Observe(timings["trim_processing"])
 
 	// Upload
+	uploadStart := time.Now()
 	destKey := fmt.Sprintf("%s/%s/clips/%s.%s", cs.Key, trimReq.StreamID, uniqueID, trimReq.FileFormat)
 	f, _ := os.Open(tempDest)
 	defer f.Close()
@@ -1327,6 +1378,8 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("failed to upload trimmed clip", "err", err)
 		return
 	}
+	timings["upload_trim"] = time.Since(uploadStart).Seconds()
+	MediaProcessingDuration.WithLabelValues("upload_trim", cs.Key).Observe(timings["upload_trim"])
 
 	writeJSON(w, map[string]string{
 		"status":  "success",
@@ -1344,6 +1397,9 @@ func (app *App) getTranscriptHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Timings map
+	timings := make(map[string]float64)
+
 	streamID := r.PathValue("streamID")
 	if streamID == "" {
 		http.Error(w, "Missing streamID", http.StatusBadRequest)
@@ -1351,6 +1407,7 @@ func (app *App) getTranscriptHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dbFetchStart := time.Now()
 	lines, err := app.GetTranscript(r.Context(), cs.Key, streamID)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -1358,8 +1415,13 @@ func (app *App) getTranscriptHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("failed to get transcript", "key", cs.Key, "streamID", streamID, "err", err)
 		return
 	}
+	timings["db_fetch"] = time.Since(dbFetchStart).Seconds()
+	RequestProcessingDuration.WithLabelValues("getTranscriptHandler", "db_fetch", cs.Key).Observe(timings["db_fetch"])
 
+	jsonEncodeStart := time.Now()
 	writeJSON(w, lines)
+	timings["json_encode"] = time.Since(jsonEncodeStart).Seconds()
+	RequestProcessingDuration.WithLabelValues("getTranscriptHandler", "json_encode", cs.Key).Observe(timings["json_encode"])
 }
 
 // --- HTTP Helper Functions ---
