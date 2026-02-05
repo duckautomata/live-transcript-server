@@ -86,13 +86,25 @@ func InitDB(path string, config DatabaseConfig) (*sql.DB, error) {
 		return nil, fmt.Errorf("error creating transcripts table: %w", err)
 	}
 
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS worker_status (
+		channel_key TEXT PRIMARY KEY,
+		worker_version TEXT,
+		worker_build_time TEXT,
+		last_seen INTEGER
+	);
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("error creating worker_status table: %w", err)
+	}
+
 	// Connection pool settings
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(25)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	// Warm up the database to populate the cache
-	if config.JournalMode != "MEMORY" {
+	if config.JournalMode != "MEMORY" && path != ":memory:" {
 		go func() {
 			// Run in background to not block startup, though for small DBs it's fast.
 			// A full table scan forces pages into memory.
@@ -443,4 +455,47 @@ func (a *App) StreamExists(ctx context.Context, channelID string, activeID strin
 		return false, err
 	}
 	return exists, nil
+}
+
+// UpsertWorkerStatus updates the status of a worker for a specific key.
+func (a *App) UpsertWorkerStatus(ctx context.Context, key, version, buildTime string, lastSeen int64) error {
+	tx, err := a.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+	INSERT INTO worker_status (channel_key, worker_version, worker_build_time, last_seen)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(channel_key) DO UPDATE SET
+		worker_version = excluded.worker_version,
+		worker_build_time = excluded.worker_build_time,
+		last_seen = excluded.last_seen;
+	`, key, version, buildTime, lastSeen)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// GetAllWorkerStatus retrieves the status of all workers.
+func (a *App) GetAllWorkerStatus(ctx context.Context) ([]WorkerStatus, error) {
+	rows, err := a.DB.QueryContext(ctx, "SELECT channel_key, worker_version, worker_build_time, last_seen FROM worker_status ORDER BY last_seen DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var statuses []WorkerStatus
+	for rows.Next() {
+		var s WorkerStatus
+		if err := rows.Scan(&s.ChannelKey, &s.WorkerVersion, &s.WorkerBuildTime, &s.LastSeen); err != nil {
+			return nil, err
+		}
+		statuses = append(statuses, s)
+	}
+
+	return statuses, nil
 }

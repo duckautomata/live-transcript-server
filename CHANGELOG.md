@@ -1,11 +1,15 @@
 # latest
-Using version [2.4](#24-2026-01-25)
+Using version [2.5](#25-2026-02-05)
 
 # Major version 2
-Using version [2.4](#24-2026-01-25)
+Using version [2.5](#25-2026-02-05)
 
 # Major version 1
 Using version [1.6](#16-2025-12-18)
+
+## 2.5 (2026-02-05)
+**Changes**
+- Added /status endpoint
 
 ## 2.4 (2026-01-25)
 **Changes**

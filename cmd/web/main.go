@@ -73,7 +73,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
-	app := internal.NewApp(config.Credentials.ApiKey, db, config.Channels, config.Storage, "tmp")
+	app := internal.NewApp(config.Credentials.ApiKey, db, config.Channels, config.Storage, "tmp", Version, BuildTime)
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)
 

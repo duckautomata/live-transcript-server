@@ -51,6 +51,33 @@ type WorkerData struct {
 	Transcript  []Line `json:"transcript"`
 }
 
+// WorkerStatus represents the status of a worker for a specific key.
+type WorkerStatus struct {
+	ChannelKey      string `json:"channelKey"`
+	WorkerVersion   string `json:"workerVersion"`
+	WorkerBuildTime string `json:"workerBuildTime"`
+	LastSeen        int64  `json:"lastSeen"`
+	IsActive        bool   `json:"isActive"` // Computed field
+}
+
+type WorkerStatusRequest struct {
+	Version   string   `json:"version"`
+	BuildTime string   `json:"build_time"`
+	Keys      []string `json:"keys"`
+}
+
+// ServerInfo represents the version information of the server.
+type ServerInfo struct {
+	Version   string `json:"version"`
+	BuildTime string `json:"buildTime"`
+}
+
+// FullInfoResponse represents the response for the /info endpoint.
+type FullInfoResponse struct {
+	Server  ServerInfo     `json:"server"`
+	Workers []WorkerStatus `json:"workers"`
+}
+
 // ===== Client Events =====
 
 type EventType string
@@ -153,4 +180,6 @@ type App struct {
 	MaxClipSize int
 	TempDir     string
 	Storage     storage.Storage
+	Version     string
+	BuildTime   string
 }

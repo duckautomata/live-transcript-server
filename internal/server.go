@@ -43,8 +43,10 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /{channel}/line/{streamID}", app.apiKeyMiddleware(app.lineHandler))
 	mux.HandleFunc("POST /{channel}/media/{streamID}/{id}", app.apiKeyMiddleware(app.mediaHandler))
 	mux.HandleFunc("GET /{channel}/statuscheck", app.apiKeyMiddleware(app.statuscheckHandler))
+	mux.HandleFunc("POST /status", app.apiKeyMiddleware(app.workerStatusHandler))
 
 	// Public routes
+	mux.HandleFunc("GET /status", app.getStatusHandler)
 	mux.HandleFunc("GET /{channel}/websocket", app.wsHandler)
 	mux.HandleFunc("GET /{channel}/stream/{streamID}/{type}/{filename}", app.streamHandler)
 	mux.HandleFunc("GET /{channel}/download/{streamID}/{type}/{filename}", app.downloadHandler)
@@ -101,7 +103,7 @@ func CorsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, storageConfig StorageConfig, tempDir string) *App {
+func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, storageConfig StorageConfig, tempDir, version, buildTime string) *App {
 	app := &App{
 		ApiKey: apiKey,
 		DB:     db,
@@ -115,6 +117,8 @@ func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, storageCo
 		MaxConn:     10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
 		MaxClipSize: 30,
 		TempDir:     tempDir,
+		Version:     version,
+		BuildTime:   buildTime,
 	}
 
 	for _, cc := range channelsConfig {
@@ -822,6 +826,53 @@ func (app *App) deactivateHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAlreadyReported)
 		w.Write(fmt.Appendf(nil, "%s stream was not deactivated", cs.Key))
 		slog.Debug("id already deactivated", "key", cs.Key, "func", "deactivateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID)
+	}
+}
+
+func (app *App) workerStatusHandler(w http.ResponseWriter, r *http.Request) {
+	var req WorkerStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	lastSeen := time.Now().Unix()
+	for _, key := range req.Keys {
+		if err := app.UpsertWorkerStatus(r.Context(), key, req.Version, req.BuildTime, lastSeen); err != nil {
+			slog.Error("failed to upsert worker status", "key", key, "err", err)
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (app *App) getStatusHandler(w http.ResponseWriter, r *http.Request) {
+	workers, err := app.GetAllWorkerStatus(r.Context())
+	if err != nil {
+		http.Error(w, "Database Error", http.StatusInternalServerError)
+		slog.Error("failed to get worker status", "err", err)
+		return
+	}
+
+	now := time.Now().Unix()
+	for i := range workers {
+		if now-workers[i].LastSeen < 300 { // 5 minutes
+			workers[i].IsActive = true
+		} else {
+			workers[i].IsActive = false
+		}
+	}
+
+	resp := FullInfoResponse{
+		Server: ServerInfo{
+			Version:   app.Version,
+			BuildTime: app.BuildTime,
+		},
+		Workers: workers,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Error("failed to encode info response", "err", err)
 	}
 }
 

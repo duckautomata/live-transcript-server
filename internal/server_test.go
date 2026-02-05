@@ -584,7 +584,7 @@ func TestServer_Persistence(t *testing.T) {
 	apiKey := "key"
 	// Use manual setup to mimic restart behavior easily (just accessing DB)
 
-	app := NewApp(apiKey, db, []ChannelConfig{{Name: key, NumPastStreams: 1}}, StorageConfig{Type: "local"}, dir)
+	app := NewApp(apiKey, db, []ChannelConfig{{Name: key, NumPastStreams: 1}}, StorageConfig{Type: "local"}, dir, "test-version", "test-build-time")
 	// Directly call activate via App method if we export it or via channel state lookup
 	// For now, let's use the DB operations directly to verify persistence of the DB logic itself,
 	// but the test is "Server_Persistence", suggesting valid server flow.
