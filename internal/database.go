@@ -499,3 +499,9 @@ func (a *App) GetAllWorkerStatus(ctx context.Context) ([]WorkerStatus, error) {
 
 	return statuses, nil
 }
+
+// ResetWorkerStatus clears the worker_status table.
+func (a *App) ResetWorkerStatus(ctx context.Context) error {
+	_, err := a.DB.ExecContext(ctx, "DELETE FROM worker_status")
+	return err
+}

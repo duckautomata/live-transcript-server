@@ -356,29 +356,8 @@ func TestServer_MediaUpload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get transcript: %v", err)
 	}
-	if len(transcript) == 0 {
-		// Wait a bit, broadcasting might be async but insertion is sync.
-		// "mediaHandler" calls InsertTranscriptLine? NO. lineHandler does.
-		// mediaHandler just updates MediaAvailable.
-		// So we assume line was inserted by "lineHandler" or test setup?
-		// Wait, TestServer_MediaUpload does NOT insert a line before upload?
-		// "We MUST insert a stream first for this test to pass with new logic."
-		// It uploads media for ID 0.
-		// Does ID 0 exist? No.
-		// "mediaHandler" logic: "app.SetMediaAvailable... if err == line not found -> retrying".
-		// But in old test, file was saved anyway.
-		// In new logic, file IS saved.
-		// But "file_id" is generated.
-		// If line doesn't exist, we can't get file_id from DB.
-		// But mediaHandler saves usage "id" (from URL) for "fallback"? No, it uses generated FileID.
-		// So if line doesn't exist, how do we find the file?
-		// We can list the directory?
-		// The test then calls "InsertTranscriptLine".
-		// But "InsertTranscriptLine" expects us to provide `FileID`.
-		// If we don't know the FileID...
-		// Maybe we should update this test to Insert Line FIRST.
-		// And check if mediaHandler updates it.
-		// Or we check directory.
+	if len(transcript) != 0 {
+		t.Fatal("transcript is not empty")
 	}
 
 	// Let's modify test flow: Insert Line -> Upload Media -> Check.
@@ -585,10 +564,6 @@ func TestServer_Persistence(t *testing.T) {
 	// Use manual setup to mimic restart behavior easily (just accessing DB)
 
 	app := NewApp(apiKey, db, []ChannelConfig{{Name: key, NumPastStreams: 1}}, StorageConfig{Type: "local"}, dir, "test-version", "test-build-time")
-	// Directly call activate via App method if we export it or via channel state lookup
-	// For now, let's use the DB operations directly to verify persistence of the DB logic itself,
-	// but the test is "Server_Persistence", suggesting valid server flow.
-	// Let's use Request.
 
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)
@@ -1201,4 +1176,69 @@ func (m *MockRemoteStorage) IsLocal() bool {
 
 func (m *MockRemoteStorage) GetURL(key string) string {
 	return "https://r2.example.com/" + key
+}
+
+func TestNewApp_WorkerStatusInitialization(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "startup.db")
+	db, err := InitDB(dbPath, DatabaseConfig{})
+	if err != nil {
+		t.Fatalf("Failed to init db: %v", err)
+	}
+	defer db.Close()
+
+	key := "test-startup-channel"
+	buildTime := "2024-01-01T12:00:00Z"
+	version := "1.0.0"
+
+	// Insert a stale record to verify reset
+	staleKey := "stale-key"
+	_, err = db.Exec("INSERT INTO worker_status (channel_key, worker_version, worker_build_time, last_seen) VALUES (?, ?, ?, ?)", staleKey, "old", "old", 0)
+	if err != nil {
+		t.Fatalf("Failed to insert stale record: %v", err)
+	}
+
+	// Initialize App
+	app := NewApp(
+		"test-api-key",
+		db,
+		[]ChannelConfig{{Name: key, NumPastStreams: 1}},
+		StorageConfig{Type: "local"},
+		dir,
+		version,
+		buildTime,
+	)
+
+	// Check worker_status
+	ctx := context.Background()
+	statuses, err := app.GetAllWorkerStatus(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get worker statuses: %v", err)
+	}
+
+	if len(statuses) != 1 {
+		t.Errorf("Expected 1 worker status (stale removed), got %d", len(statuses))
+		return
+	}
+
+	status := statuses[0]
+	if status.ChannelKey != key {
+		t.Errorf("Expected channel key %s, got %s", key, status.ChannelKey)
+	}
+	if status.ChannelKey == staleKey {
+		t.Error("Stale key should have been removed")
+	}
+
+	if status.WorkerVersion != "N/A" {
+		t.Errorf("Expected worker version 'N/A', got %s", status.WorkerVersion)
+	}
+	if status.WorkerBuildTime != buildTime {
+		t.Errorf("Expected worker build time %s, got %s", buildTime, status.WorkerBuildTime)
+	}
+
+	// Check last seen is recent (within 5 seconds)
+	now := time.Now().Unix()
+	if now-status.LastSeen > 5 {
+		t.Errorf("Expected last seen to be recent, got %d (now=%d)", status.LastSeen, now)
+	}
 }

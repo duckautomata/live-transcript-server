@@ -148,6 +148,19 @@ func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, storageCo
 		panic(fmt.Sprintf("failed to initialize storage: %v", err))
 	}
 	app.Storage = store
+
+	// Reset worker status to remove stale entries
+	if err := app.ResetWorkerStatus(ctx); err != nil {
+		slog.Error("failed to reset worker status", "err", err)
+	}
+
+	// Initialize worker status for all channels
+	for _, cs := range app.Channels {
+		if err := app.UpsertWorkerStatus(ctx, cs.Key, "N/A", buildTime, time.Now().Unix()); err != nil {
+			slog.Error("failed to initialize worker status", "key", cs.Key, "err", err)
+		}
+	}
+
 	return app
 }
 
