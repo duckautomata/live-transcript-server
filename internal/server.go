@@ -183,6 +183,8 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 		StreamFramesDownloads.WithLabelValues(cs.Key).Set(0)
 		StreamAudioClipped.WithLabelValues(cs.Key).Set(0)
 		StreamVideoClipped.WithLabelValues(cs.Key).Set(0)
+		StreamAudioTrimmed.WithLabelValues(cs.Key).Set(0)
+		StreamVideoTrimmed.WithLabelValues(cs.Key).Set(0)
 
 		// Remove previous stream activation metric when a new stream is activated. If there was a previous active stream.
 		if currentStream != nil && currentStream.ActiveID != "" {
@@ -1444,6 +1446,15 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	timings["upload_trim"] = time.Since(uploadStart).Seconds()
 	MediaProcessingDuration.WithLabelValues("upload_trim", cs.Key).Observe(timings["upload_trim"])
+
+	switch trimReq.FileFormat {
+	case "m4a", "mp3":
+		TotalAudioTrimmed.WithLabelValues(cs.Key).Inc()
+		StreamAudioTrimmed.WithLabelValues(cs.Key).Inc()
+	case "mp4":
+		TotalVideoTrimmed.WithLabelValues(cs.Key).Inc()
+		StreamVideoTrimmed.WithLabelValues(cs.Key).Inc()
+	}
 
 	writeJSON(w, map[string]string{
 		"status":  "success",

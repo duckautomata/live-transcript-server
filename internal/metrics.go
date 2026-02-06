@@ -95,6 +95,7 @@ var (
 	},
 		[]string{"key"},
 	)
+
 	TotalAudioPlayed = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "lt_total_audio_played_per_key",
 		Help: "The total number of successful calls to the /audio endpoint.",
@@ -131,6 +132,7 @@ var (
 	},
 		[]string{"key"},
 	)
+
 	TotalAudioClipped = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "lt_total_audio_clipped_per_key",
 		Help: "The total number of successful audio clips created.",
@@ -155,6 +157,32 @@ var (
 	},
 		[]string{"key"},
 	)
+
+	TotalAudioTrimmed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "lt_total_audio_trim_per_key",
+		Help: "The total number of successful audio clips trimmed.",
+	},
+		[]string{"key"},
+	)
+	StreamAudioTrimmed = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_stream_audio_trim_per_key",
+		Help: "The total number of successful audio clips trimmed in a given stream period.",
+	},
+		[]string{"key"},
+	)
+	TotalVideoTrimmed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "lt_total_video_trim_per_key",
+		Help: "The total number of successful video clips trimmed.",
+	},
+		[]string{"key"},
+	)
+	StreamVideoTrimmed = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_stream_video_trim_per_key",
+		Help: "The total number of successful video clips trimmed in a given stream period.",
+	},
+		[]string{"key"},
+	)
+
 	ActivatedStreams = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "lt_activated_streams_per_key",
 		Help: "Details of the currently active stream per key, with the value as the start timestamp.",

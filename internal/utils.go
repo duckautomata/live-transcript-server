@@ -10,17 +10,18 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 // example/name.abc -> example/name.def
-func ChangeExtension(filePath string, newExtension string) string {
-	ext := filepath.Ext(filePath)
-	if ext != "" {
-		return filePath[:len(filePath)-len(ext)] + newExtension
+func ChangeExtension(path, newExt string) string {
+	if !strings.HasPrefix(newExt, ".") {
+		newExt = "." + newExt
 	}
-	return filePath + newExtension
+	oldExt := filepath.Ext(path)
+	return strings.TrimSuffix(path, oldExt) + newExt
 }
 
 var FfmpegRemux = func(inputFilePath, outputFilePath string) error {
@@ -32,14 +33,14 @@ var FfmpegRemux = func(inputFilePath, outputFilePath string) error {
 			"-i", inputFilePath,
 			"-c", "copy",
 			"-movflags", "+faststart",
-			"-y", // Overwrite output file
+			"-y",
 			outputFilePath)
 	case "darwin", "linux":
 		cmd = exec.Command("ffmpeg",
 			"-i", inputFilePath,
 			"-c", "copy",
 			"-movflags", "+faststart",
-			"-y", // Overwrite output file
+			"-y",
 			outputFilePath)
 	default:
 		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
