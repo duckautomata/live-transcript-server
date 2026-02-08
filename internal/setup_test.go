@@ -46,8 +46,8 @@ func seedExampleData(t *testing.T, app *App, channelID string) {
 	// Insert a stream
 	stream := &Stream{
 		ChannelID:   channelID,
-		ActiveID:    "stream-1",
-		ActiveTitle: "Test Stream Title",
+		StreamID:    "stream-1",
+		StreamTitle: "Test Stream Title",
 		StartTime:   fmt.Sprintf("%d", time.Now().Unix()),
 		IsLive:      true,
 		MediaType:   "audio",

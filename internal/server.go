@@ -166,10 +166,9 @@ func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, storageCo
 
 // Activate a stream and send a message to all clients.
 // Returns true if the stream was activated and a message was sent, false otherwise.
-func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId string, activeTitle string, startTime string, mediaType string) bool {
-
+func (app *App) activateStream(ctx context.Context, cs *ChannelState, streamID string, streamTitle string, startTime string, mediaType string) bool {
 	// 1. Get current stream state from DB
-	currentStream, err := app.GetStream(ctx, cs.Key)
+	currentStream, err := app.GetRecentStream(ctx, cs.Key)
 	if err != nil {
 		slog.Error("failed to get stream from db", "key", cs.Key, "err", err)
 		return false
@@ -178,7 +177,7 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 	var msg WebSocketMessage
 
 	// If no stream exists, or the ID is different, it's a new stream
-	if currentStream == nil || currentStream.ActiveID != activeId {
+	if currentStream == nil || currentStream.StreamID != streamID {
 		StreamAudioPlayed.WithLabelValues(cs.Key).Set(0)
 		StreamFramesDownloads.WithLabelValues(cs.Key).Set(0)
 		StreamAudioClipped.WithLabelValues(cs.Key).Set(0)
@@ -187,26 +186,27 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 		StreamVideoTrimmed.WithLabelValues(cs.Key).Set(0)
 
 		// Remove previous stream activation metric when a new stream is activated. If there was a previous active stream.
-		if currentStream != nil && currentStream.ActiveID != "" {
-			deleted := ActivatedStreams.DeleteLabelValues(cs.Key, currentStream.ActiveID, currentStream.ActiveTitle)
+		if currentStream != nil && currentStream.StreamID != "" {
+			deleted := ActivatedStreams.DeleteLabelValues(cs.Key, currentStream.StreamID, currentStream.StreamTitle)
 			if deleted {
-				slog.Info("removed old stream activation metric", "key", cs.Key, "func", "activateStream", "oldStreamID", currentStream.ActiveID)
+				slog.Info("removed old stream activation metric", "key", cs.Key, "func", "activateStream", "oldStreamID", currentStream.StreamID)
 			}
 		}
 
 		newStream := &Stream{
-			ChannelID:   cs.Key,
-			ActiveID:    activeId,
-			ActiveTitle: activeTitle,
-			StartTime:   startTime,
-			IsLive:      true,
-			MediaType:   mediaType,
+			ChannelID:     cs.Key,
+			StreamID:      streamID,
+			StreamTitle:   streamTitle,
+			StartTime:     startTime,
+			IsLive:        true,
+			MediaType:     mediaType,
+			ActivatedTime: time.Now().UnixMicro(),
 		}
 
 		// Deactivate previous stream if it was live
 		if currentStream != nil && currentStream.IsLive {
-			if err := app.SetStreamLive(ctx, cs.Key, currentStream.ActiveID, false); err != nil {
-				slog.Error("failed to deactivate previous stream", "key", cs.Key, "streamID", currentStream.ActiveID, "err", err)
+			if err := app.SetStreamLive(ctx, cs.Key, currentStream.StreamID, false); err != nil {
+				slog.Error("failed to deactivate previous stream", "key", cs.Key, "streamID", currentStream.StreamID, "err", err)
 			}
 		}
 
@@ -217,7 +217,7 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 
 		// Set new active stream folder
 		if app.Storage.IsLocal() {
-			cs.ActiveMediaFolder = filepath.Join(cs.BaseMediaFolder, activeId)
+			cs.ActiveMediaFolder = filepath.Join(cs.BaseMediaFolder, streamID)
 			if err := os.MkdirAll(cs.ActiveMediaFolder, 0755); err != nil {
 				slog.Error("failed to create media folder", "key", cs.Key, "path", cs.ActiveMediaFolder, "err", err)
 				return false
@@ -227,71 +227,79 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 		// Rotation Logic: Query DB for all streams to apply retention policy
 		allStreams, err := app.GetAllStreams(ctx, cs.Key)
 		if err == nil {
-			// allStreams is sorted by start_time DESC (newest first).
-
 			if app.Storage.IsLocal() {
 				// Local Storage: Keep 'keepCount' streams (active + NumPastStreams).
-				keepCount := cs.NumPastStreams + 1
-				if len(allStreams) > keepCount {
-					for i := keepCount; i < len(allStreams); i++ {
-						streamToDelete := allStreams[i]
-						// Delete from DB (Stream meta)
-						if err := app.DeleteStream(ctx, cs.Key, streamToDelete.ActiveID); err != nil {
-							slog.Error("failed to delete stream from db", "key", cs.Key, "streamID", streamToDelete.ActiveID, "err", err)
-							continue
-						}
-						// Delete Transcript from DB
-						if err := app.DeleteTranscript(ctx, cs.Key, streamToDelete.ActiveID); err != nil {
-							slog.Error("failed to delete transcript from db", "key", cs.Key, "streamID", streamToDelete.ActiveID, "err", err)
-						}
-						// Delete from Storage
-						// Run efficiently in background to avoid blocking the request
-						go func(channelKey, activeID string) {
-							// Create a background context for the deletion
-							bgCtx := context.Background()
+				// Logic:
+				// 1. Always keep the current active stream (streamID).
+				// 2. Keep the top N *other* streams (by activated_time).
+				// 3. Delete the rest.
 
-							storageKey := fmt.Sprintf("%s/%s", channelKey, activeID)
-							slog.Info("deleting old stream storage (async)", "key", channelKey, "storageKey", storageKey)
-							if err := app.Storage.DeleteFolder(bgCtx, storageKey); err != nil {
-								slog.Error("failed to delete stream folder from storage", "key", channelKey, "storageKey", storageKey, "err", err)
-							} else {
-								slog.Info("successfully deleted old stream storage", "key", channelKey, "storageKey", storageKey)
-							}
-						}(cs.Key, streamToDelete.ActiveID)
+				pastStreamsKept := 0
+				for _, stream := range allStreams {
+					// Always keep the specific active stream we just activated/reactivated
+					if stream.StreamID == streamID {
+						continue
 					}
+
+					if pastStreamsKept < cs.NumPastStreams {
+						pastStreamsKept++
+						continue
+					}
+
+					// Delete this stream
+					streamToDelete := stream
+					if err := app.DeleteStream(ctx, cs.Key, streamToDelete.StreamID); err != nil {
+						slog.Error("failed to delete stream from db", "key", cs.Key, "streamID", streamToDelete.StreamID, "err", err)
+						continue
+					}
+					// Delete Transcript from DB
+					if err := app.DeleteTranscript(ctx, cs.Key, streamToDelete.StreamID); err != nil {
+						slog.Error("failed to delete transcript from db", "key", cs.Key, "streamID", streamToDelete.StreamID, "err", err)
+					}
+					// Delete from Storage
+					// Run efficiently in background to avoid blocking the request
+					go func(channelKey, activeID string) {
+						// Create a background context for the deletion
+						bgCtx := context.Background()
+
+						storageKey := fmt.Sprintf("%s/%s", channelKey, activeID)
+						slog.Info("deleting old stream storage (async)", "key", channelKey, "storageKey", storageKey)
+						if err := app.Storage.DeleteFolder(bgCtx, storageKey); err != nil {
+							slog.Error("failed to delete stream folder from storage", "key", channelKey, "storageKey", storageKey, "err", err)
+						} else {
+							slog.Info("successfully deleted old stream storage", "key", channelKey, "storageKey", storageKey)
+						}
+					}(cs.Key, streamToDelete.StreamID)
 				}
 			} else {
 				// R2 Storage: Check existence of streams in storage.
 				// If a stream is missing from R2 (e.g. deleted by lifecycle policy), remove it from DB.
-				// We check all past streams (skip the first one which is the new active stream).
 				if len(allStreams) > 1 {
-					go func(channelKey string, streams []Stream) {
-						bgCtx := context.Background()
-						// Iterate over all past streams
-						for i := 1; i < len(streams); i++ {
-							streamToCheck := streams[i]
-							storageKey := fmt.Sprintf("%s/%s", channelKey, streamToCheck.ActiveID)
+					for _, streamToCheck := range allStreams {
+						if streamToCheck.StreamID == streamID {
+							continue
+						}
+						storageKey := fmt.Sprintf("%s/%s", cs.Key, streamToCheck.StreamID)
 
-							exists, err := app.Storage.StreamExists(bgCtx, storageKey)
-							if err != nil {
-								slog.Error("failed to check if stream exists in storage", "key", channelKey, "streamID", streamToCheck.ActiveID, "err", err)
-								continue
+						exists, err := app.Storage.StreamExists(ctx, storageKey)
+						if err != nil {
+							slog.Error("failed to check if stream exists in storage", "key", cs.Key, "streamID", streamToCheck.StreamID, "err", err)
+							continue
+						}
+
+						if !exists {
+							slog.Info("stream not found in storage (likely deleted by lifecycle), removing from db", "key", cs.Key, "streamID", streamToCheck.StreamID)
+
+							// Delete from DB (Stream meta)
+							if err := app.DeleteStream(ctx, cs.Key, streamToCheck.StreamID); err != nil {
+								slog.Error("failed to delete stream from db", "key", cs.Key, "streamID", streamToCheck.StreamID, "err", err)
 							}
-
-							if !exists {
-								slog.Info("stream not found in storage (likely deleted by lifecycle), removing from db", "key", channelKey, "streamID", streamToCheck.ActiveID)
-
-								// Delete from DB (Stream meta)
-								if err := app.DeleteStream(bgCtx, channelKey, streamToCheck.ActiveID); err != nil {
-									slog.Error("failed to delete stream from db", "key", channelKey, "streamID", streamToCheck.ActiveID, "err", err)
-								}
-								// Delete Transcript from DB
-								if err := app.DeleteTranscript(bgCtx, channelKey, streamToCheck.ActiveID); err != nil {
-									slog.Error("failed to delete transcript from db", "key", channelKey, "streamID", streamToCheck.ActiveID, "err", err)
-								}
+							// Delete Transcript from DB
+							if err := app.DeleteTranscript(ctx, cs.Key, streamToCheck.StreamID); err != nil {
+								slog.Error("failed to delete transcript from db", "key", cs.Key, "streamID", streamToCheck.StreamID, "err", err)
 							}
 						}
-					}(cs.Key, allStreams)
+					}
 				}
 			}
 		} else {
@@ -299,7 +307,7 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 		}
 
 		// Broadcast pastStreams event if there is any
-		pastStreams, err := app.GetPastStreams(ctx, cs.Key, activeId)
+		pastStreams, err := app.GetPastStreams(ctx, cs.Key, streamID)
 		if err != nil {
 			slog.Error("failed to get past streams for broadcast", "key", cs.Key, "err", err)
 		} else {
@@ -312,8 +320,8 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 			cs.broadcast(pastStreamsMsg)
 		}
 		data := EventNewStreamData{
-			ActiveID:     newStream.ActiveID,
-			ActiveTitle:  newStream.ActiveTitle,
+			StreamID:     newStream.StreamID,
+			StreamTitle:  newStream.StreamTitle,
 			StartTime:    newStream.StartTime,
 			MediaType:    newStream.MediaType,
 			MediaBaseURL: app.Storage.GetURL(""),
@@ -323,30 +331,30 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 			Event: EventNewStream,
 			Data:  data,
 		}
-		slog.Debug("received new stream id, sending newstream event", "key", cs.Key, "func", "activateStream", "activeID", activeId)
+		slog.Debug("received new stream id, sending newstream event", "key", cs.Key, "func", "activateStream", "streamID", streamID)
 
 	} else {
 		// Same stream ID
 		if !currentStream.IsLive {
 			// Reactivate: Update the specific stream to be live
-			if err := app.SetStreamLive(ctx, cs.Key, currentStream.ActiveID, true); err != nil {
+			if err := app.SetStreamLive(ctx, cs.Key, currentStream.StreamID, true); err != nil {
 				slog.Error("failed to set stream live", "key", cs.Key, "err", err)
 				return false
 			}
 			currentStream.IsLive = true
 			data := EventStatusData{
-				ActiveID:    currentStream.ActiveID,
-				ActiveTitle: currentStream.ActiveTitle,
+				StreamID:    currentStream.StreamID,
+				StreamTitle: currentStream.StreamTitle,
 				IsLive:      currentStream.IsLive,
 			}
 			msg = WebSocketMessage{
 				Event: EventStatus,
 				Data:  data,
 			}
-			slog.Debug("reactivating existing stream, sending status event", "key", cs.Key, "func", "activateStream", "activeID", activeId)
+			slog.Debug("reactivating existing stream, sending status event", "key", cs.Key, "func", "activateStream", "streamID", streamID)
 		} else {
 			// Already active
-			slog.Debug("stream is already active, skipping event", "key", cs.Key, "func", "activateStream", "activeID", activeId)
+			slog.Debug("stream is already active, skipping event", "key", cs.Key, "func", "activateStream", "streamID", streamID)
 		}
 	}
 
@@ -360,39 +368,38 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, activeId s
 
 // Deactivate a stream and send a message to all clients.
 // Returns true if the stream was deactivated and a message was sent, false otherwise.
-func (app *App) deactivateStream(ctx context.Context, cs *ChannelState, activeId string) bool {
-
-	currentStream, err := app.GetStream(ctx, cs.Key)
+func (app *App) deactivateStream(ctx context.Context, cs *ChannelState, streamID string) bool {
+	currentStream, err := app.GetRecentStream(ctx, cs.Key)
 	if err != nil {
 		slog.Error("failed to get stream from db", "key", cs.Key, "err", err)
 		return false
 	}
 
 	var msg WebSocketMessage
-	if currentStream != nil && currentStream.ActiveID == activeId && currentStream.IsLive {
-		deleted := ActivatedStreams.DeleteLabelValues(cs.Key, currentStream.ActiveID, currentStream.ActiveTitle)
+	if currentStream != nil && currentStream.StreamID == streamID && currentStream.IsLive {
+		deleted := ActivatedStreams.DeleteLabelValues(cs.Key, currentStream.StreamID, currentStream.StreamTitle)
 		if deleted {
-			slog.Info("successfully removed stream metric on deactivation", "key", cs.Key, "func", "deactivateStream", "streamID", activeId)
+			slog.Info("successfully removed stream metric on deactivation", "key", cs.Key, "func", "deactivateStream", "streamID", streamID)
 		} else {
-			slog.Info("failed to remove stream metric on deactivation", "key", cs.Key, "func", "deactivateStream", "streamID", activeId)
+			slog.Info("failed to remove stream metric on deactivation", "key", cs.Key, "func", "deactivateStream", "streamID", streamID)
 		}
 
-		if err := app.SetStreamLive(ctx, cs.Key, activeId, false); err != nil {
+		if err := app.SetStreamLive(ctx, cs.Key, streamID, false); err != nil {
 			slog.Error("failed to set stream not live", "key", cs.Key, "err", err)
 			return false
 		}
 
-		// msg = fmt.Sprintf("![]status\n%s\n%s\n%v", currentStream.ActiveID, currentStream.ActiveTitle, false)
+		// msg = fmt.Sprintf("![]status\n%s\n%s\n%v", currentStream.StreamID, currentStream.StreamTitle, false)
 		data := EventStatusData{
-			ActiveID:    currentStream.ActiveID,
-			ActiveTitle: currentStream.ActiveTitle,
+			StreamID:    currentStream.StreamID,
+			StreamTitle: currentStream.StreamTitle,
 			IsLive:      false,
 		}
 		msg = WebSocketMessage{
 			Event: EventStatus,
 			Data:  data,
 		}
-		slog.Debug("deactivating stream", "key", cs.Key, "func", "deactivateStream", "activeID", activeId)
+		slog.Debug("deactivating stream", "key", cs.Key, "func", "deactivateStream", "activeID", streamID)
 	}
 
 	if msg.Event != "" {
@@ -430,8 +437,8 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 	// Update Stream Info
 	stream := &Stream{
 		ChannelID:   cs.Key,
-		ActiveID:    data.ActiveID,
-		ActiveTitle: data.ActiveTitle,
+		StreamID:    data.StreamID,
+		StreamTitle: data.StreamTitle,
 		StartTime:   data.StartTime,
 		IsLive:      data.IsLive,
 		MediaType:   data.MediaType,
@@ -444,7 +451,7 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check database for all available media files
-	availableFiles, err := app.GetLastAvailableMediaFiles(r.Context(), cs.Key, data.ActiveID, -1)
+	availableFiles, err := app.GetLastAvailableMediaFiles(r.Context(), cs.Key, data.StreamID, -1)
 	if err != nil {
 		slog.Error("failed to get available media files", "key", cs.Key, "err", err)
 	}
@@ -459,14 +466,14 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := app.ReplaceTranscript(r.Context(), cs.Key, data.ActiveID, data.Transcript); err != nil {
+	if err := app.ReplaceTranscript(r.Context(), cs.Key, data.StreamID, data.Transcript); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
 		slog.Error("failed to replace transcript", "err", err)
 		return
 	}
 
-	app.broadcastNewLine(r.Context(), cs, data.ActiveID, uploadTime, nil)
+	app.broadcastNewLine(r.Context(), cs, data.StreamID, uploadTime, nil)
 
 	if uploadTime > 5*1000 {
 		slog.Warn("slow upload time", "key", cs.Key, "func", "syncHandler", "uploadTimeMs", uploadTime, "processingTimeMs", time.Since(processStartTime).Milliseconds())
@@ -1084,12 +1091,6 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Helper to capture timings
 	timings := make(map[string]float64)
-
-	stream, err := app.GetStream(r.Context(), cs.Key)
-	mediaType := "none"
-	if err == nil && stream != nil {
-		mediaType = stream.MediaType
-	}
 	processStartTime := time.Now()
 
 	// Parse JSON body
@@ -1108,6 +1109,12 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	timings["decode_json"] = time.Since(decodeStart).Seconds()
 	MediaProcessingDuration.WithLabelValues("decode_json", cs.Key).Observe(timings["decode_json"])
+
+	stream, err := app.GetStreamByID(r.Context(), cs.Key, req.StreamID)
+	mediaType := "none"
+	if err == nil && stream != nil {
+		mediaType = stream.MediaType
+	}
 
 	start := req.Start
 	end := req.End
@@ -1514,6 +1521,23 @@ func writeError(w http.ResponseWriter, code int, message string) {
 	writeJSON(w, map[string]string{"error": message})
 }
 
+// StartDatabaseCleanupLoop starts a background task that periodically removes
+// transcript lines for streams that no longer exist in the database.
+func (app *App) StartDatabaseCleanupLoop() {
+	ticker := time.NewTicker(12 * time.Hour)
+	go func() {
+		for range ticker.C {
+			slog.Debug("starting database cleanup loop", "func", "StartDatabaseCleanupLoop")
+			ctx := context.Background()
+
+			// Run the cleanup
+			if err := app.CleanupOrphanedTranscripts(ctx); err != nil {
+				slog.Error("failed to cleanup orphaned transcripts", "func", "StartDatabaseCleanupLoop", "err", err)
+			}
+		}
+	}()
+}
+
 // StartReconciliationLoop starts a background task that periodically checks R2 storage
 // for missing streams and removes them from the database.
 func (app *App) StartReconciliationLoop() {
@@ -1521,7 +1545,7 @@ func (app *App) StartReconciliationLoop() {
 		return
 	}
 
-	ticker := time.NewTicker(8 * time.Hour)
+	ticker := time.NewTicker(4 * time.Hour)
 	go func() {
 		for range ticker.C {
 			slog.Debug("starting reconciliation loop", "func", "StartReconciliationLoop")
@@ -1535,29 +1559,29 @@ func (app *App) StartReconciliationLoop() {
 					continue
 				}
 
-				// Skip the first one (active stream)
 				if len(streams) <= 1 {
 					continue
 				}
 
 				updatesMade := false
+				// Skip the first one (active stream)
 				for i := 1; i < len(streams); i++ {
 					stream := streams[i]
-					storageKey := fmt.Sprintf("%s/%s", cs.Key, stream.ActiveID)
+					storageKey := fmt.Sprintf("%s/%s", cs.Key, stream.StreamID)
 
 					exists, err := app.Storage.StreamExists(ctx, storageKey)
 					if err != nil {
-						slog.Error("reconciliation: check failed", "key", cs.Key, "streamID", stream.ActiveID, "err", err)
+						slog.Error("reconciliation: check failed", "key", cs.Key, "streamID", stream.StreamID, "err", err)
 						continue
 					}
 
 					if !exists {
-						slog.Info("reconciliation: stream missing in R2, deleting from db", "key", cs.Key, "streamID", stream.ActiveID)
-						if err := app.DeleteStream(ctx, cs.Key, stream.ActiveID); err != nil {
-							slog.Error("reconciliation: failed to delete stream", "key", cs.Key, "streamID", stream.ActiveID, "err", err)
+						slog.Info("reconciliation: stream missing in R2, deleting from db", "key", cs.Key, "streamID", stream.StreamID)
+						if err := app.DeleteStream(ctx, cs.Key, stream.StreamID); err != nil {
+							slog.Error("reconciliation: failed to delete stream", "key", cs.Key, "streamID", stream.StreamID, "err", err)
 						}
-						if err := app.DeleteTranscript(ctx, cs.Key, stream.ActiveID); err != nil {
-							slog.Error("reconciliation: failed to delete transcript", "key", cs.Key, "streamID", stream.ActiveID, "err", err)
+						if err := app.DeleteTranscript(ctx, cs.Key, stream.StreamID); err != nil {
+							slog.Error("reconciliation: failed to delete transcript", "key", cs.Key, "streamID", stream.StreamID, "err", err)
 						}
 						updatesMade = true
 					}
@@ -1565,15 +1589,13 @@ func (app *App) StartReconciliationLoop() {
 
 				if updatesMade {
 					// Broadcast new list of streams
-
-					// To be safe and consistent with activateStream logic:
-					currentStream, _ := app.GetStream(ctx, cs.Key)
-					activeID := ""
+					currentStream, _ := app.GetRecentStream(ctx, cs.Key)
+					streamID := ""
 					if currentStream != nil {
-						activeID = currentStream.ActiveID
+						streamID = currentStream.StreamID
 					}
 
-					finalPastStreams, err := app.GetPastStreams(ctx, cs.Key, activeID)
+					finalPastStreams, err := app.GetPastStreams(ctx, cs.Key, streamID)
 					if err == nil {
 						msg := WebSocketMessage{
 							Event: EventPastStreams,

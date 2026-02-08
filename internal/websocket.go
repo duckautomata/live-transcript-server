@@ -169,15 +169,15 @@ func (c *Client) trySend(msg WebSocketMessage) bool {
 
 // Send full transcript to client
 func (app *App) syncClient(ctx context.Context, cs *ChannelState, client *Client) {
-	stream, err := app.GetStream(ctx, cs.Key)
+	stream, err := app.GetRecentStream(ctx, cs.Key)
 	if err != nil {
 		slog.Error("failed to get stream for sync", "key", cs.Key, "err", err)
 		return
 	}
 	if stream == nil {
 		stream = &Stream{
-			ActiveID:    "",
-			ActiveTitle: "",
+			StreamID:    "",
+			StreamTitle: "",
 			StartTime:   "0",
 			MediaType:   "none",
 			IsLive:      false,
@@ -185,8 +185,8 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, client *Client
 	}
 
 	syncData := &EventSyncData{
-		ActiveID:     stream.ActiveID,
-		ActiveTitle:  stream.ActiveTitle,
+		StreamID:     stream.StreamID,
+		StreamTitle:  stream.StreamTitle,
 		StartTime:    stream.StartTime,
 		MediaType:    stream.MediaType,
 		MediaBaseURL: app.Storage.GetURL(""),
@@ -194,7 +194,7 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, client *Client
 		Transcript:   make([]Line, 0),
 	}
 
-	transcript, err := app.GetTranscript(ctx, cs.Key, stream.ActiveID)
+	transcript, err := app.GetTranscript(ctx, cs.Key, stream.StreamID)
 	if err != nil {
 		slog.Error("failed to get transcript for sync", "key", cs.Key, "err", err)
 		return
@@ -231,7 +231,7 @@ func (app *App) syncClient(ctx context.Context, cs *ChannelState, client *Client
 	}
 
 	// Send past streams
-	pastStreams, err := app.GetPastStreams(ctx, cs.Key, stream.ActiveID)
+	pastStreams, err := app.GetPastStreams(ctx, cs.Key, stream.StreamID)
 	if err == nil && len(pastStreams) > 0 {
 		pastStreamsMsg := WebSocketMessage{
 			Event: EventPastStreams,

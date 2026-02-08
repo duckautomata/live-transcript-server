@@ -33,18 +33,19 @@ type Line struct {
 
 // Stream represents the state of a stream for a channel in the database.
 type Stream struct {
-	ChannelID   string `json:"channelId"`
-	ActiveID    string `json:"activeId"`
-	ActiveTitle string `json:"activeTitle"`
-	StartTime   string `json:"startTime"`
-	IsLive      bool   `json:"isLive"`
-	MediaType   string `json:"mediaType"`
+	ChannelID     string `json:"channelId"`
+	StreamID      string `json:"streamId"`
+	StreamTitle   string `json:"streamTitle"`
+	StartTime     string `json:"startTime"`
+	IsLive        bool   `json:"isLive"`
+	MediaType     string `json:"mediaType"`
+	ActivatedTime int64  `json:"activatedTime"`
 }
 
 // WorkerData represents the full state of the worker. Used to sync the server with the worker.
 type WorkerData struct {
-	ActiveID    string `json:"activeId"`
-	ActiveTitle string `json:"activeTitle"`
+	StreamID    string `json:"streamId"`
+	StreamTitle string `json:"streamTitle"`
 	StartTime   string `json:"startTime"`
 	IsLive      bool   `json:"isLive"`
 	MediaType   string `json:"mediaType"`
@@ -102,8 +103,8 @@ type WebSocketMessage struct {
 
 // EventSyncData represents the data sent to sync the client with the server.
 type EventSyncData struct {
-	ActiveID     string `json:"activeId"`
-	ActiveTitle  string `json:"activeTitle"`
+	StreamID     string `json:"streamId"`
+	StreamTitle  string `json:"streamTitle"`
 	StartTime    string `json:"startTime"`
 	IsLive       bool   `json:"isLive"`
 	MediaType    string `json:"mediaType"`
@@ -122,8 +123,8 @@ type EventNewLineData struct {
 
 // EventNewStreamData represents the data sent to notify the client of a new stream.
 type EventNewStreamData struct {
-	ActiveID     string `json:"activeId"`
-	ActiveTitle  string `json:"activeTitle"`
+	StreamID     string `json:"streamId"`
+	StreamTitle  string `json:"streamTitle"`
 	StartTime    string `json:"startTime"`
 	MediaType    string `json:"mediaType"`
 	MediaBaseURL string `json:"mediaBaseUrl"`
@@ -132,12 +133,11 @@ type EventNewStreamData struct {
 
 // EventStatusData represents the data sent to notify the client of a change in the stream status.
 type EventStatusData struct {
-	ActiveID    string `json:"activeId"`
-	ActiveTitle string `json:"activeTitle"`
+	StreamID    string `json:"streamId"`
+	StreamTitle string `json:"streamTitle"`
 	IsLive      bool   `json:"isLive"`
 }
 
-// EventNewMediaData represents the data sent to notify the client of available media.
 // EventNewMediaData represents the data sent to notify the client of available media.
 type EventNewMediaData struct {
 	StreamID string         `json:"streamId"`
@@ -162,12 +162,9 @@ type ChannelState struct {
 	ClientsLock       sync.Mutex
 	Clients           []*Client
 	ClientConnections int
-	// ActiveMediaFolder is the folder where the current active stream media is stored.
-	// This changes when a new stream is activated.
 	ActiveMediaFolder string
-	// BaseMediaFolder is the root folder for this channel where all stream folders are created.
-	BaseMediaFolder string
-	NumPastStreams  int
+	BaseMediaFolder   string
+	NumPastStreams    int
 }
 
 // App holds the application-wide dependencies and configuration.

@@ -20,7 +20,7 @@ func BenchmarkSync(b *testing.B) {
 
 	// 1. Generate heavy data
 	streamID := "bench-stream"
-	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: streamID, IsLive: true})
+	app.UpsertStream(ctx, &Stream{ChannelID: key, StreamID: streamID, IsLive: true})
 
 	lines := make([]Line, 10000)
 	for i := range 10000 {

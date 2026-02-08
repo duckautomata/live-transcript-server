@@ -1,11 +1,18 @@
 # latest
-Using version [2.5](#25-2026-02-05)
+Using version [2.6](#26-2026-02-08)
 
 # Major version 2
-Using version [2.5](#25-2026-02-05)
+Using version [2.6](#26-2026-02-08)
 
 # Major version 1
 Using version [1.6](#16-2025-12-18)
+
+## 2.6 (2026-02-08)
+**Changes**
+- Fixed bug where, if the new activated stream has a start time before the previous stream start time, the new stream would be treated as a past stream.
+- Added activated time to database
+- Renamed active to stream for clarity
+- Added cleanup loop to remove orphaned transcripts and streams from database
 
 ## 2.5 (2026-02-05)
 **Changes**

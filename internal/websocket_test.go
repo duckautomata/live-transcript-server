@@ -174,7 +174,6 @@ func TestWebsocketDoubleClose(t *testing.T) {
 			break
 		}
 		cs.ClientsLock.Unlock()
-		// Sleep a tiny bit?
 	}
 	if !registered {
 		t.Fatal("client did not register in time")
@@ -333,8 +332,8 @@ func TestWebsocketPartialSync(t *testing.T) {
 	// Create stream
 	stream := &Stream{
 		ChannelID:   key,
-		ActiveID:    "stream-partial",
-		ActiveTitle: "Partial Sync Test",
+		StreamID:    "stream-partial",
+		StreamTitle: "Partial Sync Test",
 		StartTime:   fmt.Sprintf("%d", time.Now().Unix()),
 		IsLive:      true,
 		MediaType:   "audio",

@@ -83,6 +83,7 @@ func main() {
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	// Start background tasks
+	app.StartDatabaseCleanupLoop()
 	app.StartReconciliationLoop()
 
 	corsHandler := internal.CorsMiddleware(mux)

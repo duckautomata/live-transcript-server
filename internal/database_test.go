@@ -71,7 +71,7 @@ func TestDB_StreamOperations(t *testing.T) {
 	channelID := "test-stream-ops"
 
 	// 1. Test GetStream (Empty)
-	s, err := app.GetStream(ctx, channelID)
+	s, err := app.GetRecentStream(ctx, channelID)
 	if err != nil {
 		t.Fatalf("GetStream failed: %v", err)
 	}
@@ -82,8 +82,8 @@ func TestDB_StreamOperations(t *testing.T) {
 	// 2. Test UpsertStream
 	newStream := &Stream{
 		ChannelID:   channelID,
-		ActiveID:    "vid1",
-		ActiveTitle: "Video 1",
+		StreamID:    "vid1",
+		StreamTitle: "Video 1",
 		StartTime:   "1000",
 		IsLive:      true,
 		MediaType:   "audio",
@@ -93,8 +93,8 @@ func TestDB_StreamOperations(t *testing.T) {
 	}
 	newStream2 := &Stream{
 		ChannelID:   "different-id",
-		ActiveID:    "vid2",
-		ActiveTitle: "Video 2",
+		StreamID:    "vid2",
+		StreamTitle: "Video 2",
 		StartTime:   "2000",
 		IsLive:      true,
 		MediaType:   "video",
@@ -103,30 +103,30 @@ func TestDB_StreamOperations(t *testing.T) {
 		t.Fatalf("UpsertStream (different ID) failed: %v", err)
 	}
 
-	s, err = app.GetStream(ctx, channelID)
+	s, err = app.GetRecentStream(ctx, channelID)
 	if err != nil {
 		t.Fatalf("GetStream failed: %v", err)
 	}
 	if s == nil {
 		t.Fatal("expected stream to be found")
 	}
-	if s.ActiveTitle != "Video 1" {
-		t.Errorf("expected title 'Video 1', got '%s'", s.ActiveTitle)
+	if s.StreamTitle != "Video 1" {
+		t.Errorf("expected title 'Video 1', got '%s'", s.StreamTitle)
 	}
 
 	// 3. Test UpsertStream Update
-	newStream.ActiveTitle = "Video 1 Updated"
+	newStream.StreamTitle = "Video 1 Updated"
 	newStream.StartTime = "1001"
 	if err := app.UpsertStream(ctx, newStream); err != nil {
 		t.Fatalf("UpsertStream (update) failed: %v", err)
 	}
 
-	s, err = app.GetStream(ctx, channelID)
+	s, err = app.GetRecentStream(ctx, channelID)
 	if err != nil {
 		t.Fatalf("GetStream (update) failed: %v", err)
 	}
-	if s.ActiveTitle != "Video 1 Updated" {
-		t.Errorf("expected updated title, got '%s'", s.ActiveTitle)
+	if s.StreamTitle != "Video 1 Updated" {
+		t.Errorf("expected updated title, got '%s'", s.StreamTitle)
 	}
 	if s.StartTime != "1001" {
 		t.Errorf("expected updated start time, got '%s'", s.StartTime)
@@ -139,7 +139,7 @@ func TestDB_StreamOperations(t *testing.T) {
 		t.Fatalf("SetStreamLive failed: %v", err)
 	}
 
-	s, err = app.GetStream(ctx, channelID)
+	s, err = app.GetRecentStream(ctx, channelID)
 	if err != nil {
 		t.Fatalf("GetStream (live update) failed: %v", err)
 	}
@@ -325,8 +325,8 @@ func TestDB_GetPastStreams(t *testing.T) {
 	// 2. Insert Active Stream (Live)
 	activeStream := &Stream{
 		ChannelID:   channelID,
-		ActiveID:    "active1",
-		ActiveTitle: "Active 1",
+		StreamID:    "active1",
+		StreamTitle: "Active 1",
 		StartTime:   "1000",
 		IsLive:      true,
 		MediaType:   "audio",
@@ -346,8 +346,8 @@ func TestDB_GetPastStreams(t *testing.T) {
 	// 3. Insert Past Stream (Not Live)
 	pastStream := &Stream{
 		ChannelID:   channelID,
-		ActiveID:    "past1",
-		ActiveTitle: "Past 1",
+		StreamID:    "past1",
+		StreamTitle: "Past 1",
 		StartTime:   "900",
 		IsLive:      false,
 		MediaType:   "audio",
@@ -358,8 +358,8 @@ func TestDB_GetPastStreams(t *testing.T) {
 	// Also insert another past stream
 	pastStream2 := &Stream{
 		ChannelID:   channelID,
-		ActiveID:    "past2",
-		ActiveTitle: "Past 2",
+		StreamID:    "past2",
+		StreamTitle: "Past 2",
 		StartTime:   "800", // Older
 		IsLive:      false,
 		MediaType:   "audio",
@@ -377,11 +377,11 @@ func TestDB_GetPastStreams(t *testing.T) {
 		t.Errorf("expected 2 past streams, got %d", len(streams))
 	} else {
 		// Expect order: newest first (past1, then past2)
-		if streams[0].ActiveID != "past1" {
-			t.Errorf("expected first stream to be past1, got %s", streams[0].ActiveID)
+		if streams[0].StreamID != "past1" {
+			t.Errorf("expected first stream to be past1, got %s", streams[0].StreamID)
 		}
-		if streams[1].ActiveID != "past2" {
-			t.Errorf("expected second stream to be past2, got %s", streams[1].ActiveID)
+		if streams[1].StreamID != "past2" {
+			t.Errorf("expected second stream to be past2, got %s", streams[1].StreamID)
 		}
 	}
 
@@ -396,8 +396,8 @@ func TestDB_GetPastStreams(t *testing.T) {
 	if len(streams) != 1 {
 		t.Errorf("expected 1 past stream (excluding past1), got %d", len(streams))
 	}
-	if streams[0].ActiveID != "past2" {
-		t.Errorf("expected stream to be past2, got %s", streams[0].ActiveID)
+	if streams[0].StreamID != "past2" {
+		t.Errorf("expected stream to be past2, got %s", streams[0].StreamID)
 	}
 }
 
@@ -411,12 +411,13 @@ func TestDB_DeleteStream(t *testing.T) {
 
 	// 1. Insert Stream
 	stream := &Stream{
-		ChannelID:   channelID,
-		ActiveID:    activeID,
-		ActiveTitle: "To Be Deleted",
-		StartTime:   "1000",
-		IsLive:      true,
-		MediaType:   "audio",
+		ChannelID:     channelID,
+		StreamID:      activeID,
+		StreamTitle:   "To Be Deleted",
+		StartTime:     "1000",
+		IsLive:        true,
+		MediaType:     "audio",
+		ActivatedTime: 2000,
 	}
 	if err := app.UpsertStream(ctx, stream); err != nil {
 		t.Fatalf("UpsertStream failed: %v", err)
@@ -424,8 +425,8 @@ func TestDB_DeleteStream(t *testing.T) {
 
 	stream2 := &Stream{
 		ChannelID:   channelID,
-		ActiveID:    "another-stream",
-		ActiveTitle: "Should Not Be Deleted",
+		StreamID:    "another-stream",
+		StreamTitle: "Should Not Be Deleted",
 		StartTime:   "1000",
 		IsLive:      false,
 		MediaType:   "audio",
@@ -436,11 +437,11 @@ func TestDB_DeleteStream(t *testing.T) {
 
 	// 2. Verify existence
 	// Note: GetStream retrieves the latest stream.
-	s, err := app.GetStream(ctx, channelID)
+	s, err := app.GetRecentStream(ctx, channelID)
 	if err != nil {
 		t.Fatalf("GetStream failed: %v", err)
 	}
-	if s == nil || s.ActiveID != activeID {
+	if s == nil || s.StreamID != activeID {
 		t.Fatal("expected stream to be active")
 	}
 
@@ -450,15 +451,15 @@ func TestDB_DeleteStream(t *testing.T) {
 	}
 
 	// 4. Verify deletion
-	s, err = app.GetStream(ctx, channelID)
+	s, err = app.GetRecentStream(ctx, channelID)
 	if err != nil {
 		t.Fatalf("GetStream after delete failed: %v", err)
 	}
 	if s == nil {
 		t.Errorf("expected to retrieve another stream, got nil")
 	}
-	if s.ActiveID != "another-stream" {
-		t.Errorf("expected another stream to be active, got %s", s.ActiveID)
+	if s.StreamID != "another-stream" {
+		t.Errorf("expected another stream to be active, got %s", s.StreamID)
 	}
 
 	// 5. Delete another stream
@@ -467,7 +468,7 @@ func TestDB_DeleteStream(t *testing.T) {
 	}
 
 	// 6. Verify deletion
-	s, err = app.GetStream(ctx, channelID)
+	s, err = app.GetRecentStream(ctx, channelID)
 	if err != nil {
 		t.Fatalf("GetStream after delete failed: %v", err)
 	}
@@ -492,7 +493,7 @@ func TestDB_StreamExists(t *testing.T) {
 	}
 
 	// 2. Insert stream
-	s1 := &Stream{ChannelID: "ch1", ActiveID: "s1", ActiveTitle: "Title 1", StartTime: "1000", IsLive: true, MediaType: "audio"}
+	s1 := &Stream{ChannelID: "ch1", StreamID: "s1", StreamTitle: "Title 1", StartTime: "1000", IsLive: true, MediaType: "audio"}
 	if err := app.UpsertStream(ctx, s1); err != nil {
 		t.Fatalf("UpsertStream failed: %v", err)
 	}
@@ -532,7 +533,7 @@ func TestDB_GetStreamByID(t *testing.T) {
 	}
 
 	// 2. Insert stream
-	s1 := &Stream{ChannelID: "ch1", ActiveID: "s1", ActiveTitle: "Title 1", StartTime: "1000", IsLive: true, MediaType: "audio"}
+	s1 := &Stream{ChannelID: "ch1", StreamID: "s1", StreamTitle: "Title 1", StartTime: "1000", IsLive: true, MediaType: "audio"}
 	if err := app.UpsertStream(ctx, s1); err != nil {
 		t.Fatalf("UpsertStream failed: %v", err)
 	}
@@ -545,8 +546,8 @@ func TestDB_GetStreamByID(t *testing.T) {
 	if s == nil {
 		t.Fatal("Expected stream to exist")
 	}
-	if s.ActiveTitle != "Title 1" {
-		t.Errorf("Expected title 'Title 1', got %s", s.ActiveTitle)
+	if s.StreamTitle != "Title 1" {
+		t.Errorf("Expected title 'Title 1', got %s", s.StreamTitle)
 	}
 
 	// 4. Check diff channel
@@ -599,5 +600,66 @@ func TestDB_GetFileIDsInRange_Ordering(t *testing.T) {
 	}
 	if fileIDs[2] != "file1" {
 		t.Errorf("Index 2: expected file1, got %s", fileIDs[2])
+	}
+}
+
+func TestDB_CleanupOrphanedTranscripts(t *testing.T) {
+	app := setupTestDB(t)
+	defer app.DB.Close()
+
+	ctx := context.Background()
+	channelID := "test-cleanup"
+
+	// 1. Create a valid stream
+	stream := &Stream{
+		ChannelID:   channelID,
+		StreamID:    "valid-stream",
+		StreamTitle: "Valid Stream",
+		IsLive:      true,
+	}
+	if err := app.UpsertStream(ctx, stream); err != nil {
+		t.Fatalf("UpsertStream failed: %v", err)
+	}
+
+	// 2. Add transcript lines for valid stream
+	validLines := []Line{
+		{ID: 1, Timestamp: 100, Segments: json.RawMessage(`[]`)},
+		{ID: 2, Timestamp: 200, Segments: json.RawMessage(`[]`)},
+	}
+	if err := app.InsertTranscriptLine(ctx, channelID, "valid-stream", validLines[0]); err != nil {
+		t.Fatalf("InsertTranscriptLine failed: %v", err)
+	}
+	if err := app.InsertTranscriptLine(ctx, channelID, "valid-stream", validLines[1]); err != nil {
+		t.Fatalf("InsertTranscriptLine failed: %v", err)
+	}
+
+	// 3. Add transcript lines for an orphaned stream (no stream in DB)
+	if err := app.InsertTranscriptLine(ctx, channelID, "orphaned-stream", Line{ID: 1, Timestamp: 100, Segments: json.RawMessage(`[]`)}); err != nil {
+		t.Fatalf("InsertTranscriptLine (orphan) failed: %v", err)
+	}
+
+	// Verify before cleanup
+	lines, err := app.GetTranscript(ctx, channelID, "valid-stream")
+	if err != nil || len(lines) != 2 {
+		t.Fatalf("Expected 2 valid lines before cleanup, got %d", len(lines))
+	}
+	lines, err = app.GetTranscript(ctx, channelID, "orphaned-stream")
+	if err != nil || len(lines) != 1 {
+		t.Fatalf("Expected 1 orphaned line before cleanup, got %d", len(lines))
+	}
+
+	// 4. Run Cleanup
+	if err := app.CleanupOrphanedTranscripts(ctx); err != nil {
+		t.Fatalf("CleanupOrphanedTranscripts failed: %v", err)
+	}
+
+	// 5. Verify after cleanup
+	lines, err = app.GetTranscript(ctx, channelID, "valid-stream")
+	if err != nil || len(lines) != 2 {
+		t.Fatalf("Expected 2 valid lines after cleanup, got %d", len(lines))
+	}
+	lines, err = app.GetTranscript(ctx, channelID, "orphaned-stream")
+	if err != nil || len(lines) != 0 {
+		t.Fatalf("Expected 0 orphaned lines after cleanup, got %d", len(lines))
 	}
 }

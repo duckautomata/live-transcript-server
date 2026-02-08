@@ -266,7 +266,7 @@ func (app *App) MergeRawAudio(ctx context.Context, channelKey, streamID string, 
 }
 
 // rotateFolders handles the rotation of media folders, keeping a specified number of past streams.
-func rotateFolders(baseMediaFolder string, numPastStreams int, activeId string, key string) {
+func rotateFolders(baseMediaFolder string, numPastStreams int, streamID string, key string) {
 	// 1. List all folders in BaseMediaFolder
 	files, err := os.ReadDir(baseMediaFolder)
 	if err == nil {
@@ -301,7 +301,7 @@ func rotateFolders(baseMediaFolder string, numPastStreams int, activeId string, 
 		if len(folders) > keepCount {
 			for i := keepCount; i < len(folders); i++ {
 				// Don't delete if it's somehow the current active one (safety check)
-				if folders[i].Name == activeId {
+				if folders[i].Name == streamID {
 					continue
 				}
 				pathToDelete := filepath.Join(baseMediaFolder, folders[i].Name)

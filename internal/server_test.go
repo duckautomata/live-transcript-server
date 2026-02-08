@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,18 +38,18 @@ func TestServer_ActivateDeactivate(t *testing.T) {
 	}
 
 	// Verify DB state
-	stream, err := app.GetStream(ctx, key)
+	stream, err := app.GetRecentStream(ctx, key)
 	if err != nil {
 		t.Fatalf("failed to get stream: %v", err)
 	}
 	if stream == nil {
 		t.Fatal("stream not found in db")
 	}
-	if stream.ActiveID != "stream1" {
-		t.Errorf("expected activeId stream1, got %s", stream.ActiveID)
+	if stream.StreamID != "stream1" {
+		t.Errorf("expected streamID stream1, got %s", stream.StreamID)
 	}
-	if stream.ActiveTitle != "TestStream" {
-		t.Errorf("expected activeTitle TestStream, got %s", stream.ActiveTitle)
+	if stream.StreamTitle != "TestStream" {
+		t.Errorf("expected streamTitle TestStream, got %s", stream.StreamTitle)
 	}
 	if !stream.IsLive {
 		t.Error("expected stream to be live")
@@ -86,18 +87,18 @@ func TestServer_ActivateDeactivate(t *testing.T) {
 		t.Errorf("expected status 208, got %v body: %s", rr.Code, rr.Body.String())
 	}
 	// Verify DB state
-	stream, err = app.GetStream(ctx, key)
+	stream, err = app.GetRecentStream(ctx, key)
 	if err != nil {
 		t.Fatalf("failed to get stream: %v", err)
 	}
 	if stream == nil {
 		t.Fatal("stream not found in db")
 	}
-	if stream.ActiveID != "stream1" {
-		t.Errorf("expected activeId stream1, got %s", stream.ActiveID)
+	if stream.StreamID != "stream1" {
+		t.Errorf("expected streamID stream1, got %s", stream.StreamID)
 	}
-	if stream.ActiveTitle != "TestStream" {
-		t.Errorf("expected activeTitle TestStream, got %s", stream.ActiveTitle)
+	if stream.StreamTitle != "TestStream" {
+		t.Errorf("expected streamTitle TestStream, got %s", stream.StreamTitle)
 	}
 	if !stream.IsLive {
 		t.Error("expected stream to be live")
@@ -122,7 +123,7 @@ func TestServer_ActivateDeactivate(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Errorf("expected status OK, got %v", rr.Code)
 	}
-	stream, err = app.GetStream(ctx, key)
+	stream, err = app.GetRecentStream(ctx, key)
 	if err != nil {
 		t.Fatalf("failed to get stream: %v", err)
 	}
@@ -166,18 +167,18 @@ func TestServer_ActivateDeactivate(t *testing.T) {
 		t.Errorf("expected status OK, got %v", rr.Code)
 	}
 	// Verify DB state
-	stream, err = app.GetStream(ctx, key)
+	stream, err = app.GetRecentStream(ctx, key)
 	if err != nil {
 		t.Fatalf("failed to get stream: %v", err)
 	}
 	if stream == nil {
 		t.Fatal("stream not found in db")
 	}
-	if stream.ActiveID != "stream1" {
-		t.Errorf("expected activeId stream1, got %s", stream.ActiveID)
+	if stream.StreamID != "stream1" {
+		t.Errorf("expected streamID stream1, got %s", stream.StreamID)
 	}
-	if stream.ActiveTitle != "TestStream" {
-		t.Errorf("expected activeTitle TestStream, got %s", stream.ActiveTitle)
+	if stream.StreamTitle != "TestStream" {
+		t.Errorf("expected streamTitle TestStream, got %s", stream.StreamTitle)
 	}
 	if !stream.IsLive {
 		t.Error("expected stream to be live")
@@ -204,7 +205,7 @@ func TestServer_ActivateDeactivate(t *testing.T) {
 	if rr.Code != http.StatusAlreadyReported {
 		t.Errorf("expected status 208, got %v", rr.Code)
 	}
-	stream, err = app.GetStream(ctx, key)
+	stream, err = app.GetRecentStream(ctx, key)
 	if err != nil {
 		t.Fatalf("failed to get stream: %v", err)
 	}
@@ -231,18 +232,18 @@ func TestServer_ActivateDeactivate(t *testing.T) {
 		t.Errorf("expected status OK, got %v", rr.Code)
 	}
 	// Verify DB state
-	stream, err = app.GetStream(ctx, key)
+	stream, err = app.GetRecentStream(ctx, key)
 	if err != nil {
 		t.Fatalf("failed to get stream: %v", err)
 	}
 	if stream == nil {
 		t.Fatal("stream not found in db")
 	}
-	if stream.ActiveID != "stream2" {
-		t.Errorf("expected activeId stream2, got %s", stream.ActiveID)
+	if stream.StreamID != "stream2" {
+		t.Errorf("expected streamID stream2, got %s", stream.StreamID)
 	}
-	if stream.ActiveTitle != "TestStream2" {
-		t.Errorf("expected activeTitle TestStream2, got %s", stream.ActiveTitle)
+	if stream.StreamTitle != "TestStream2" {
+		t.Errorf("expected streamTitle TestStream2, got %s", stream.StreamTitle)
 	}
 	if !stream.IsLive {
 		t.Error("expected stream to be live")
@@ -328,7 +329,7 @@ func TestServer_MediaUpload(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert Stream to satisfy mediaHandler check
-	stream := &Stream{ChannelID: key, ActiveID: "stream_media", ActiveTitle: "Test Stream", StartTime: "12345", IsLive: true, MediaType: "audio"}
+	stream := &Stream{ChannelID: key, StreamID: "stream_media", StreamTitle: "Test Stream", StartTime: "12345", IsLive: true, MediaType: "audio"}
 	if err := app.UpsertStream(ctx, stream); err != nil {
 		t.Fatalf("failed to insert stream: %v", err)
 	}
@@ -404,13 +405,13 @@ func TestServer_Sync(t *testing.T) {
 	apiKey := app.ApiKey
 
 	// Simulate existing data via DB direct insert to simulate state
-	app.UpsertStream(context.TODO(), &Stream{ChannelID: key, ActiveID: "stream3", ActiveTitle: "Test Sync", StartTime: fmt.Sprintf("%d", time.Now().Unix()), IsLive: true, MediaType: "none"})
+	app.UpsertStream(context.TODO(), &Stream{ChannelID: key, StreamID: "stream3", StreamTitle: "Test Sync", StartTime: fmt.Sprintf("%d", time.Now().Unix()), IsLive: true, MediaType: "none"})
 	app.InsertTranscriptLine(context.TODO(), key, "stream3", Line{ID: 0, Timestamp: 100})
 
 	// Sync Data
 	syncData := EventSyncData{
-		ActiveID:    "stream3",
-		ActiveTitle: "Test Sync Updated",
+		StreamID:    "stream3",
+		StreamTitle: "Test Sync Updated",
 		StartTime:   fmt.Sprintf("%d", time.Now().Unix()),
 		IsLive:      true,
 		MediaType:   "none",
@@ -431,12 +432,12 @@ func TestServer_Sync(t *testing.T) {
 	}
 
 	// Verify DB state
-	stream, err := app.GetStream(context.TODO(), key)
+	stream, err := app.GetRecentStream(context.TODO(), key)
 	if err != nil {
 		t.Fatalf("failed to get stream: %v", err)
 	}
-	if stream.ActiveTitle != "Test Sync Updated" {
-		t.Errorf("expected title updated, got %s", stream.ActiveTitle)
+	if stream.StreamTitle != "Test Sync Updated" {
+		t.Errorf("expected title updated, got %s", stream.StreamTitle)
 	}
 
 	lines, err := app.GetTranscript(context.TODO(), key, "stream3")
@@ -469,8 +470,8 @@ func TestServer_Sync(t *testing.T) {
 
 	// 2. Sync again with MediaAvailable set to false for line 1
 	syncData2 := EventSyncData{
-		ActiveID:    "stream3",
-		ActiveTitle: "Test Sync Media",
+		StreamID:    "stream3",
+		StreamTitle: "Test Sync Media",
 		StartTime:   fmt.Sprintf("%d", time.Now().Unix()),
 		IsLive:      true,
 		MediaType:   "none",
@@ -518,8 +519,8 @@ func TestServer_Sync(t *testing.T) {
 
 	// Sync with line 2 having MediaAvailable false
 	syncData3 := EventSyncData{
-		ActiveID:    "stream3",
-		ActiveTitle: "Test Sync Media Raw",
+		StreamID:    "stream3",
+		StreamTitle: "Test Sync Media Raw",
 		StartTime:   fmt.Sprintf("%d", time.Now().Unix()),
 		IsLive:      true,
 		MediaType:   "none",
@@ -579,15 +580,15 @@ func TestServer_Persistence(t *testing.T) {
 	defer db2.Close()
 	app2 := &App{DB: db2}
 
-	stream, err := app2.GetStream(context.TODO(), key)
+	stream, err := app2.GetRecentStream(context.TODO(), key)
 	if err != nil {
 		t.Fatalf("failed to get stream: %v", err)
 	}
 	if stream == nil {
 		t.Fatal("stream not found after restart")
 	}
-	if stream.ActiveID != "persist" {
-		t.Errorf("expected persist, got %s", stream.ActiveID)
+	if stream.StreamID != "persist" {
+		t.Errorf("expected persist, got %s", stream.StreamID)
 	}
 }
 
@@ -599,13 +600,13 @@ func TestServer_GetTranscriptEndpoint(t *testing.T) {
 
 	// Seed data
 	stream1ID := "stream1"
-	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: stream1ID, IsLive: false})
+	app.UpsertStream(ctx, &Stream{ChannelID: key, StreamID: stream1ID, IsLive: false})
 	app.ReplaceTranscript(ctx, key, stream1ID, []Line{
 		{ID: 0, Segments: json.RawMessage(`[{"text": "Stream 1 Line 0"}]`)},
 	})
 
 	stream2ID := "stream2"
-	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: stream2ID, IsLive: true})
+	app.UpsertStream(ctx, &Stream{ChannelID: key, StreamID: stream2ID, IsLive: true})
 	app.ReplaceTranscript(ctx, key, stream2ID, []Line{
 		{ID: 0, Segments: json.RawMessage(`[{"text": "Stream 2 Line 0"}]`)},
 	})
@@ -670,7 +671,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 
 	// 1. Setup Data
 	// Activate stream
-	app.UpsertStream(ctx, &Stream{ChannelID: key, ActiveID: "s1", ActiveTitle: "Stream 1", StartTime: "12345", IsLive: true, MediaType: "video"})
+	app.UpsertStream(ctx, &Stream{ChannelID: key, StreamID: "s1", StreamTitle: "Stream 1", StartTime: "12345", IsLive: true, MediaType: "video"})
 
 	// Prepare pointers
 	// app.Storage is LocalStorage rooted at app.TempDir.
@@ -907,7 +908,7 @@ func TestServer_ActivateStream_Retention_UnderThreshold(t *testing.T) {
 	cs.NumPastStreams = 2
 
 	// Initialize with 1 Past Stream (p1)
-	p1 := &Stream{ChannelID: key, ActiveID: "p1", StartTime: "2000", IsLive: false}
+	p1 := &Stream{ChannelID: key, StreamID: "p1", StartTime: "2000", IsLive: false}
 	app.UpsertStream(ctx, p1)
 	app.InsertTranscriptLine(ctx, key, "p1", Line{ID: 0, Segments: json.RawMessage(`[{"text": "P1 Content"}]`)})
 	folder := filepath.Join(cs.BaseMediaFolder, "p1")
@@ -918,12 +919,12 @@ func TestServer_ActivateStream_Retention_UnderThreshold(t *testing.T) {
 	app.activateStream(ctx, cs, "s1", "Stream 1", "3000", "audio")
 
 	// Verify S1 is active
-	s, err := app.GetStream(ctx, key)
+	s, err := app.GetRecentStream(ctx, key)
 	if err != nil {
 		t.Fatalf("GetStream failed: %v", err)
 	}
-	if s.ActiveID != "s1" {
-		t.Errorf("expected active stream s1, got %s", s.ActiveID)
+	if s.StreamID != "s1" {
+		t.Errorf("expected active stream s1, got %s", s.StreamID)
 	}
 
 	// Verify P1 still exists (1 past stream <= 2)
@@ -931,7 +932,7 @@ func TestServer_ActivateStream_Retention_UnderThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPastStreams failed: %v", err)
 	}
-	if len(past) != 1 || past[0].ActiveID != "p1" {
+	if len(past) != 1 || past[0].StreamID != "p1" {
 		t.Errorf("expected 1 past stream (p1), got %v", past)
 	}
 	// Verify transcript for P1 exists
@@ -952,8 +953,9 @@ func TestServer_ActivateStream_Retention_EqualThreshold(t *testing.T) {
 	cs.NumPastStreams = 2
 
 	// Initialize S1 (Live) and P1 (Past)
-	p1 := &Stream{ChannelID: key, ActiveID: "p1", StartTime: "2000", IsLive: false}
-	s1 := &Stream{ChannelID: key, ActiveID: "s1", StartTime: "3000", IsLive: true}
+	// Initialize S1 (Live) and P1 (Past)
+	p1 := &Stream{ChannelID: key, StreamID: "p1", StartTime: "2000", IsLive: false, ActivatedTime: 2000}
+	s1 := &Stream{ChannelID: key, StreamID: "s1", StartTime: "3000", IsLive: true, ActivatedTime: 3000}
 	app.UpsertStream(ctx, p1)
 	app.UpsertStream(ctx, s1)
 	app.InsertTranscriptLine(ctx, key, "p1", Line{ID: 0, Segments: json.RawMessage(`[{"text": "P1 Content"}]`)})
@@ -979,11 +981,11 @@ func TestServer_ActivateStream_Retention_EqualThreshold(t *testing.T) {
 	}
 	// Verify order (newest first): S1, P1
 	if len(past) == 2 {
-		if past[0].ActiveID != "s1" {
-			t.Errorf("expected past[0] to be s1, got %s", past[0].ActiveID)
+		if past[0].StreamID != "s1" {
+			t.Errorf("expected past[0] to be s1, got %s", past[0].StreamID)
 		}
-		if past[1].ActiveID != "p1" {
-			t.Errorf("expected past[1] to be p1, got %s", past[1].ActiveID)
+		if past[1].StreamID != "p1" {
+			t.Errorf("expected past[1] to be p1, got %s", past[1].StreamID)
 		}
 	}
 	// Verify transcripts
@@ -1004,9 +1006,10 @@ func TestServer_ActivateStream_Retention_OverThreshold(t *testing.T) {
 	cs.NumPastStreams = 2
 
 	// Setup: S2 (Active), S1, P1
-	p1 := &Stream{ChannelID: key, ActiveID: "p1", StartTime: "2000", IsLive: false}
-	s1 := &Stream{ChannelID: key, ActiveID: "s1", StartTime: "3000", IsLive: false}
-	s2 := &Stream{ChannelID: key, ActiveID: "s2", StartTime: "4000", IsLive: true}
+	// Setup: S2 (Active), S1, P1
+	p1 := &Stream{ChannelID: key, StreamID: "p1", StartTime: "2000", IsLive: false, ActivatedTime: 2000}
+	s1 := &Stream{ChannelID: key, StreamID: "s1", StartTime: "3000", IsLive: false, ActivatedTime: 3000}
+	s2 := &Stream{ChannelID: key, StreamID: "s2", StartTime: "4000", IsLive: true, ActivatedTime: 4000}
 	app.UpsertStream(ctx, p1)
 	app.UpsertStream(ctx, s1)
 	app.UpsertStream(ctx, s2)
@@ -1032,11 +1035,11 @@ func TestServer_ActivateStream_Retention_OverThreshold(t *testing.T) {
 		t.Errorf("expected 2 past streams after pruning, got %d", len(past))
 	}
 	if len(past) == 2 {
-		if past[0].ActiveID != "s2" {
-			t.Errorf("expected past[0] to be s2, got %s", past[0].ActiveID)
+		if past[0].StreamID != "s2" {
+			t.Errorf("expected past[0] to be s2, got %s", past[0].StreamID)
 		}
-		if past[1].ActiveID != "s1" {
-			t.Errorf("expected past[1] to be s1, got %s", past[1].ActiveID)
+		if past[1].StreamID != "s1" {
+			t.Errorf("expected past[1] to be s1, got %s", past[1].StreamID)
 		}
 	}
 
@@ -1073,11 +1076,12 @@ func TestServer_ActivateStream_Retention_MassiveOverflow(t *testing.T) {
 	cs.NumPastStreams = 2
 
 	// Setup: S3 (Active), S2, S1, P4, P5
-	p5 := &Stream{ChannelID: key, ActiveID: "p5", StartTime: "0100", IsLive: false} // Very old
-	p4 := &Stream{ChannelID: key, ActiveID: "p4", StartTime: "0500", IsLive: false} // Old
-	s1 := &Stream{ChannelID: key, ActiveID: "s1", StartTime: "3000", IsLive: false}
-	s2 := &Stream{ChannelID: key, ActiveID: "s2", StartTime: "4000", IsLive: false}
-	s3 := &Stream{ChannelID: key, ActiveID: "s3", StartTime: "5000", IsLive: true}
+	// Setup: S3 (Active), S2, S1, P4, P5
+	p5 := &Stream{ChannelID: key, StreamID: "p5", StartTime: "0100", IsLive: false, ActivatedTime: 100} // Very old
+	p4 := &Stream{ChannelID: key, StreamID: "p4", StartTime: "0500", IsLive: false, ActivatedTime: 500} // Old
+	s1 := &Stream{ChannelID: key, StreamID: "s1", StartTime: "3000", IsLive: false, ActivatedTime: 3000}
+	s2 := &Stream{ChannelID: key, StreamID: "s2", StartTime: "4000", IsLive: false, ActivatedTime: 4000}
+	s3 := &Stream{ChannelID: key, StreamID: "s3", StartTime: "5000", IsLive: true, ActivatedTime: 5000}
 
 	app.UpsertStream(ctx, p5)
 	app.UpsertStream(ctx, p4)
@@ -1110,11 +1114,11 @@ func TestServer_ActivateStream_Retention_MassiveOverflow(t *testing.T) {
 		t.Errorf("expected 2 past streams, got %d", len(past))
 	}
 	if len(past) == 2 {
-		if past[0].ActiveID != "s3" {
-			t.Errorf("expected past[0] to be s3, got %s", past[0].ActiveID)
+		if past[0].StreamID != "s3" {
+			t.Errorf("expected past[0] to be s3, got %s", past[0].StreamID)
 		}
-		if past[1].ActiveID != "s2" {
-			t.Errorf("expected past[1] to be s2, got %s", past[1].ActiveID)
+		if past[1].StreamID != "s2" {
+			t.Errorf("expected past[1] to be s2, got %s", past[1].StreamID)
 		}
 	}
 	// Verify S1 deleted
@@ -1240,5 +1244,48 @@ func TestNewApp_WorkerStatusInitialization(t *testing.T) {
 	now := time.Now().Unix()
 	if now-status.LastSeen > 5 {
 		t.Errorf("Expected last seen to be recent, got %d (now=%d)", status.LastSeen, now)
+	}
+}
+
+func TestPostClipHandler_StreamID(t *testing.T) {
+	key := "test-clip-handler"
+	app, mux, db := setupTestApp(t, []string{key})
+	defer db.Close()
+	ctx := context.Background()
+
+	// 1. Insert Stream 1 (Video)
+	stream1 := &Stream{
+		ChannelID: key,
+		StreamID:  "s1",
+		IsLive:    false,
+		MediaType: "video",
+	}
+	app.UpsertStream(ctx, stream1)
+
+	// 2. Insert Stream 2 (Audio) - make it recent
+	stream2 := &Stream{
+		ChannelID: key,
+		StreamID:  "s2",
+		IsLive:    true,
+		MediaType: "audio",
+	}
+	app.UpsertStream(ctx, stream2)
+
+	// 3. Request for Clip on Stream 1 (Video)
+	body := map[string]any{
+		"stream_id": "s1",
+		"start":     10,
+		"end":       20,
+		"type":      "mp4",
+	}
+	jsonBody, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", "/"+key+"/clip", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusMethodNotAllowed || strings.Contains(rr.Body.String(), "Video clipping is disabled") {
+		t.Errorf("Handler used wrong stream media type. Expected video (s1), got audio (s2 behavior).")
 	}
 }
