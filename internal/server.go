@@ -1567,7 +1567,9 @@ func (app *App) StartReconciliationLoop() {
 				// Skip the first one (active stream)
 				for i := 1; i < len(streams); i++ {
 					stream := streams[i]
-					storageKey := fmt.Sprintf("%s/%s", cs.Key, stream.StreamID)
+					// Use /raw because it is created at the time of the stream.
+					// If someone creates a clip 3 days after the stream ends, then this won't see the folder deleted until those extra 3 days elapse.
+					storageKey := fmt.Sprintf("%s/%s/raw", cs.Key, stream.StreamID)
 
 					exists, err := app.Storage.StreamExists(ctx, storageKey)
 					if err != nil {
