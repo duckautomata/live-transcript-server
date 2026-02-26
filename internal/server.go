@@ -1142,7 +1142,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if start < 0 || end <= start || end-start >= app.MaxClipSize {
+	if start < 0 || end < start || end-start >= app.MaxClipSize {
 		slog.Warn("invalid start or end id", "key", cs.Key, "func", "postClipHandler", "start", start, "end", end, "requestedClipSize", 1+end-start, "maxClipSize", app.MaxClipSize)
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		Http400Errors.Inc()
