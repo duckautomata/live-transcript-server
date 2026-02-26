@@ -11,11 +11,8 @@ IMAGE_NAME="duckautomata/live-transcript-server"
 # ---------------------
 
 # --- Path and Environment Setup ---
-# This ensures the script always runs from the project's root directory.
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
-PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
-cd "$PROJECT_ROOT" || exit 1
-
+# Change to the project root directory
+cd "$(dirname "$0")/.."
 echo "Running from project root: $PWD"
 
 # --- Input Validation ---
