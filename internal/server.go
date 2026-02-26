@@ -115,7 +115,7 @@ func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, storageCo
 		},
 		Channels:    make(map[string]*ChannelState),
 		MaxConn:     10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
-		MaxClipSize: 30,
+		MaxClipSize: 40,
 		TempDir:     tempDir,
 		Version:     version,
 		BuildTime:   buildTime,
