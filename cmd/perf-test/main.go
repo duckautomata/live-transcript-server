@@ -204,9 +204,7 @@ loop:
 		case <-stop:
 			break loop
 		case <-ticker.C:
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				start := time.Now()
 				c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 				if err != nil {
@@ -242,7 +240,7 @@ loop:
 				latenciesLock.Unlock()
 
 				success.Add(1)
-			}()
+			})
 		}
 	}
 	wg.Wait()

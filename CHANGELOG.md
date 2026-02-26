@@ -1,11 +1,17 @@
 # latest
-Using version [2.6](#26-2026-02-08)
+Using version [2.7](#27-2026-02-26)
 
 # Major version 2
-Using version [2.6](#26-2026-02-08)
+Using version [2.7](#27-2026-02-26)
 
 # Major version 1
 Using version [1.6](#16-2025-12-18)
+
+## 2.7 (2026-02-26)
+**Changes**
+- Increased max clip size to 40 lines
+- Enabled 1 line clips
+- Updated dependencies and moved to go 1.26
 
 ## 2.6 (2026-02-08)
 **Changes**

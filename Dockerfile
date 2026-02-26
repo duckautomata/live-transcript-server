@@ -2,7 +2,7 @@
 ARG CACHEBUST=1
 
 # 1. Build Stage
-FROM golang:1.25-alpine AS gobuilder
+FROM golang:1.26-alpine AS gobuilder
 ARG CACHEBUST
 ARG VERSION=dev
 ARG BUILD_TIME=unknown

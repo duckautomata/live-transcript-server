@@ -166,7 +166,7 @@ func TestWebsocketDoubleClose(t *testing.T) {
 	// We can loop check cs.ClientConnections
 	// Simple retry loop
 	registered := false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		cs.ClientsLock.Lock()
 		if cs.ClientConnections == 1 {
 			registered = true
@@ -237,7 +237,7 @@ func TestWebsocketPingPong(t *testing.T) {
 	timestamp := 123456
 	pingMsg := WebSocketMessage{
 		Event: EventPing,
-		Data: map[string]interface{}{
+		Data: map[string]any{
 			"timestamp": timestamp,
 		},
 	}
@@ -255,7 +255,7 @@ func TestWebsocketPingPong(t *testing.T) {
 		t.Errorf("expected event pong, got: %s", msg.Event)
 	}
 
-	dataMap, ok := msg.Data.(map[string]interface{})
+	dataMap, ok := msg.Data.(map[string]any)
 	if !ok {
 		t.Fatalf("expected data to be map, got %T", msg.Data)
 	}
@@ -341,7 +341,7 @@ func TestWebsocketPartialSync(t *testing.T) {
 	app.UpsertStream(ctx, stream)
 
 	lines := make([]Line, 150)
-	for i := 0; i < 150; i++ {
+	for i := range 150 {
 		lines[i] = Line{
 			ID:        i,
 			Timestamp: i * 1000,
@@ -374,7 +374,7 @@ func TestWebsocketPartialSync(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected map data for partial sync")
 	}
-	partialTranscript, ok := partialData["transcript"].([]interface{})
+	partialTranscript, ok := partialData["transcript"].([]any)
 	if !ok {
 		t.Fatalf("expected transcript array in partial sync data, got %T", partialData["transcript"])
 	}
@@ -383,7 +383,7 @@ func TestWebsocketPartialSync(t *testing.T) {
 	}
 
 	// Check the last line of partial sync is the actual last line (ID 149)
-	lastLine := partialTranscript[99].(map[string]interface{})
+	lastLine := partialTranscript[99].(map[string]any)
 	// JSON numbers are float64
 	if id, ok := lastLine["id"].(float64); !ok || int(id) != 149 {
 		t.Errorf("expected last line id 149, got %v", lastLine["id"])
@@ -402,7 +402,7 @@ func TestWebsocketPartialSync(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected map data for sync")
 	}
-	fullTranscript, ok := syncData["transcript"].([]interface{})
+	fullTranscript, ok := syncData["transcript"].([]any)
 	if !ok {
 		t.Fatalf("expected transcript array")
 	}

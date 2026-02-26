@@ -795,7 +795,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	}
 
 	// 5. Test clipHandler (POST)
-	clipReq := map[string]interface{}{
+	clipReq := map[string]any{
 		"stream_id": "s1",
 		"start":     0,
 		"end":       10,
@@ -816,7 +816,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	}
 
 	// 6. Test trimHandler (POST)
-	trimReq := map[string]interface{}{
+	trimReq := map[string]any{
 		"stream_id":   "s1",
 		"clip_id":     "file_1", // Trimming file ID file_1
 		"file_format": "m4a",
@@ -845,7 +845,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 	}
 
 	// 7. Test clipHandler Missing Media
-	clipReqMissing := map[string]interface{}{
+	clipReqMissing := map[string]any{
 		"stream_id": "s1",
 		"start":     0,
 		"end":       20, // Range 0-20, but we only have 0-10
@@ -862,7 +862,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 
 	// 8. Test clipHandler MP4 Sidecar
 	// Ensure we have media for range 0-10
-	clipReqMp4 := map[string]interface{}{
+	clipReqMp4 := map[string]any{
 		"stream_id": "s1",
 		"start":     0,
 		"end":       10,
@@ -1052,7 +1052,7 @@ func TestServer_ActivateStream_Retention_OverThreshold(t *testing.T) {
 	// Verify P1 folder deleted from filesystem (async wait)
 	p1Path := filepath.Join(cs.BaseMediaFolder, "p1")
 	deleted := false
-	for i := 0; i < 20; i++ { // Wait up to 2 seconds (20 * 100ms)
+	for range 20 { // Wait up to 2 seconds (20 * 100ms)
 		if _, err := os.Stat(p1Path); os.IsNotExist(err) {
 			deleted = true
 			break

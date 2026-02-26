@@ -140,8 +140,8 @@ func TestMediaAvailability(t *testing.T) {
 	}
 
 	// Verify Data
-	dataMap := msg.Data.(map[string]interface{})
-	files := dataMap["files"].(map[string]interface{})
+	dataMap := msg.Data.(map[string]any)
+	files := dataMap["files"].(map[string]any)
 	// map[string]interface{} because JSON unmarshals int keys as string?
 	// Or unmarshals into map[string]interface{}.
 	// Wait, int keys in JSON is valid only if quoted? No, keys are strings in JSON.
