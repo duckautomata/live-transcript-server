@@ -1562,8 +1562,9 @@ func (app *App) StartReconciliationLoop() {
 			}
 
 			updatesMade := false
-			// Skip the first one (active stream)
-			for i := 1; i < len(streams); i++ {
+			// We include the first stream in this loop because it's possible that the active stream is deleted.
+			// This happens when no new streams have been started and all streams have been deleted in R2.
+			for i := range streams {
 				stream := streams[i]
 
 				// We don't store data for "none" media types.
@@ -1581,7 +1582,7 @@ func (app *App) StartReconciliationLoop() {
 					continue
 				}
 
-				slog.Info("reconciliation: checking stream", "key", cs.Key, "storageKey", storageKey, "exists", exists)
+				slog.Debug("reconciliation: checking stream", "key", cs.Key, "storageKey", storageKey, "exists", exists)
 				if !exists {
 					slog.Info("reconciliation: stream missing in R2, deleting from db", "key", cs.Key, "streamID", stream.StreamID)
 					if err := app.DeleteStream(ctx, cs.Key, stream.StreamID); err != nil {
