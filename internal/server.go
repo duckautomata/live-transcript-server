@@ -1557,7 +1557,7 @@ func (app *App) StartReconciliationLoop() {
 				continue
 			}
 
-			if len(streams) <= 1 {
+			if len(streams) < 1 {
 				continue
 			}
 
@@ -1581,8 +1581,6 @@ func (app *App) StartReconciliationLoop() {
 					slog.Error("reconciliation: check failed", "key", cs.Key, "streamID", stream.StreamID, "err", err)
 					continue
 				}
-
-				slog.Debug("reconciliation: checking stream", "key", cs.Key, "storageKey", storageKey, "exists", exists)
 				if !exists {
 					slog.Info("reconciliation: stream missing in R2, deleting from db", "key", cs.Key, "streamID", stream.StreamID)
 					if err := app.DeleteStream(ctx, cs.Key, stream.StreamID); err != nil {
