@@ -1,11 +1,16 @@
 # latest
-Using version [2.7](#27-2026-02-26)
+Using version [2.8](#28-2026-03-18)
 
 # Major version 2
-Using version [2.7](#27-2026-02-26)
+Using version [2.8](#28-2026-03-18)
 
 # Major version 1
 Using version [1.6](#16-2025-12-18)
+
+## 2.8 (2026-03-18)
+**Changes**
+- Updated dependencies
+- Added additional logs to reconciliation loop
 
 ## 2.7 (2026-02-26)
 **Changes**

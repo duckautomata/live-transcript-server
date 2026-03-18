@@ -1545,68 +1545,81 @@ func (app *App) StartReconciliationLoop() {
 		return
 	}
 
-	ticker := time.NewTicker(4 * time.Hour)
-	go func() {
-		for range ticker.C {
-			slog.Debug("starting reconciliation loop", "func", "StartReconciliationLoop")
-			ctx := context.Background()
+	reconcile := func() {
+		slog.Debug("starting reconciliation loop", "func", "StartReconciliationLoop")
+		ctx := context.Background()
 
-			for _, cs := range app.Channels {
-				// Get all streams
-				streams, err := app.GetAllStreams(ctx, cs.Key)
+		for _, cs := range app.Channels {
+			// Get all streams
+			streams, err := app.GetAllStreams(ctx, cs.Key)
+			if err != nil {
+				slog.Error("failed to get streams for reconciliation", "key", cs.Key, "err", err)
+				continue
+			}
+
+			if len(streams) <= 1 {
+				continue
+			}
+
+			updatesMade := false
+			// Skip the first one (active stream)
+			for i := 1; i < len(streams); i++ {
+				stream := streams[i]
+
+				// We don't store data for "none" media types.
+				if stream.MediaType == "none" {
+					continue
+				}
+
+				// Use /raw because it is created at the time of the stream.
+				// If someone creates a clip 3 days after the stream ends, then this won't see the folder deleted until those extra 3 days elapse.
+				storageKey := fmt.Sprintf("%s/%s/raw", cs.Key, stream.StreamID)
+
+				exists, err := app.Storage.StreamExists(ctx, storageKey)
 				if err != nil {
-					slog.Error("failed to get streams for reconciliation", "key", cs.Key, "err", err)
+					slog.Error("reconciliation: check failed", "key", cs.Key, "streamID", stream.StreamID, "err", err)
 					continue
 				}
 
-				if len(streams) <= 1 {
-					continue
-				}
-
-				updatesMade := false
-				// Skip the first one (active stream)
-				for i := 1; i < len(streams); i++ {
-					stream := streams[i]
-					// Use /raw because it is created at the time of the stream.
-					// If someone creates a clip 3 days after the stream ends, then this won't see the folder deleted until those extra 3 days elapse.
-					storageKey := fmt.Sprintf("%s/%s/raw", cs.Key, stream.StreamID)
-
-					exists, err := app.Storage.StreamExists(ctx, storageKey)
-					if err != nil {
-						slog.Error("reconciliation: check failed", "key", cs.Key, "streamID", stream.StreamID, "err", err)
-						continue
+				slog.Info("reconciliation: checking stream", "key", cs.Key, "storageKey", storageKey, "exists", exists)
+				if !exists {
+					slog.Info("reconciliation: stream missing in R2, deleting from db", "key", cs.Key, "streamID", stream.StreamID)
+					if err := app.DeleteStream(ctx, cs.Key, stream.StreamID); err != nil {
+						slog.Error("reconciliation: failed to delete stream", "key", cs.Key, "streamID", stream.StreamID, "err", err)
 					}
-
-					if !exists {
-						slog.Info("reconciliation: stream missing in R2, deleting from db", "key", cs.Key, "streamID", stream.StreamID)
-						if err := app.DeleteStream(ctx, cs.Key, stream.StreamID); err != nil {
-							slog.Error("reconciliation: failed to delete stream", "key", cs.Key, "streamID", stream.StreamID, "err", err)
-						}
-						if err := app.DeleteTranscript(ctx, cs.Key, stream.StreamID); err != nil {
-							slog.Error("reconciliation: failed to delete transcript", "key", cs.Key, "streamID", stream.StreamID, "err", err)
-						}
-						updatesMade = true
+					if err := app.DeleteTranscript(ctx, cs.Key, stream.StreamID); err != nil {
+						slog.Error("reconciliation: failed to delete transcript", "key", cs.Key, "streamID", stream.StreamID, "err", err)
 					}
-				}
-
-				if updatesMade {
-					// Broadcast new list of streams
-					currentStream, _ := app.GetRecentStream(ctx, cs.Key)
-					streamID := ""
-					if currentStream != nil {
-						streamID = currentStream.StreamID
-					}
-
-					finalPastStreams, err := app.GetPastStreams(ctx, cs.Key, streamID)
-					if err == nil {
-						msg := WebSocketMessage{
-							Event: EventPastStreams,
-							Data:  EventPastStreamsData{Streams: finalPastStreams},
-						}
-						cs.broadcast(msg)
-					}
+					updatesMade = true
 				}
 			}
+
+			if updatesMade {
+				// Broadcast new list of streams
+				currentStream, _ := app.GetRecentStream(ctx, cs.Key)
+				streamID := ""
+				if currentStream != nil {
+					streamID = currentStream.StreamID
+				}
+
+				finalPastStreams, err := app.GetPastStreams(ctx, cs.Key, streamID)
+				if err == nil {
+					msg := WebSocketMessage{
+						Event: EventPastStreams,
+						Data:  EventPastStreamsData{Streams: finalPastStreams},
+					}
+					cs.broadcast(msg)
+				}
+			}
+		}
+	}
+
+	go func() {
+		reconcile() // Run once immediately on startup
+		ticker := time.NewTicker(4 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			reconcile()
 		}
 	}()
 }
