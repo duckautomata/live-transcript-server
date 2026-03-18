@@ -1523,102 +1523,116 @@ func writeError(w http.ResponseWriter, code int, message string) {
 
 // StartDatabaseCleanupLoop starts a background task that periodically removes
 // transcript lines for streams that no longer exist in the database.
-func (app *App) StartDatabaseCleanupLoop() {
-	ticker := time.NewTicker(12 * time.Hour)
+func (app *App) StartMaintenanceLoop() {
+	slog.Info("starting maintenance loop", "func", "StartMaintenanceLoop", "storage_is_local", app.Storage.IsLocal())
 	go func() {
+		ticker := time.NewTicker(12 * time.Hour)
+		defer ticker.Stop()
+		app.databaseCleanup()
 		for range ticker.C {
-			slog.Debug("starting database cleanup loop", "func", "StartDatabaseCleanupLoop")
-			ctx := context.Background()
+			app.databaseCleanup()
+		}
+	}()
 
-			// Run the cleanup
-			if err := app.CleanupOrphanedTranscripts(ctx); err != nil {
-				slog.Error("failed to cleanup orphaned transcripts", "func", "StartDatabaseCleanupLoop", "err", err)
-			}
+	go func() {
+		if app.Storage.IsLocal() {
+			return
+		}
+		ticker := time.NewTicker(4 * time.Hour)
+		defer ticker.Stop()
+		app.pruneExpiredStreams()
+		for range ticker.C {
+			app.pruneExpiredStreams()
 		}
 	}()
 }
 
-// StartReconciliationLoop starts a background task that periodically checks R2 storage
-// for missing streams and removes them from the database.
-func (app *App) StartReconciliationLoop() {
-	if app.Storage.IsLocal() {
-		return
+// StartDatabaseCleanupLoop Removes transcript lines for streams that no longer exist in the database.
+func (app *App) databaseCleanup() {
+	slog.Debug("starting database cleanup loop", "func", "StartDatabaseCleanupLoop")
+	ctx := context.Background()
+
+	// Run the cleanup
+	if err := app.CleanupOrphanedTranscripts(ctx); err != nil {
+		slog.Error("failed to cleanup orphaned transcripts", "func", "StartDatabaseCleanupLoop", "err", err)
 	}
+}
 
-	reconcile := func() {
-		slog.Debug("starting reconciliation loop", "func", "StartReconciliationLoop")
-		ctx := context.Background()
+// PruneExpiredStreams Checks R2 storage for missing streams and removes them from the database.
+func (app *App) pruneExpiredStreams() {
 
-		for _, cs := range app.Channels {
-			// Get all streams
-			streams, err := app.GetAllStreams(ctx, cs.Key)
+	slog.Debug("starting prune expired streams loop", "func", "PruneExpiredStreams")
+	ctx := context.Background()
+
+	for _, cs := range app.Channels {
+		// Get all streams
+		streams, err := app.GetAllStreams(ctx, cs.Key)
+		if err != nil {
+			slog.Error("failed to get streams for pruning", "key", cs.Key, "err", err)
+			continue
+		}
+
+		if len(streams) < 1 {
+			continue
+		}
+
+		updatesMade := false
+		// We include the first stream in this loop because it's possible that the active stream is deleted.
+		// This happens when no new streams have been started and all streams have been deleted in R2.
+		for i := range streams {
+			stream := streams[i]
+
+			// We don't store data for "none" media types. But, we still need to clean them up.
+			// To do this, we assume a 7 day ttl since we are using R2.
+			// If it is older than 7 days, we don't skip, and the StreamExists is guaranteed to be false.
+			if stream.MediaType == "none" {
+				if time.Since(time.UnixMicro(stream.ActivatedTime)) < 7*24*time.Hour {
+					continue
+				}
+			}
+
+			// Skip streams younger than 24 hours.
+			if time.Since(time.UnixMicro(stream.ActivatedTime)) < 24*time.Hour {
+				continue
+			}
+
+			// Use /raw because it is created at the time of the stream.
+			// If someone creates a clip 3 days after the stream ends, then this won't see the folder deleted until those extra 3 days elapse.
+			storageKey := fmt.Sprintf("%s/%s/raw", cs.Key, stream.StreamID)
+
+			exists, err := app.Storage.StreamExists(ctx, storageKey)
 			if err != nil {
-				slog.Error("failed to get streams for reconciliation", "key", cs.Key, "err", err)
+				slog.Error("Pruning: check failed", "key", cs.Key, "streamID", stream.StreamID, "err", err)
 				continue
 			}
+			if !exists {
+				slog.Info("Pruning: stream missing in R2, deleting from db", "key", cs.Key, "streamID", stream.StreamID)
+				if err := app.DeleteStream(ctx, cs.Key, stream.StreamID); err != nil {
+					slog.Error("Pruning: failed to delete stream", "key", cs.Key, "streamID", stream.StreamID, "err", err)
+				}
+				if err := app.DeleteTranscript(ctx, cs.Key, stream.StreamID); err != nil {
+					slog.Error("Pruning: failed to delete transcript", "key", cs.Key, "streamID", stream.StreamID, "err", err)
+				}
+				updatesMade = true
+			}
+		}
 
-			if len(streams) < 1 {
-				continue
+		if updatesMade {
+			// Broadcast new list of streams
+			currentStream, _ := app.GetRecentStream(ctx, cs.Key)
+			streamID := ""
+			if currentStream != nil {
+				streamID = currentStream.StreamID
 			}
 
-			updatesMade := false
-			// We include the first stream in this loop because it's possible that the active stream is deleted.
-			// This happens when no new streams have been started and all streams have been deleted in R2.
-			for i := range streams {
-				stream := streams[i]
-
-				// We don't store data for "none" media types.
-				if stream.MediaType == "none" {
-					continue
+			finalPastStreams, err := app.GetPastStreams(ctx, cs.Key, streamID)
+			if err == nil {
+				msg := WebSocketMessage{
+					Event: EventPastStreams,
+					Data:  EventPastStreamsData{Streams: finalPastStreams},
 				}
-
-				// Use /raw because it is created at the time of the stream.
-				// If someone creates a clip 3 days after the stream ends, then this won't see the folder deleted until those extra 3 days elapse.
-				storageKey := fmt.Sprintf("%s/%s/raw", cs.Key, stream.StreamID)
-
-				exists, err := app.Storage.StreamExists(ctx, storageKey)
-				if err != nil {
-					slog.Error("reconciliation: check failed", "key", cs.Key, "streamID", stream.StreamID, "err", err)
-					continue
-				}
-				if !exists {
-					slog.Info("reconciliation: stream missing in R2, deleting from db", "key", cs.Key, "streamID", stream.StreamID)
-					if err := app.DeleteStream(ctx, cs.Key, stream.StreamID); err != nil {
-						slog.Error("reconciliation: failed to delete stream", "key", cs.Key, "streamID", stream.StreamID, "err", err)
-					}
-					if err := app.DeleteTranscript(ctx, cs.Key, stream.StreamID); err != nil {
-						slog.Error("reconciliation: failed to delete transcript", "key", cs.Key, "streamID", stream.StreamID, "err", err)
-					}
-					updatesMade = true
-				}
-			}
-
-			if updatesMade {
-				// Broadcast new list of streams
-				currentStream, _ := app.GetRecentStream(ctx, cs.Key)
-				streamID := ""
-				if currentStream != nil {
-					streamID = currentStream.StreamID
-				}
-
-				finalPastStreams, err := app.GetPastStreams(ctx, cs.Key, streamID)
-				if err == nil {
-					msg := WebSocketMessage{
-						Event: EventPastStreams,
-						Data:  EventPastStreamsData{Streams: finalPastStreams},
-					}
-					cs.broadcast(msg)
-				}
+				cs.broadcast(msg)
 			}
 		}
 	}
-
-	go func() {
-		reconcile() // Run once immediately on startup
-		ticker := time.NewTicker(4 * time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			reconcile()
-		}
-	}()
 }
