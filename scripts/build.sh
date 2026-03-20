@@ -15,6 +15,8 @@ IMAGE_NAME="duckautomata/live-transcript-server"
 cd "$(dirname "$0")/.."
 echo "Running from project root: $PWD"
 
+set -e
+
 # --- Input Validation ---
 # Check if a version argument was provided
 if [ -z "$1" ]; then
@@ -35,6 +37,15 @@ else
     echo "   Please use the format 'major.minor' (e.g., '1.2' or '10.4') or 'dev'."
     exit 1
 fi
+
+# --- Code Quality Checks ---
+echo -e "\nRunning code quality checks before build..."
+
+echo "   Running tests..."
+go test ./internal/...
+
+echo "   All checks passed."
+echo "-----------------------------------"
 
 # --- Tag Generation ---
 # Generate Build Time
