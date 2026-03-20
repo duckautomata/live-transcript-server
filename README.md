@@ -145,7 +145,7 @@ When all of that is done, you can run `scripts/run.sh` (or just `go run ./cmd/we
 
 ### Debugging/Logging
 
-Logging is set up for the entire program, and everything should be logged. The console will print info and higher logs (everything but debug). On startup, a log file under `tmp/` will be created and will contain every log. In the event of an error, check this log file to see what went wrong.
+Logging is set up for the entire program, and everything should be logged. The console will print info and higher logs (everything but debug). On startup, a log file under `tmp/_logs` will be created and will contain every log. In the event of an error, check this log file to see what went wrong.
 
 
 ## Docker

@@ -39,13 +39,13 @@ func versionHandler(w http.ResponseWriter, _ *http.Request) {
 
 func main() {
 	// --- Logging Setup ---
-	if err := os.MkdirAll("tmp", 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join("tmp", "_logs"), 0755); err != nil {
 		fmt.Printf("failed to create log directory: %v\n", err)
 	}
 
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
 	fileName := fmt.Sprintf("%s-server.log", timestamp)
-	filePath := filepath.Join("tmp", fileName)
+	filePath := filepath.Join("tmp", "_logs", fileName)
 
 	// Open the log file.
 	logFile, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
