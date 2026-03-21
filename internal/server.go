@@ -807,7 +807,7 @@ func (app *App) activateHandler(w http.ResponseWriter, r *http.Request) {
 		ActivatedStreams.WithLabelValues(cs.Key, streamID, title).Set(float64(startTimeUnix))
 		w.WriteHeader(http.StatusOK)
 		w.Write(fmt.Appendf(nil, "%s stream successfully activated", cs.Key))
-		slog.Debug("activated stream", "key", cs.Key, "func", "activateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID, "mediaType", mediaType)
+		slog.Debug("new stream activated", "key", cs.Key, "func", "activateHandler", "processingTimeMs", time.Since(processStartTime).Milliseconds(), "streamID", streamID, "title", title, "mediaType", mediaType)
 	} else {
 		w.WriteHeader(http.StatusAlreadyReported)
 		w.Write(fmt.Appendf(nil, "%s stream is already activated", cs.Key))
@@ -1545,6 +1545,35 @@ func (app *App) StartMaintenanceLoop() {
 			app.pruneExpiredStreams()
 		}
 	}()
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			app.checkWorkerStatus()
+		}
+	}()
+}
+
+// checkWorkerStatus logs an error if any workers have been inactive for more than 5 minutes.
+func (app *App) checkWorkerStatus() {
+	slog.Debug("starting worker status check", "func", "checkWorkerStatus")
+	ctx := context.Background()
+
+	workers, err := app.GetAllWorkerStatus(ctx)
+	if err != nil {
+		slog.Error("failed to get worker status for monitoring", "err", err)
+		return
+	}
+
+	now := time.Now().Unix()
+	for _, w := range workers {
+		if now-w.LastSeen >= 300 {
+			lastSeenTime := time.Unix(w.LastSeen, 0).Format(time.RFC3339)
+			timeAgo := (time.Duration(now-w.LastSeen) * time.Second).String()
+			slog.Error("worker is not active", "key", w.ChannelKey, "last_seen", lastSeenTime, "time_ago", timeAgo)
+		}
+	}
 }
 
 // StartDatabaseCleanupLoop Removes transcript lines for streams that no longer exist in the database.
