@@ -25,6 +25,12 @@ type StorageConfig struct {
 	R2   R2Config `yaml:"r2"`
 }
 
+type DiscordConfig struct {
+	WebhookURL   string `yaml:"webhookUrl"`
+	NotifyUserID string `yaml:"notifyUserId"`
+	NotifyRoleID string `yaml:"notifyRoleId"`
+}
+
 type DatabaseConfig struct {
 	JournalMode   string `yaml:"journal_mode"`
 	BusyTimeoutMS int    `yaml:"busy_timeout_ms"`
@@ -41,6 +47,7 @@ type Config struct {
 	Database DatabaseConfig  `yaml:"database"`
 	Storage  StorageConfig   `yaml:"storage"`
 	Channels []ChannelConfig `yaml:"channels"`
+	Discord  DiscordConfig   `yaml:"discord"`
 }
 
 func GetConfig() (Config, error) {

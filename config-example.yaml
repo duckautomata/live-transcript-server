@@ -37,3 +37,12 @@ channels:
     numPastStreams: 5
   - name: key2
     numPastStreams: 0
+
+# Discord configuration used to send system notifications.
+# Optional. If left empty, no notifications will be sent.
+discord:
+  webhookUrl: ""
+  # both user and role id are optional. If none are set, no ping will be sent.
+  # Only one will be used. If both are set, the role id will be used.
+  notifyUserId: ""
+  notifyRoleId: ""

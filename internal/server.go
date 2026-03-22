@@ -103,9 +103,9 @@ func CorsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, storageConfig StorageConfig, tempDir, version, buildTime string) *App {
+func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App {
 	app := &App{
-		ApiKey: apiKey,
+		ApiKey: config.Credentials.ApiKey,
 		DB:     db,
 		Upgrader: websocket.Upgrader{
 			ReadBufferSize:    1024,
@@ -117,11 +117,12 @@ func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, storageCo
 		MaxConn:     10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
 		MaxClipSize: 40,
 		TempDir:     tempDir,
+		Discord:     NewDiscordClient(config.Discord),
 		Version:     version,
 		BuildTime:   buildTime,
 	}
 
-	for _, cc := range channelsConfig {
+	for _, cc := range config.Channels {
 		baseFolder := filepath.Join(tempDir, cc.Name)
 		os.MkdirAll(baseFolder, 0755)
 
@@ -137,8 +138,8 @@ func NewApp(apiKey string, db *sql.DB, channelsConfig []ChannelConfig, storageCo
 	var err error
 	ctx := context.Background()
 
-	if storageConfig.Type == "r2" {
-		store, err = storage.NewR2Storage(ctx, storageConfig.R2.AccountId, storageConfig.R2.AccessKeyId, storageConfig.R2.SecretAccessKey, storageConfig.R2.Bucket, storageConfig.R2.PublicUrl)
+	if config.Storage.Type == "r2" {
+		store, err = storage.NewR2Storage(ctx, config.Storage.R2.AccountId, config.Storage.R2.AccessKeyId, config.Storage.R2.SecretAccessKey, config.Storage.R2.Bucket, config.Storage.R2.PublicUrl)
 	} else {
 		// Default to local storage
 		store, err = storage.NewLocalStorage(tempDir, "")
@@ -214,6 +215,8 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, streamID s
 			slog.Error("failed to upsert new stream", "key", cs.Key, "err", err)
 			return false
 		}
+
+		app.Discord.NotifyStreamStart(cs.Key, streamID, streamTitle, startTime)
 
 		// Set new active stream folder
 		if app.Storage.IsLocal() {
@@ -446,6 +449,7 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 	if err := app.UpsertStream(r.Context(), stream); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to upsert stream: %w", err), r.URL.Path)
 		slog.Error("failed to upsert stream", "err", err)
 		return
 	}
@@ -469,6 +473,7 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 	if err := app.ReplaceTranscript(r.Context(), cs.Key, data.StreamID, data.Transcript); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to replace transcript: %w", err), r.URL.Path)
 		slog.Error("failed to replace transcript", "err", err)
 		return
 	}
@@ -529,6 +534,7 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to get last line id: %w", err), r.URL.Path)
 		slog.Error("failed to get last line id", "err", err)
 		return
 	}
@@ -553,6 +559,7 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 	if err := app.InsertTranscriptLine(r.Context(), cs.Key, streamID, data); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to insert transcript line: %w", err), r.URL.Path)
 		slog.Error("failed to insert transcript line", "err", err)
 		return
 	}
@@ -619,6 +626,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("failed to check stream exists", "key", cs.Key, "func", "mediaHandler", "err", err)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to check stream exists: %w", err), r.URL.Path)
 		return
 	}
 	if !exists {
@@ -633,6 +641,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Unable to create temp file", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to create temp raw file: %w", err), r.URL.Path)
 		slog.Error("unable to create temp raw file", "key", cs.Key, "func", "mediaHandler", "err", err)
 		return
 	}
@@ -642,6 +651,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		os.Remove(tempRawHost)
 		http.Error(w, "Unable to save file", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to save temp raw file: %w", err), r.URL.Path)
 		slog.Error("unable to save temp raw file", "key", cs.Key, "func", "mediaHandler", "err", err)
 		return
 	}
@@ -658,6 +668,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	if err := FfmpegConvert(tempRawHost, tempM4aHost); err != nil {
 		http.Error(w, "Unable to convert media", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to convert media: %w", err), r.URL.Path)
 		slog.Error("unable to convert media", "key", cs.Key, "func", "mediaHandler", "err", err)
 		return
 	}
@@ -677,6 +688,8 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	if _, err := app.Storage.Save(uploadCtx, rawKey, rawReader, rawInfo.Size()); err != nil {
 		slog.Error("failed to upload raw file", "key", cs.Key, "err", err)
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to upload raw file: %w", err), r.URL.Path)
 		return
 	}
 	timings["upload_raw"] = time.Since(uploadRawStart).Seconds()
@@ -692,6 +705,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("failed to upload m4a file", "key", cs.Key, "err", err)
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to upload m4a file: %w", err), r.URL.Path)
 		return
 	}
 	timings["upload_m4a"] = time.Since(uploadM4aStart).Seconds()
@@ -737,11 +751,13 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 			if err := app.SetMediaAvailable(r.Context(), cs.Key, streamID, id, fileID, true); err != nil {
 				slog.Error("failed to set media available on retry", "key", cs.Key, "id", id, "err", err)
 				Http500Errors.Inc()
+				app.Discord.Notify500Error(fmt.Errorf("failed to set media available on retry: %w", err), r.URL.Path)
 				success = false
 			}
 		} else {
 			slog.Error("failed to set media available", "key", cs.Key, "id", id, "err", err)
 			Http500Errors.Inc()
+			app.Discord.Notify500Error(fmt.Errorf("failed to set media available: %w", err), r.URL.Path)
 			success = false
 		}
 	}
@@ -979,6 +995,7 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to check file: %w", err), r.URL.Path)
 		slog.Error("unable to check file", "key", cs.Key, "func", "streamHandler", "id", idStr, "err", err)
 		return
 	}
@@ -1056,6 +1073,7 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to check frame file: %w", err), r.URL.Path)
 		slog.Error("unable to check frame file", "key", cs.Key, "func", "getFrameHandler", "filename", filename, "err", err)
 		return
 	}
@@ -1158,6 +1176,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("failed to get file ids for clip", "key", cs.Key, "err", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to get file ids for clip: %w", err), r.URL.Path)
 		return
 	}
 	timings["db_get_files"] = time.Since(dbGetStart).Seconds()
@@ -1169,6 +1188,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("missing file ids for clip", "key", cs.Key, "func", "postClipHandler", "expected", expectedCount, "got", len(fileIDs))
 		http.Error(w, "Missing media files for requested range", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to get file ids for clip: %w", err), r.URL.Path)
 		return
 	}
 
@@ -1178,6 +1198,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		os.Remove(mergedRawPath)
 		http.Error(w, "Server error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to merge raw audio: %w", err), r.URL.Path)
 		slog.Error("unable to merge raw audio", "key", cs.Key, "func", "postClipHandler", "startID", start, "endID", end, "err", err)
 		return
 	}
@@ -1214,6 +1235,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("unable to convert raw media to new extension", "key", cs.Key, "func", "postClipHandler", "extension", clipExt, "err", err)
 		http.Error(w, "Server error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to convert raw media to new extension: %w", err), r.URL.Path)
 		return
 	}
 	defer os.Remove(tempMediaFile)
@@ -1494,6 +1516,7 @@ func (app *App) getTranscriptHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to get transcript: %w", err), r.URL.Path)
 		slog.Error("failed to get transcript", "key", cs.Key, "streamID", streamID, "err", err)
 		return
 	}
@@ -1568,10 +1591,11 @@ func (app *App) checkWorkerStatus() {
 
 	now := time.Now().Unix()
 	for _, w := range workers {
-		if now-w.LastSeen >= 300 {
+		if w.ChannelKey != "test" && now-w.LastSeen >= 300 {
 			lastSeenTime := time.Unix(w.LastSeen, 0).Format(time.RFC3339)
 			timeAgo := (time.Duration(now-w.LastSeen) * time.Second).String()
 			slog.Error("worker is not active", "key", w.ChannelKey, "last_seen", lastSeenTime, "time_ago", timeAgo)
+			app.Discord.NotifyWorkerOffline(w.ChannelKey, w.LastSeen)
 		}
 	}
 }

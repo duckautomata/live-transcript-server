@@ -29,7 +29,14 @@ func setupTestApp(t *testing.T, channels []string) (*App, *http.ServeMux, *sql.D
 	for _, c := range channels {
 		channelConfigs = append(channelConfigs, ChannelConfig{Name: c, NumPastStreams: 1})
 	}
-	app := NewApp(apiKey, db, channelConfigs, StorageConfig{Type: "local"}, t.TempDir(), "test-version", "test-build-time")
+	testConfig := Config{
+		Credentials: struct {
+			ApiKey string `yaml:"apiKey"`
+		}{ApiKey: apiKey},
+		Channels: channelConfigs,
+		Storage:  StorageConfig{Type: "local"},
+	}
+	app := NewApp(testConfig, db, t.TempDir(), "test-version", "test-build-time")
 
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)

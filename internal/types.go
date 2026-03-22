@@ -177,6 +177,7 @@ type App struct {
 	MaxClipSize int
 	TempDir     string
 	Storage     storage.Storage
+	Discord     *DiscordClient
 	Version     string
 	BuildTime   string
 }

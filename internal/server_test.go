@@ -564,7 +564,14 @@ func TestServer_Persistence(t *testing.T) {
 	apiKey := "key"
 	// Use manual setup to mimic restart behavior easily (just accessing DB)
 
-	app := NewApp(apiKey, db, []ChannelConfig{{Name: key, NumPastStreams: 1}}, StorageConfig{Type: "local"}, dir, "test-version", "test-build-time")
+	testConfig := Config{
+		Credentials: struct {
+			ApiKey string `yaml:"apiKey"`
+		}{ApiKey: apiKey},
+		Channels: []ChannelConfig{{Name: key, NumPastStreams: 1}},
+		Storage:  StorageConfig{Type: "local"},
+	}
+	app := NewApp(testConfig, db, dir, "test-version", "test-build-time")
 
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)
@@ -1203,15 +1210,14 @@ func TestNewApp_WorkerStatusInitialization(t *testing.T) {
 	}
 
 	// Initialize App
-	app := NewApp(
-		"test-api-key",
-		db,
-		[]ChannelConfig{{Name: key, NumPastStreams: 1}},
-		StorageConfig{Type: "local"},
-		dir,
-		version,
-		buildTime,
-	)
+	testConfig := Config{
+		Credentials: struct {
+			ApiKey string `yaml:"apiKey"`
+		}{ApiKey: "test-api-key"},
+		Channels: []ChannelConfig{{Name: key, NumPastStreams: 1}},
+		Storage:  StorageConfig{Type: "local"},
+	}
+	app := NewApp(testConfig, db, dir, version, buildTime)
 
 	// Check worker_status
 	ctx := context.Background()

@@ -1,11 +1,15 @@
 # latest
-Using version [2.8](#28-2026-03-18)
+Using version [2.9](#29-2026-03-22)
 
 # Major version 2
-Using version [2.8](#28-2026-03-18)
+Using version [2.9](#29-2026-03-22)
 
 # Major version 1
 Using version [1.6](#16-2025-12-18)
+
+## 2.9 (2026-03-22)
+**Changes**
+- Added discord notifications for stream starts, 500 errors, and worker offline
 
 ## 2.8 (2026-03-18)
 **Changes**
