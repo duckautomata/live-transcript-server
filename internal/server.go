@@ -1580,7 +1580,6 @@ func (app *App) StartMaintenanceLoop() {
 
 // checkWorkerStatus logs an error if any workers have been inactive for more than 5 minutes.
 func (app *App) checkWorkerStatus() {
-	slog.Debug("starting worker status check", "func", "checkWorkerStatus")
 	ctx := context.Background()
 
 	workers, err := app.GetAllWorkerStatus(ctx)
