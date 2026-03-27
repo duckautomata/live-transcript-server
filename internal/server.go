@@ -121,6 +121,7 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 		Version:     version,
 		BuildTime:   buildTime,
 	}
+	app.ctx, app.cancel = context.WithCancel(context.Background())
 
 	for _, cc := range config.Channels {
 		baseFolder := filepath.Join(tempDir, cc.Name)
@@ -163,6 +164,18 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 	}
 
 	return app
+}
+
+// Close stops all background maintenance tasks and closes the database connection.
+func (app *App) Close() error {
+	if app.cancel != nil {
+		app.cancel()
+	}
+	app.wg.Wait()
+	if app.DB != nil {
+		return app.DB.Close()
+	}
+	return nil
 }
 
 // Activate a stream and send a message to all clients.
@@ -261,7 +274,9 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, streamID s
 					}
 					// Delete from Storage
 					// Run efficiently in background to avoid blocking the request
+					app.wg.Add(1)
 					go func(channelKey, activeID string) {
+						defer app.wg.Done()
 						// Create a background context for the deletion
 						bgCtx := context.Background()
 
@@ -1548,32 +1563,53 @@ func writeError(w http.ResponseWriter, code int, message string) {
 // transcript lines for streams that no longer exist in the database.
 func (app *App) StartMaintenanceLoop() {
 	slog.Info("starting maintenance loop", "func", "StartMaintenanceLoop", "storage_is_local", app.Storage.IsLocal())
+	app.wg.Add(1)
 	go func() {
+		defer app.wg.Done()
 		ticker := time.NewTicker(12 * time.Hour)
 		defer ticker.Stop()
 		app.databaseCleanup()
-		for range ticker.C {
-			app.databaseCleanup()
+		for {
+			select {
+			case <-ticker.C:
+				app.databaseCleanup()
+			case <-app.ctx.Done():
+				return
+			}
 		}
 	}()
 
+	app.wg.Add(1)
 	go func() {
+		defer app.wg.Done()
 		if app.Storage.IsLocal() {
 			return
 		}
 		ticker := time.NewTicker(4 * time.Hour)
 		defer ticker.Stop()
 		app.pruneExpiredStreams()
-		for range ticker.C {
-			app.pruneExpiredStreams()
+		for {
+			select {
+			case <-ticker.C:
+				app.pruneExpiredStreams()
+			case <-app.ctx.Done():
+				return
+			}
 		}
 	}()
 
+	app.wg.Add(1)
 	go func() {
+		defer app.wg.Done()
 		ticker := time.NewTicker(2 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			app.checkWorkerStatus()
+		for {
+			select {
+			case <-ticker.C:
+				app.checkWorkerStatus()
+			case <-app.ctx.Done():
+				return
+			}
 		}
 	}()
 }

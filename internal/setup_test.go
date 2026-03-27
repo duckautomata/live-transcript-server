@@ -19,7 +19,7 @@ func setupTestApp(t *testing.T, channels []string) (*App, *http.ServeMux, *sql.D
 	t.Helper()
 
 	// Use in-memory database
-	db, err := InitDB(":memory:", DatabaseConfig{})
+	db, err := InitDB(":memory:", DatabaseConfig{SkipWarmup: true})
 	if err != nil {
 		t.Fatalf("failed to init db: %v", err)
 	}
@@ -37,6 +37,11 @@ func setupTestApp(t *testing.T, channels []string) (*App, *http.ServeMux, *sql.D
 		Storage:  StorageConfig{Type: "local"},
 	}
 	app := NewApp(testConfig, db, t.TempDir(), "test-version", "test-build-time")
+
+	// Ensure the app is closed after the test, which also closes the DB
+	t.Cleanup(func() {
+		app.Close()
+	})
 
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)
@@ -84,9 +89,13 @@ func seedExampleData(t *testing.T, app *App, channelID string) {
 // setupTestDB creates a standalone in-memory DB for tests that don't need the full App.
 func setupTestDB(t *testing.T) *App {
 	t.Helper()
-	db, err := InitDB(":memory:", DatabaseConfig{})
+	db, err := InitDB(":memory:", DatabaseConfig{SkipWarmup: true})
 	if err != nil {
 		t.Fatalf("failed to init db: %v", err)
 	}
-	return &App{DB: db}
+	app := &App{DB: db}
+	t.Cleanup(func() {
+		app.Close()
+	})
+	return app
 }

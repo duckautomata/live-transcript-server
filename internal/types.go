@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"sync"
@@ -180,4 +181,8 @@ type App struct {
 	Discord     *DiscordClient
 	Version     string
 	BuildTime   string
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }

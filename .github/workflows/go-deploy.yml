@@ -27,10 +27,10 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: "go.mod"
           cache: true
@@ -42,7 +42,7 @@ jobs:
         run: go test ./internal/... -v 2>&1 | go-junit-report -set-exit-code > junit.xml
 
       - name: Report Test Results
-        uses: dorny/test-reporter@v1
+        uses: dorny/test-reporter@v3
         if: always()
         with:
           name: Go Test Results

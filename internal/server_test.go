@@ -20,8 +20,7 @@ import (
 
 func TestServer_ActivateDeactivate(t *testing.T) {
 	key := "test-channel"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 	apiKey := app.ApiKey
 	ctx := context.Background()
 
@@ -263,8 +262,7 @@ func TestServer_ActivateDeactivate(t *testing.T) {
 
 func TestServer_LineUpdate(t *testing.T) {
 	key := "test-channel-line"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 	apiKey := app.ApiKey
 
 	// Activate first (helper to avoid boilerplate)
@@ -323,8 +321,7 @@ func TestServer_LineUpdate(t *testing.T) {
 
 func TestServer_MediaUpload(t *testing.T) {
 	key := "test-channel-media"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 	apiKey := app.ApiKey
 	ctx := context.Background()
 
@@ -400,8 +397,7 @@ func TestServer_MediaUpload(t *testing.T) {
 
 func TestServer_Sync(t *testing.T) {
 	key := "test-channel-sync"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 	apiKey := app.ApiKey
 
 	// Simulate existing data via DB direct insert to simulate state
@@ -558,7 +554,10 @@ func TestServer_Sync(t *testing.T) {
 func TestServer_Persistence(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "persist.db")
-	db, _ := InitDB(dbPath, DatabaseConfig{})
+	db, err := InitDB(dbPath, DatabaseConfig{SkipWarmup: true})
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
 
 	key := "persist-channel"
 	apiKey := "key"
@@ -572,20 +571,35 @@ func TestServer_Persistence(t *testing.T) {
 		Storage:  StorageConfig{Type: "local"},
 	}
 	app := NewApp(testConfig, db, dir, "test-version", "test-build-time")
+	t.Cleanup(func() {
+		app.Close()
+	})
 
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)
 
-	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/activate?id=persist&title=Persist&startTime=12345", key), nil)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/activate?id=persist&title=Persist&startTime=12345&mediaType=video", key), nil)
 	req.Header.Set("X-API-Key", apiKey)
-	mux.ServeHTTP(httptest.NewRecorder(), req)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
 
-	db.Close()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status OK, got %v: %s", rr.Code, rr.Body.String())
+	}
+
+	// We close the app which will close the first DB.
+	// But app.Close() is in Cleanup. We want to close it NOW to simulate restart.
+	app.Close()
 
 	// Re-open DB
-	db2, _ := InitDB(dbPath, DatabaseConfig{})
-	defer db2.Close()
+	db2, err := InitDB(dbPath, DatabaseConfig{SkipWarmup: true})
+	if err != nil {
+		t.Fatalf("failed to re-open db: %v", err)
+	}
 	app2 := &App{DB: db2}
+	t.Cleanup(func() {
+		app2.Close()
+	})
 
 	stream, err := app2.GetRecentStream(context.TODO(), key)
 	if err != nil {
@@ -601,8 +615,7 @@ func TestServer_Persistence(t *testing.T) {
 
 func TestServer_GetTranscriptEndpoint(t *testing.T) {
 	key := "test-transcript-endpoint"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 	ctx := context.Background()
 
 	// Seed data
@@ -671,8 +684,7 @@ func TestServer_GetTranscriptEndpoint(t *testing.T) {
 
 func TestServer_MediaEndpoints(t *testing.T) {
 	key := "test-media-endpoints"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 	apiKey := app.ApiKey
 	ctx := context.Background()
 
@@ -906,8 +918,7 @@ func TestServer_MediaEndpoints(t *testing.T) {
 
 func TestServer_ActivateStream_Retention_UnderThreshold(t *testing.T) {
 	key := "test-retention-under"
-	app, _, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, _, _ := setupTestApp(t, []string{key})
 	ctx := context.Background()
 
 	// Update NumPastStreams to 2
@@ -951,8 +962,7 @@ func TestServer_ActivateStream_Retention_UnderThreshold(t *testing.T) {
 
 func TestServer_ActivateStream_Retention_EqualThreshold(t *testing.T) {
 	key := "test-retention-equal"
-	app, _, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, _, _ := setupTestApp(t, []string{key})
 	ctx := context.Background()
 
 	// Update NumPastStreams to 2
@@ -1004,8 +1014,7 @@ func TestServer_ActivateStream_Retention_EqualThreshold(t *testing.T) {
 
 func TestServer_ActivateStream_Retention_OverThreshold(t *testing.T) {
 	key := "test-retention-over"
-	app, _, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, _, _ := setupTestApp(t, []string{key})
 	ctx := context.Background()
 
 	// Update NumPastStreams to 2
@@ -1074,8 +1083,7 @@ func TestServer_ActivateStream_Retention_OverThreshold(t *testing.T) {
 
 func TestServer_ActivateStream_Retention_MassiveOverflow(t *testing.T) {
 	key := "test-retention-overflow"
-	app, _, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, _, _ := setupTestApp(t, []string{key})
 	ctx := context.Background()
 
 	// Update NumPastStreams to 2
@@ -1137,8 +1145,7 @@ func TestServer_ActivateStream_Retention_MassiveOverflow(t *testing.T) {
 
 func TestServer_MediaEndpoints_RemoteDisabled(t *testing.T) {
 	key := "test-remote-disabled"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 
 	// Replace storage with a mock remote storage
 	mockStore := &MockRemoteStorage{
@@ -1196,7 +1203,6 @@ func TestNewApp_WorkerStatusInitialization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to init db: %v", err)
 	}
-	defer db.Close()
 
 	key := "test-startup-channel"
 	buildTime := "2024-01-01T12:00:00Z"
@@ -1255,8 +1261,7 @@ func TestNewApp_WorkerStatusInitialization(t *testing.T) {
 
 func TestPostClipHandler_StreamID(t *testing.T) {
 	key := "test-clip-handler"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 	ctx := context.Background()
 
 	// 1. Insert Stream 1 (Video)
