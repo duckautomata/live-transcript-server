@@ -113,8 +113,7 @@ func TestWebsocketBroadcast(t *testing.T) {
 
 func TestWebsocketMaxConnections(t *testing.T) {
 	key := "test-ws-max"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 
 	// Lower max conn for test
 	app.MaxConn = 1
@@ -130,6 +129,23 @@ func TestWebsocketMaxConnections(t *testing.T) {
 	}
 	defer ws1.Close()
 
+	// Wait for connection to be registered
+	cs, _ := app.Channels[key]
+	registered := false
+	for range 10 {
+		cs.ClientsLock.Lock()
+		if cs.ClientConnections == 1 {
+			registered = true
+			cs.ClientsLock.Unlock()
+			break
+		}
+		cs.ClientsLock.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !registered {
+		t.Fatal("client 1 did not register in time")
+	}
+
 	// Conn 2 should fail
 	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err == nil {
@@ -142,8 +158,7 @@ func TestWebsocketMaxConnections(t *testing.T) {
 
 func TestWebsocketDoubleClose(t *testing.T) {
 	key := "test-ws-double-close"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -174,6 +189,7 @@ func TestWebsocketDoubleClose(t *testing.T) {
 			break
 		}
 		cs.ClientsLock.Unlock()
+		time.Sleep(10 * time.Millisecond)
 	}
 	if !registered {
 		t.Fatal("client did not register in time")
@@ -324,8 +340,7 @@ func TestIsClientDisconnectError(t *testing.T) {
 
 func TestWebsocketPartialSync(t *testing.T) {
 	key := "test-ws-partial-sync"
-	app, mux, db := setupTestApp(t, []string{key})
-	defer db.Close()
+	app, mux, _ := setupTestApp(t, []string{key})
 
 	// Seed with 150 lines
 	ctx := context.Background()

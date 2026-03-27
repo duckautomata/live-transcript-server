@@ -15,6 +15,7 @@ import (
 type DiscordClient struct {
 	WebhookURL string
 	NotifyPing string
+	Disabled   bool
 }
 
 func NewDiscordClient(cfg DiscordConfig) *DiscordClient {
@@ -63,7 +64,7 @@ func (d *DiscordClient) send(payload map[string]any) {
 }
 
 func (d *DiscordClient) NotifyStreamStart(channelKey, streamID, streamTitle, startTime string) {
-	if d.WebhookURL == "" {
+	if d.Disabled || d.WebhookURL == "" {
 		return
 	}
 
@@ -141,7 +142,7 @@ func (d *DiscordClient) NotifyWorkerOffline(channelKey string, lastSeen int64) {
 }
 
 func (d *DiscordClient) Notify500Error(err error, contextMsg string) {
-	if d.WebhookURL == "" {
+	if d.Disabled || d.WebhookURL == "" {
 		return
 	}
 	payload := map[string]any{

@@ -105,7 +105,7 @@ func InitDB(path string, config DatabaseConfig) (*sql.DB, error) {
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	// Warm up the database to populate the cache
-	if config.JournalMode != "MEMORY" && path != ":memory:" {
+	if !config.SkipWarmup && config.JournalMode != "MEMORY" && path != ":memory:" {
 		go func() {
 			// Run in background to not block startup, though for small DBs it's fast.
 			// A full table scan forces pages into memory.

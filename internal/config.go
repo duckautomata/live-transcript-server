@@ -38,6 +38,7 @@ type DatabaseConfig struct {
 	CacheSizeKB   int    `yaml:"cache_size_kb"`
 	TempStore     string `yaml:"temp_store"`
 	MmapSizeBytes int64  `yaml:"mmap_size_bytes"`
+	SkipWarmup    bool   `yaml:"skip_warmup"`
 }
 
 type Config struct {

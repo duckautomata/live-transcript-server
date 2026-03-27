@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,7 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -72,7 +75,6 @@ func main() {
 		slog.Error("unable to initialize database", "func", "main", "path", dbPath, "err", err)
 		os.Exit(1)
 	}
-	defer db.Close()
 	app := internal.NewApp(config, db, "tmp", Version, BuildTime)
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)
@@ -94,8 +96,37 @@ func main() {
 	}
 
 	slog.Info("WebSocket server listening on port 8080", "func", "main")
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("unable to start WebSocket server", "func", "main", "err", err)
-		os.Exit(1)
+
+	// --- Signal Handling ---
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	// Start server in its own goroutine
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("unable to start WebSocket server", "func", "main", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Wait for signal
+	<-stop
+
+	slog.Info("shutting down server...", "func", "main")
+
+	// --- Shutdown Sequence ---
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	// Shutdown HTTP Server first
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		slog.Error("failed to shutdown HTTP server", "func", "main", "err", err)
 	}
+
+	// Close App and DB
+	if err := app.Close(); err != nil {
+		slog.Error("failed to close app", "func", "main", "err", err)
+	}
+
+	slog.Info("server exited cleanly", "func", "main")
 }

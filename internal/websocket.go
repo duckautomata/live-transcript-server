@@ -48,26 +48,32 @@ func isClientDisconnectError(err error) bool {
 // A goroutine running writePump must be started for each connection. The
 // application ensures that there is at most one writer to a connection by
 // executing all writes from this goroutine.
-func (c *Client) writePump(cs *ChannelState) {
+func (c *Client) writePump(cs *ChannelState, app *App) {
+	app.wg.Add(1)
 	defer func() {
 		cs.closeSocket(c)
+		app.wg.Done()
 	}()
 
 	for {
-		msg, ok := <-c.send
-		if !ok {
-			// The hub closed the channel.
-			c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-			return
-		}
-
-		if err := c.conn.WriteJSON(msg); err != nil {
-			if isClientDisconnectError(err) {
-				slog.Debug("client disconnected before message was sent", "key", cs.Key, "err", err)
-			} else {
-				slog.Error("failed to write message to client", "key", cs.Key, "err", err)
-				WebsocketError.Inc()
+		select {
+		case msg, ok := <-c.send:
+			if !ok {
+				// The hub closed the channel.
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
 			}
+
+			if err := c.conn.WriteJSON(msg); err != nil {
+				if isClientDisconnectError(err) {
+					slog.Debug("client disconnected before message was sent", "key", cs.Key, "err", err)
+				} else {
+					slog.Error("failed to write message to client", "key", cs.Key, "err", err)
+					WebsocketError.Inc()
+				}
+				return
+			}
+		case <-app.ctx.Done():
 			return
 		}
 	}
@@ -323,9 +329,11 @@ func (app *App) wsHandler(w http.ResponseWriter, r *http.Request) {
 	cs.Clients = append(cs.Clients, client)
 	cs.ClientsLock.Unlock()
 
-	go client.writePump(cs)
+	app.wg.Add(1)
+	go client.writePump(cs, app)
 
 	defer func() {
+		app.wg.Done()
 		ConnectionDuration.Observe(time.Since(startTime).Seconds())
 		cs.closeSocket(client)
 	}()
