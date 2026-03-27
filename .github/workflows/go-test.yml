@@ -1,0 +1,41 @@
+name: Test Pipeline
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    branches: ["master"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Install go-junit-report
+        run: go install github.com/jstemmer/go-junit-report/v2@latest
+
+      - name: Run Tests
+        run: go test ./internal/... -v 2>&1 | go-junit-report -set-exit-code > junit.xml
+
+      - name: Report Test Results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Go Test Results
+          path: junit.xml
+          reporter: java-junit

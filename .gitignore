@@ -10,12 +10,13 @@
 # But not these files...
 !/.gitignore
 !/.dockerignore
+!.github/**
 
-!docker/*
 !scripts/*
 
 !config-example.yaml
 !Dockerfile
+!docker-compose.yml
 
 !*.go
 !go.sum
