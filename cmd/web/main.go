@@ -17,7 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// To be set via ldflags
+// Set via environment variables VERSION and BUILD_TIME
 var (
 	Version   = "local"
 	BuildTime = "unknown"
@@ -41,6 +41,13 @@ func versionHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func main() {
+	if v := os.Getenv("VERSION"); v != "" {
+		Version = v
+	}
+	if bt := os.Getenv("BUILD_TIME"); bt != "" {
+		BuildTime = bt
+	}
+
 	// --- Logging Setup ---
 	if err := os.MkdirAll(filepath.Join("tmp", "_logs"), 0755); err != nil {
 		fmt.Printf("failed to create log directory: %v\n", err)

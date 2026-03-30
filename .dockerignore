@@ -1,1 +1,15 @@
+.git
+.github
+*.md
+*.log
+*.html
+*.out
+*.db
 tmp/
+scripts/
+test.sh
+config-example.yaml
+Dockerfile
+.dockerignore
+.gitignore
+LICENSE

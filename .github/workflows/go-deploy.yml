@@ -5,32 +5,42 @@ concurrency:
   cancel-in-progress: true
 
 on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: "Version bump type"
+        default: patch
+        type: choice
+        options: [patch, minor, major]
+
   push:
     branches: ["master"]
     paths:
       - "**.go"
       - "go.mod"
       - "go.sum"
-      - config-example.yaml
+      - "config-example.yaml"
       - "Dockerfile"
-      - "scripts/ci-build.sh"
       - ".github/workflows/go-deploy.yml"
 
 jobs:
-  deploy:
+
+  # ─────────────────────────────────────────────
+  # JOB 1 — Tests
+  # ─────────────────────────────────────────────
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: production
+    timeout-minutes: 10
     permissions:
-      contents: write
-      checks: write
+      contents: read
+      checks: write  # required by dorny/test-reporter
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417  # v6.3.0
         with:
           go-version-file: "go.mod"
           cache: true
@@ -42,44 +52,103 @@ jobs:
         run: go test ./internal/... -v 2>&1 | go-junit-report -set-exit-code > junit.xml
 
       - name: Report Test Results
-        uses: dorny/test-reporter@v3
+        uses: dorny/test-reporter@a6ddd83ac95ff4586f5d3aceeb314d9a1841db95  # v3.0.0
         if: always()
         with:
           name: Go Test Results
           path: junit.xml
           reporter: java-junit
+          fail-on-error: true
+
+  # ─────────────────────────────────────────────
+  # JOB 2 — Docker build & push
+  # ─────────────────────────────────────────────
+  build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test  # only runs if tests pass
+    environment: production
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Calculate Next Version
+        # dry_run=true means we calculate the next semver but do NOT create the git tag yet.
+        # The actual tag is created in the release job only after a successful Docker push.
         id: tag_version
-        uses: mathieudutour/github-tag-action@v6.2
+        uses: mathieudutour/github-tag-action@d28fa2ccfbd16e871a4bdf35e11b3ad1bd56c0c1  # v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          default_bump: patch
-          dry_run: true  # calculates the version but does NOT create the tag
+          default_bump: ${{ inputs.bump_type || 'patch' }}
+          dry_run: true
+
+      - name: Extract Docker Metadata
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf  # v6.0.0
+        with:
+          images: duckautomata/live-transcript-server
+          tags: |
+            type=raw,value=${{ steps.tag_version.outputs.new_version }}
+            type=raw,value=latest
+
+      - name: Set up Docker Buildx
+      # Buildx must be set up before login and before the build step.
+      # It is required for the GHA cache backend (cache-from/cache-to).
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2  # v4.0.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Build and Push Docker Image
-        env:
-          NEW_VERSION: ${{ steps.tag_version.outputs.new_version }}
-        run: bash ./scripts/ci-build.sh
+      - name: Get Build Time
+        id: build_time
+        run: |
+          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "value=$BUILD_TIME" >> $GITHUB_OUTPUT
+
+      - name: Build and Push
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294  # v7.0.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.tag_version.outputs.new_version }}
+            BUILD_TIME=${{ steps.build_time.outputs.value }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────────
+  # JOB 3 — Tag + GitHub Release
+  # ─────────────────────────────────────────────
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: build-push  # only runs after a successful Docker push
+    permissions:
+      contents: write # required to create the tag and release
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Create Git Tag
-        uses: mathieudutour/github-tag-action@v6.2
+        uses: mathieudutour/github-tag-action@d28fa2ccfbd16e871a4bdf35e11b3ad1bd56c0c1  # v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          custom_tag: ${{ steps.tag_version.outputs.new_version }}
-          tag_prefix: v
+          default_bump: ${{ inputs.bump_type || 'patch' }}
 
       - name: Create GitHub Release
         if: |
           startsWith(steps.tag_version.outputs.release_type, 'minor') ||
           startsWith(steps.tag_version.outputs.release_type, 'major')
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd  # v1.21.0
         with:
           tag: v${{ steps.tag_version.outputs.new_version }}
           name: v${{ steps.tag_version.outputs.new_version }}

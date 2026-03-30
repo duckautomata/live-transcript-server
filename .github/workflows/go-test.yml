@@ -14,14 +14,14 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      checks: write
+      checks: write  # required by dorny/test-reporter
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417  # v6.3.0
         with:
           go-version-file: "go.mod"
           cache: true
@@ -33,9 +33,10 @@ jobs:
         run: go test ./internal/... -v 2>&1 | go-junit-report -set-exit-code > junit.xml
 
       - name: Report Test Results
-        uses: dorny/test-reporter@v3
+        uses: dorny/test-reporter@a6ddd83ac95ff4586f5d3aceeb314d9a1841db95  # v3.0.0
         if: always()
         with:
           name: Go Test Results
           path: junit.xml
           reporter: java-junit
+          fail-on-error: true

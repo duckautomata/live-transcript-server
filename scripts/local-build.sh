@@ -3,7 +3,6 @@ set -euo pipefail
 
 IMAGE_NAME="duckautomata/live-transcript-server"
 BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-CACHEBUST=$(date +%s)
 
 # If NEW_VERSION is not set, we're running locally
 if [ -z "${NEW_VERSION:-}" ]; then
@@ -11,7 +10,6 @@ if [ -z "${NEW_VERSION:-}" ]; then
     docker build \
         --build-arg VERSION=dev \
         --build-arg BUILD_TIME="${BUILD_TIME}" \
-        --build-arg CACHEBUST="${CACHEBUST}" \
         -t "${IMAGE_NAME}:dev" \
         .
     echo "Pushing ${IMAGE_NAME}:dev..."
@@ -24,7 +22,6 @@ echo "Building version ${NEW_VERSION}..."
 docker build \
     --build-arg VERSION="${NEW_VERSION}" \
     --build-arg BUILD_TIME="${BUILD_TIME}" \
-    --build-arg CACHEBUST="${CACHEBUST}" \
     -t "${IMAGE_NAME}:${NEW_VERSION}" \
     -t "${IMAGE_NAME}:latest" \
     .
