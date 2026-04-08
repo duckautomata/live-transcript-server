@@ -728,7 +728,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Extract Frame
 	// Fetch stream info to check media type
-	stream, err := app.GetStreamByID(r.Context(), cs.Key, streamID)
+	stream, err := app.GetStreamByID(uploadCtx, cs.Key, streamID)
 	if err != nil {
 		slog.Warn("failed to get stream for frame extraction", "key", cs.Key, "streamID", streamID, "err", err)
 	}
@@ -760,10 +760,10 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	// Update DB
 	updateDbStart := time.Now()
 	success := true
-	if err := app.SetMediaAvailable(r.Context(), cs.Key, streamID, id, fileID, true); err != nil {
+	if err := app.SetMediaAvailable(uploadCtx, cs.Key, streamID, id, fileID, true); err != nil {
 		if err.Error() == "line not found" {
 			time.Sleep(500 * time.Millisecond)
-			if err := app.SetMediaAvailable(r.Context(), cs.Key, streamID, id, fileID, true); err != nil {
+			if err := app.SetMediaAvailable(uploadCtx, cs.Key, streamID, id, fileID, true); err != nil {
 				slog.Error("failed to set media available on retry", "key", cs.Key, "id", id, "err", err)
 				Http500Errors.Inc()
 				app.Discord.Notify500Error(fmt.Errorf("failed to set media available on retry: %w", err), r.URL.Path)
@@ -780,7 +780,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	MediaProcessingDuration.WithLabelValues("update_db", cs.Key).Observe(timings["update_db"])
 
 	if success && streamID != "" {
-		files, err := app.GetLastAvailableMediaFiles(r.Context(), cs.Key, streamID, 100)
+		files, err := app.GetLastAvailableMediaFiles(uploadCtx, cs.Key, streamID, 100)
 		if err != nil {
 			slog.Error("failed to get last available media files", "key", cs.Key, "err", err)
 			files = map[int]string{id: fileID}
