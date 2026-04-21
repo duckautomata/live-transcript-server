@@ -117,7 +117,7 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 		MaxConn:     10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
 		MaxClipSize: 40,
 		TempDir:     tempDir,
-		Discord:     NewDiscordClient(config.Discord),
+		Discord:     NewDiscordClient(config.Discord, version),
 		Version:     version,
 		BuildTime:   buildTime,
 	}
