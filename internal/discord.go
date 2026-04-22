@@ -16,9 +16,10 @@ type DiscordClient struct {
 	WebhookURL string
 	NotifyPing string
 	Disabled   bool
+	Version    string
 }
 
-func NewDiscordClient(cfg DiscordConfig) *DiscordClient {
+func NewDiscordClient(cfg DiscordConfig, version string) *DiscordClient {
 	var ping string
 	if cfg.NotifyUserID != "" {
 		ping = fmt.Sprintf("<@%s>", cfg.NotifyUserID)
@@ -29,6 +30,7 @@ func NewDiscordClient(cfg DiscordConfig) *DiscordClient {
 	return &DiscordClient{
 		WebhookURL: cfg.WebhookURL,
 		NotifyPing: ping,
+		Version:    version,
 	}
 }
 
@@ -103,7 +105,11 @@ func (d *DiscordClient) NotifyStreamStart(channelKey, streamID, streamTitle, sta
 		imageUrl = fmt.Sprintf("https://i.ytimg.com/vi/%s/maxresdefault.jpg", streamID)
 	}
 
-	transcriptLink := fmt.Sprintf("https://www.duck-automata.com/live-transcript/%s/", channelKey)
+	domain := "www.duck-automata.com"
+	if d.Version == "dev" {
+		domain = "dev.duck-automata.com"
+	}
+	transcriptLink := fmt.Sprintf("https://%s/live-transcript/%s/", domain, channelKey)
 
 	embed := map[string]any{
 		"title":       fmt.Sprintf("%s's Stream Started", fullName),
@@ -114,6 +120,9 @@ func (d *DiscordClient) NotifyStreamStart(channelKey, streamID, streamTitle, sta
 			"url": imageUrl,
 		},
 		"timestamp": timestampStr,
+		"footer": map[string]string{
+			"text": fmt.Sprintf("Version: %s", d.Version),
+		},
 	}
 
 	payload := map[string]any{
@@ -135,6 +144,9 @@ func (d *DiscordClient) NotifyWorkerOffline(channelKey string, lastSeen int64) {
 				"description": fmt.Sprintf("Worker for channel **%s** has been inactive.\nLast seen: %s ago", channelKey, timeAgo),
 				"color":       15158332, // Red
 				"timestamp":   time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("Version: %s", d.Version),
+				},
 			},
 		},
 	}
@@ -153,6 +165,9 @@ func (d *DiscordClient) Notify500Error(err error, contextMsg string) {
 				"description": fmt.Sprintf("**Context:** %s\n**Error:** %v", contextMsg, err),
 				"color":       16744448, // Orange
 				"timestamp":   time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("Version: %s", d.Version),
+				},
 			},
 		},
 	}

@@ -135,6 +135,7 @@ func (app *App) broadcastNewLine(ctx context.Context, cs *ChannelState, activeID
 		Timestamp:  newLine.Timestamp,
 		UploadTime: uploadTime,
 		Segments:   newLine.Segments,
+		VodAccurate: newLine.VodAccurate,
 	}
 
 	msg := WebSocketMessage{

@@ -117,7 +117,7 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 		MaxConn:     10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
 		MaxClipSize: 40,
 		TempDir:     tempDir,
-		Discord:     NewDiscordClient(config.Discord),
+		Discord:     NewDiscordClient(config.Discord, version),
 		Version:     version,
 		BuildTime:   buildTime,
 	}
@@ -1626,7 +1626,7 @@ func (app *App) checkWorkerStatus() {
 
 	now := time.Now().Unix()
 	for _, w := range workers {
-		if w.ChannelKey != "test" && now-w.LastSeen >= 300 {
+		if w.ChannelKey != "test" && w.ChannelKey != "dev" && now-w.LastSeen >= 300 {
 			lastSeenTime := time.Unix(w.LastSeen, 0).Format(time.RFC3339)
 			timeAgo := (time.Duration(now-w.LastSeen) * time.Second).String()
 			slog.Error("worker is not active", "key", w.ChannelKey, "last_seen", lastSeenTime, "time_ago", timeAgo)
