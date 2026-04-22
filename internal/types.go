@@ -30,6 +30,7 @@ type Line struct {
 	Timestamp      int             `json:"timestamp"`
 	Segments       json.RawMessage `json:"segments"`
 	MediaAvailable bool            `json:"mediaAvailable"`
+	VodAccurate    bool            `json:"vodAccurate"`
 }
 
 // Stream represents the state of a stream for a channel in the database.
@@ -120,6 +121,7 @@ type EventNewLineData struct {
 	UploadTime     int64           `json:"uploadTime"`
 	MediaAvailable bool            `json:"mediaAvailable"`
 	Segments       json.RawMessage `json:"segments"`
+	VodAccurate    bool            `json:"vodAccurate"`
 }
 
 // EventNewStreamData represents the data sent to notify the client of a new stream.

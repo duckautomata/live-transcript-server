@@ -80,12 +80,16 @@ func InitDB(path string, config DatabaseConfig) (*sql.DB, error) {
 		timestamp INTEGER,
 		segments TEXT,
 		media_available BOOLEAN DEFAULT 0,
+		vod_accurate BOOLEAN DEFAULT 0,
 		PRIMARY KEY (channel_id, stream_id, line_id)
 	);
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("error creating transcripts table: %w", err)
 	}
+
+	// Migration: add vod_accurate if it doesn't exist
+	_, _ = db.Exec(`ALTER TABLE transcripts ADD COLUMN vod_accurate BOOLEAN DEFAULT 0;`)
 
 	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS worker_status (
@@ -253,7 +257,7 @@ func (a *App) ReplaceTranscript(ctx context.Context, channelID string, streamID 
 	}
 
 	// 2. Insert new lines
-	stmt, err := tx.PrepareContext(ctx, "INSERT INTO transcripts (channel_id, stream_id, line_id, file_id, timestamp, segments, media_available) VALUES (?, ?, ?, ?, ?, ?, ?)")
+	stmt, err := tx.PrepareContext(ctx, "INSERT INTO transcripts (channel_id, stream_id, line_id, file_id, timestamp, segments, media_available, vod_accurate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
@@ -261,7 +265,7 @@ func (a *App) ReplaceTranscript(ctx context.Context, channelID string, streamID 
 
 	for _, line := range lines {
 		// Segments is already json.RawMessage ([]byte), so we can cast it to string directly
-		if _, err := stmt.ExecContext(ctx, channelID, streamID, line.ID, line.FileID, line.Timestamp, string(line.Segments), line.MediaAvailable); err != nil {
+		if _, err := stmt.ExecContext(ctx, channelID, streamID, line.ID, line.FileID, line.Timestamp, string(line.Segments), line.MediaAvailable, line.VodAccurate); err != nil {
 			return err
 		}
 	}
@@ -293,9 +297,9 @@ func (a *App) InsertTranscriptLine(ctx context.Context, channelID string, stream
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-	INSERT INTO transcripts (channel_id, stream_id, line_id, file_id, timestamp, segments, media_available)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, channelID, streamID, line.ID, line.FileID, line.Timestamp, string(line.Segments), line.MediaAvailable)
+	INSERT INTO transcripts (channel_id, stream_id, line_id, file_id, timestamp, segments, media_available, vod_accurate)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, channelID, streamID, line.ID, line.FileID, line.Timestamp, string(line.Segments), line.MediaAvailable, line.VodAccurate)
 	if err != nil {
 		return err
 	}
@@ -305,7 +309,7 @@ func (a *App) InsertTranscriptLine(ctx context.Context, channelID string, stream
 
 // GetTranscript retrieves all transcript lines for a channel/stream, ordered by line_id.
 func (a *App) GetTranscript(ctx context.Context, channelID string, streamID string) ([]Line, error) {
-	rows, err := a.DB.QueryContext(ctx, "SELECT line_id, file_id, timestamp, segments, media_available FROM transcripts WHERE channel_id = ? AND stream_id = ? ORDER BY line_id ASC", channelID, streamID)
+	rows, err := a.DB.QueryContext(ctx, "SELECT line_id, file_id, timestamp, segments, media_available, vod_accurate FROM transcripts WHERE channel_id = ? AND stream_id = ? ORDER BY line_id ASC", channelID, streamID)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +320,7 @@ func (a *App) GetTranscript(ctx context.Context, channelID string, streamID stri
 		var l Line
 		var segmentsStr string
 		var fileID sql.NullString
-		if err := rows.Scan(&l.ID, &fileID, &l.Timestamp, &segmentsStr, &l.MediaAvailable); err != nil {
+		if err := rows.Scan(&l.ID, &fileID, &l.Timestamp, &segmentsStr, &l.MediaAvailable, &l.VodAccurate); err != nil {
 			return nil, err
 		}
 		l.FileID = fileID.String
@@ -346,12 +350,12 @@ func (a *App) GetLastLineID(ctx context.Context, channelID string, streamID stri
 // GetLastLine retrieves the last transcript line for a channel/stream.
 // Returns nil, nil if no lines exist.
 func (a *App) GetLastLine(ctx context.Context, channelID string, streamID string) (*Line, error) {
-	row := a.DB.QueryRowContext(ctx, "SELECT line_id, file_id, timestamp, segments, media_available FROM transcripts WHERE channel_id = ? AND stream_id = ? ORDER BY line_id DESC LIMIT 1", channelID, streamID)
+	row := a.DB.QueryRowContext(ctx, "SELECT line_id, file_id, timestamp, segments, media_available, vod_accurate FROM transcripts WHERE channel_id = ? AND stream_id = ? ORDER BY line_id DESC LIMIT 1", channelID, streamID)
 
 	var l Line
 	var segmentsStr string
 	var fileID sql.NullString
-	err := row.Scan(&l.ID, &fileID, &l.Timestamp, &segmentsStr, &l.MediaAvailable)
+	err := row.Scan(&l.ID, &fileID, &l.Timestamp, &segmentsStr, &l.MediaAvailable, &l.VodAccurate)
 	l.FileID = fileID.String
 	if err == sql.ErrNoRows {
 		return nil, nil
