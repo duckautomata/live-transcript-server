@@ -12,9 +12,9 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-// urlRegex extracts the first http(s) URL from a chunk of text. Pingcord posts
-// either a custom-template body (`{channel} {link}`) or an embed with the link
-// in the URL/description, so we look across all text fields for a match.
+// urlRegex extracts the first http(s) URL from a chunk of text. We only parse
+// the message Content (not embeds) so untrusted text inside an embed cannot
+// inject a URL or a channel-name match.
 var urlRegex = regexp.MustCompile(`https?://[^\s<>"']+`)
 
 // DiscordBot listens for Pingcord stream-start messages on a Discord channel
@@ -86,7 +86,26 @@ func (b *DiscordBot) onMessage(_ *discordgo.Session, m *discordgo.MessageCreate)
 		return
 	}
 
+	authorID, authorName := "", ""
+	if m.Author != nil {
+		authorID = m.Author.ID
+		authorName = m.Author.Username
+	}
+
 	key, url, ok := parsePingcordMessage(m.Message, b.channelMap)
+	slog.Debug("discord message received",
+		"func", "DiscordBot.onMessage",
+		"messageId", m.ID,
+		"channelId", m.ChannelID,
+		"guildId", m.GuildID,
+		"authorId", authorID,
+		"authorName", authorName,
+		"content", m.Content,
+		"matched", ok,
+		"parsedKey", key,
+		"parsedUrl", url,
+	)
+
 	if !ok {
 		return
 	}
@@ -101,49 +120,22 @@ func (b *DiscordBot) onMessage(_ *discordgo.Session, m *discordgo.MessageCreate)
 	slog.Info("incoming stream queued", "func", "DiscordBot.onMessage", "key", key, "url", url, "messageId", m.ID)
 }
 
-// parsePingcordMessage flattens a Discord message into a single string and
-// looks for (a) the first http(s) URL and (b) the first channel-name key from
-// channelMap that appears anywhere in the text. Returns (key, url, true) only
-// when both are found. Channel names are matched case-insensitively to handle
-// minor formatting drift in Pingcord templates.
+// parsePingcordMessage looks at a Discord message's Content for (a) the first
+// http(s) URL and (b) the first channel-name key from channelMap that appears
+// anywhere in the text. Returns (key, url, true) only when both are found.
+// Channel names are matched case-insensitively. Embeds are intentionally
+// ignored so attacker-controlled embed text cannot trigger a match.
 func parsePingcordMessage(m *discordgo.Message, channelMap map[string]string) (string, string, bool) {
-	if m == nil {
+	if m == nil || m.Content == "" {
 		return "", "", false
 	}
-
-	var b strings.Builder
-	b.WriteString(m.Content)
-	for _, embed := range m.Embeds {
-		b.WriteByte(' ')
-		b.WriteString(embed.Title)
-		b.WriteByte(' ')
-		b.WriteString(embed.Description)
-		b.WriteByte(' ')
-		b.WriteString(embed.URL)
-		if embed.Author != nil {
-			b.WriteByte(' ')
-			b.WriteString(embed.Author.Name)
-			b.WriteByte(' ')
-			b.WriteString(embed.Author.URL)
-		}
-		for _, f := range embed.Fields {
-			b.WriteByte(' ')
-			b.WriteString(f.Name)
-			b.WriteByte(' ')
-			b.WriteString(f.Value)
-		}
-	}
-	text := b.String()
-	if text == "" {
-		return "", "", false
-	}
+	text := m.Content
 
 	url := urlRegex.FindString(text)
 	if url == "" {
 		return "", "", false
 	}
-	// Discord wraps suppressed embeds in <...>; trim trailing punctuation that
-	// can ride along with a URL captured from prose.
+	// Trim trailing punctuation that can ride along with a URL captured from prose.
 	url = strings.TrimRight(url, ".,);]>")
 
 	lowerText := strings.ToLower(text)
