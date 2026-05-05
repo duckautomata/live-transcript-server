@@ -46,3 +46,22 @@ discord:
   # Only one will be used. If both are set, the role id will be used.
   notifyUserId: ""
   notifyRoleId: ""
+
+  # Optional Discord bot that listens for Pingcord stream-start messages and
+  # queues the URL for the worker to pick up via GET /{channel}/incoming.
+  # Leave token empty to disable.
+  bot:
+    token: ""
+    # Discord channel IDs the bot should listen on. Messages in any other
+    # channel are ignored.
+    channelIds: []
+    # Maps the channel name as it appears in the Pingcord message
+    # ("{channel} {link}") to a server key from the channels list above.
+    # Example:
+    #   channelMap:
+    #     "Dokibird": "doki"
+    #     "Mint Fantôme": "mint"
+    channelMap: {}
+    # How long an unconsumed URL stays in the queue before the cleanup loop
+    # removes it. 0 falls back to 1440 (24h).
+    streamTtlMinutes: 1440

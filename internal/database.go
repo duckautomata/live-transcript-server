@@ -88,9 +88,6 @@ func InitDB(path string, config DatabaseConfig) (*sql.DB, error) {
 		return nil, fmt.Errorf("error creating transcripts table: %w", err)
 	}
 
-	// Migration: add vod_accurate if it doesn't exist
-	_, _ = db.Exec(`ALTER TABLE transcripts ADD COLUMN vod_accurate BOOLEAN DEFAULT 0;`)
-
 	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS worker_status (
 		channel_key TEXT PRIMARY KEY,
@@ -101,6 +98,18 @@ func InitDB(path string, config DatabaseConfig) (*sql.DB, error) {
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("error creating worker_status table: %w", err)
+	}
+
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS incoming_streams (
+		channel_key TEXT,
+		url TEXT,
+		received_at INTEGER NOT NULL,
+		PRIMARY KEY (channel_key, url)
+	);
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("error creating incoming_streams table: %w", err)
 	}
 
 	// Connection pool settings
@@ -505,4 +514,54 @@ func (a *App) ResetWorkerStatus(ctx context.Context) error {
 func (a *App) CleanupOrphanedTranscripts(ctx context.Context) error {
 	_, err := a.DB.ExecContext(ctx, "DELETE FROM transcripts WHERE (channel_id, stream_id) NOT IN (SELECT channel_id, stream_id FROM streams)")
 	return err
+}
+
+// UpsertIncomingStream records an incoming stream URL for a channel. The
+// received_at timestamp is refreshed whenever the same (channel_key, url) is
+// re-announced so it does not get pruned by TTL while the stream is still live.
+func (a *App) UpsertIncomingStream(ctx context.Context, channelKey, url string, receivedAt int64) error {
+	_, err := a.DB.ExecContext(ctx, `
+	INSERT INTO incoming_streams (channel_key, url, received_at)
+	VALUES (?, ?, ?)
+	ON CONFLICT(channel_key, url) DO UPDATE SET received_at = excluded.received_at;
+	`, channelKey, url, receivedAt)
+	return err
+}
+
+// GetIncomingStreams returns every URL queued for the given channel ordered by oldest first.
+func (a *App) GetIncomingStreams(ctx context.Context, channelKey string) ([]string, error) {
+	rows, err := a.DB.QueryContext(ctx, "SELECT url FROM incoming_streams WHERE channel_key = ? ORDER BY received_at ASC", channelKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var urls []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		urls = append(urls, u)
+	}
+	return urls, nil
+}
+
+// DeleteIncomingStream removes a single (channel_key, url) entry. Returns the
+// number of rows deleted so callers can distinguish "not found" from "removed".
+func (a *App) DeleteIncomingStream(ctx context.Context, channelKey, url string) (int64, error) {
+	res, err := a.DB.ExecContext(ctx, "DELETE FROM incoming_streams WHERE channel_key = ? AND url = ?", channelKey, url)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// CleanupExpiredIncomingStreams deletes incoming stream entries whose received_at is older than the cutoff.
+func (a *App) CleanupExpiredIncomingStreams(ctx context.Context, cutoff int64) (int64, error) {
+	res, err := a.DB.ExecContext(ctx, "DELETE FROM incoming_streams WHERE received_at < ?", cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

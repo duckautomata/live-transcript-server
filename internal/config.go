@@ -25,10 +25,18 @@ type StorageConfig struct {
 	R2   R2Config `yaml:"r2"`
 }
 
+type DiscordBotConfig struct {
+	Token            string            `yaml:"token"`
+	ChannelIDs       []string          `yaml:"channelIds"`
+	ChannelMap       map[string]string `yaml:"channelMap"`
+	StreamTTLMinutes int               `yaml:"streamTtlMinutes"`
+}
+
 type DiscordConfig struct {
-	WebhookURL   string `yaml:"webhookUrl"`
-	NotifyUserID string `yaml:"notifyUserId"`
-	NotifyRoleID string `yaml:"notifyRoleId"`
+	WebhookURL   string           `yaml:"webhookUrl"`
+	NotifyUserID string           `yaml:"notifyUserId"`
+	NotifyRoleID string           `yaml:"notifyRoleId"`
+	Bot          DiscordBotConfig `yaml:"bot"`
 }
 
 type DatabaseConfig struct {

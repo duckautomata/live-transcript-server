@@ -94,6 +94,13 @@ func main() {
 	// Start background tasks
 	app.StartMaintenanceLoop()
 
+	// Start Discord bot (no-op if not configured)
+	if app.DiscordBot != nil {
+		if err := app.DiscordBot.Start(); err != nil {
+			slog.Error("failed to start discord bot", "func", "main", "err", err)
+		}
+	}
+
 	corsHandler := internal.CorsMiddleware(mux)
 	server := &http.Server{
 		Addr:              ":8080",
@@ -128,6 +135,13 @@ func main() {
 	// Shutdown HTTP Server first
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("failed to shutdown HTTP server", "func", "main", "err", err)
+	}
+
+	// Close Discord bot connection
+	if app.DiscordBot != nil {
+		if err := app.DiscordBot.Close(); err != nil {
+			slog.Error("failed to close discord bot", "func", "main", "err", err)
+		}
 	}
 
 	// Close App and DB

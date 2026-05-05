@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"live-transcript-server/internal/storage"
 
@@ -172,17 +173,19 @@ type ChannelState struct {
 
 // App holds the application-wide dependencies and configuration.
 type App struct {
-	ApiKey      string
-	DB          *sql.DB
-	Upgrader    websocket.Upgrader
-	Channels    map[string]*ChannelState
-	MaxConn     int
-	MaxClipSize int
-	TempDir     string
-	Storage     storage.Storage
-	Discord     *DiscordClient
-	Version     string
-	BuildTime   string
+	ApiKey            string
+	DB                *sql.DB
+	Upgrader          websocket.Upgrader
+	Channels          map[string]*ChannelState
+	MaxConn           int
+	MaxClipSize       int
+	TempDir           string
+	Storage           storage.Storage
+	Discord           *DiscordClient
+	DiscordBot        *DiscordBot
+	IncomingStreamTTL time.Duration
+	Version           string
+	BuildTime         string
 
 	ctx    context.Context
 	cancel context.CancelFunc

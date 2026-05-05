@@ -44,6 +44,8 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /{channel}/media/{streamID}/{id}", app.apiKeyMiddleware(app.mediaHandler))
 	mux.HandleFunc("GET /{channel}/statuscheck", app.apiKeyMiddleware(app.statuscheckHandler))
 	mux.HandleFunc("POST /status", app.apiKeyMiddleware(app.workerStatusHandler))
+	mux.HandleFunc("GET /{channel}/incoming", app.apiKeyMiddleware(app.getIncomingHandler))
+	mux.HandleFunc("DELETE /{channel}/incoming", app.apiKeyMiddleware(app.deleteIncomingHandler))
 
 	// Public routes
 	mux.HandleFunc("GET /status", app.getStatusHandler)
@@ -104,6 +106,11 @@ func CorsMiddleware(next http.Handler) http.Handler {
 }
 
 func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App {
+	ttlMinutes := config.Discord.Bot.StreamTTLMinutes
+	if ttlMinutes <= 0 {
+		ttlMinutes = 24 * 60 // 24 hours
+	}
+
 	app := &App{
 		ApiKey: config.Credentials.ApiKey,
 		DB:     db,
@@ -113,15 +120,22 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 			EnableCompression: true,
 			CheckOrigin:       func(r *http.Request) bool { return true },
 		},
-		Channels:    make(map[string]*ChannelState),
-		MaxConn:     10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
-		MaxClipSize: 40,
-		TempDir:     tempDir,
-		Discord:     NewDiscordClient(config.Discord, version),
-		Version:     version,
-		BuildTime:   buildTime,
+		Channels:          make(map[string]*ChannelState),
+		MaxConn:           10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
+		MaxClipSize:       40,
+		TempDir:           tempDir,
+		Discord:           NewDiscordClient(config.Discord, version),
+		IncomingStreamTTL: time.Duration(ttlMinutes) * time.Minute,
+		Version:           version,
+		BuildTime:         buildTime,
 	}
 	app.ctx, app.cancel = context.WithCancel(context.Background())
+
+	bot, err := NewDiscordBot(config.Discord.Bot, app)
+	if err != nil {
+		slog.Error("failed to construct discord bot", "func", "NewApp", "err", err)
+	}
+	app.DiscordBot = bot
 
 	for _, cc := range config.Channels {
 		baseFolder := filepath.Join(tempDir, cc.Name)
@@ -136,7 +150,6 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 	}
 
 	var store storage.Storage
-	var err error
 	ctx := context.Background()
 
 	if config.Storage.Type == "r2" {
@@ -929,6 +942,81 @@ func (app *App) getStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// IncomingStreamsResponse is returned by GET /{channel}/incoming.
+type IncomingStreamsResponse struct {
+	URLs []string `json:"urls"`
+}
+
+// getIncomingHandler returns the queued Pingcord URLs for a channel without
+// removing them. The worker calls DELETE /{channel}/incoming once it's done
+// with a URL.
+func (app *App) getIncomingHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "getIncomingHandler", "key", key)
+		return
+	}
+
+	urls, err := app.GetIncomingStreams(r.Context(), cs.Key)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to get incoming streams: %w", err), r.URL.Path)
+		slog.Error("failed to get incoming streams", "key", cs.Key, "func", "getIncomingHandler", "err", err)
+		return
+	}
+
+	if urls == nil {
+		urls = []string{}
+	}
+	resp := IncomingStreamsResponse{URLs: urls}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Error("failed to encode incoming response", "key", cs.Key, "func", "getIncomingHandler", "err", err)
+	}
+}
+
+// deleteIncomingHandler removes a single URL from the incoming queue. The URL
+// is read from the `url` query parameter so the client doesn't need a JSON
+// body. Returns 204 on success, 404 if the URL was not queued.
+func (app *App) deleteIncomingHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "deleteIncomingHandler", "key", key)
+		return
+	}
+
+	url := r.URL.Query().Get("url")
+	if url == "" {
+		http.Error(w, "Missing required parameter: url", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
+
+	rowsAffected, err := app.DeleteIncomingStream(r.Context(), cs.Key, url)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to delete incoming stream: %w", err), r.URL.Path)
+		slog.Error("failed to delete incoming stream", "key", cs.Key, "func", "deleteIncomingHandler", "url", url, "err", err)
+		return
+	}
+
+	if rowsAffected == 0 {
+		http.Error(w, "URL not queued", http.StatusNotFound)
+		return
+	}
+
+	slog.Info("incoming stream removed", "key", cs.Key, "func", "deleteIncomingHandler", "url", url)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (app *App) statuscheckHandler(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("channel")
 	cs, ok := app.Channels[key]
@@ -1612,6 +1700,37 @@ func (app *App) StartMaintenanceLoop() {
 			}
 		}
 	}()
+
+	app.wg.Add(1)
+	go func() {
+		defer app.wg.Done()
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		app.cleanupIncomingStreams()
+		for {
+			select {
+			case <-ticker.C:
+				app.cleanupIncomingStreams()
+			case <-app.ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// cleanupIncomingStreams removes Pingcord-queued URLs that have aged past the
+// configured TTL. This is the safety net for the case where a stream URL was
+// announced but no worker ever consumed it.
+func (app *App) cleanupIncomingStreams() {
+	cutoff := time.Now().Add(-app.IncomingStreamTTL).Unix()
+	removed, err := app.CleanupExpiredIncomingStreams(context.Background(), cutoff)
+	if err != nil {
+		slog.Error("failed to cleanup expired incoming streams", "func", "cleanupIncomingStreams", "err", err)
+		return
+	}
+	if removed > 0 {
+		slog.Info("removed expired incoming streams", "func", "cleanupIncomingStreams", "count", removed, "ttl", app.IncomingStreamTTL.String())
+	}
 }
 
 // checkWorkerStatus logs an error if any workers have been inactive for more than 5 minutes.
