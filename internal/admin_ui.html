@@ -535,9 +535,15 @@
 
 <script>
 (() => {
-  const channel = decodeURIComponent(window.location.pathname.split('/')[1] || '');
+  // Compute paths from window.location so that we work correctly when the
+  // server is mounted under a sub-path by a reverse proxy
+  // (e.g. https://host/server/{channel}/ui). Strip the trailing /ui from the
+  // pathname to get the per-channel base, then derive the channel name from
+  // its last segment. All API calls hit `${apiBase}/admin/...`.
+  const apiBase = window.location.pathname.replace(/\/ui\/?$/, '');
+  const channel = decodeURIComponent(apiBase.split('/').pop() || '');
   const storageKey = `lt-admin-key:${channel}`;
-  const REFRESH_MS = 30000;
+  const REFRESH_MS = 5000;
 
   // ---------- DOM ----------
   const $ = (id) => document.getElementById(id);
@@ -603,15 +609,16 @@
     if (state === 'ok') {
       authStatusEl.textContent = 'authenticated';
       authStatusEl.classList.add('ok');
-      logoutBtn.style.display = '';
     } else if (state === 'bad') {
       authStatusEl.textContent = 'invalid key';
       authStatusEl.classList.add('bad');
-      logoutBtn.style.display = '';
     } else {
       authStatusEl.textContent = 'unauthenticated';
-      logoutBtn.style.display = 'none';
     }
+    // Always offer Logout when there's a stored key, even if we haven't
+    // validated it yet — otherwise a 404 (wrong base path, missing channel)
+    // leaves the user with no way to clear a bad saved key from the UI.
+    logoutBtn.style.display = getKey() ? '' : 'none';
   }
 
   function showAuthModal() {
@@ -624,20 +631,52 @@
   }
   function hideAuthModal() { authModal.classList.remove('show'); }
 
-  authForm.addEventListener('submit', (e) => {
+  authForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const k = authInput.value.trim();
     if (!k) return;
     setKey(k, authSaveCheckbox.checked);
-    hideAuthModal();
-    refresh();
+    // Verify the key against /info BEFORE closing the modal. If the request
+    // fails for any reason (404 on a wrong base path, network down, etc.)
+    // the modal stays open so the user isn't trapped on a blank page.
+    try {
+      const info = await api('GET', '/info');
+      setAuthState('ok');
+      render(info);
+      hasLoadedOnce = true;
+      hideAuthModal();
+    } catch (err) {
+      // 403 is already handled inside api() (it re-shows the modal). For any
+      // other error the modal is still up, so we just surface a toast.
+      if (err.message !== 'forbidden' && err.message !== 'not-authenticated') {
+        toast(`Login failed: ${err.message}`, 'error');
+      }
+    }
   });
 
   logoutBtn.addEventListener('click', () => {
     clearKey();
     setAuthState(null);
+    clearRenderedState();
     showAuthModal();
   });
+
+  // Reset every data field back to its initial placeholder so logging out
+  // doesn't leave the previous channel's state visible behind the login modal.
+  function clearRenderedState() {
+    workerStatusEl.innerHTML = '<span class="dot offline"></span>—';
+    workerMetaEl.textContent = '…';
+    clientCountEl.textContent = '—';
+    serverVersionEl.textContent = '—';
+    serverBuildEl.textContent = '…';
+    streamsCountEl.textContent = '0 stored';
+    streamsBodyEl.innerHTML = '<div class="empty">Login to view</div>';
+    incomingCountEl.textContent = '0 queued';
+    incomingBodyEl.innerHTML = '<div class="empty">Login to view</div>';
+    restartStatusEl.textContent = 'no restart pending';
+    cancelRestartBtn.style.display = 'none';
+    hasLoadedOnce = false;
+  }
 
   // ---------- Confirm ----------
   // Returns a Promise that resolves to { ok: boolean, checked: boolean }.
@@ -686,10 +725,10 @@
   }
 
   // ---------- API ----------
-  async function api(method, path, body) {
+  async function api(method, route, body) {
     const key = getKey();
     if (!key) throw new Error('not-authenticated');
-    const res = await fetch(`/${encodeURIComponent(channel)}/admin${path}`, {
+    const res = await fetch(`${apiBase}/admin${route}`, {
       method,
       headers: {
         'X-Admin-Key': key,
@@ -821,6 +860,7 @@
     finally { btn.disabled = false; inFlight--; }
   }
 
+  let hasLoadedOnce = false;
   async function refresh() {
     if (!getKey()) {
       setAuthState(null);
@@ -831,9 +871,14 @@
       const info = await api('GET', '/info');
       setAuthState('ok');
       render(info);
+      hasLoadedOnce = true;
     } catch (e) {
       if (e.message === 'forbidden' || e.message === 'not-authenticated') return;
       toast(`Refresh failed: ${e.message}`, 'error');
+      // If we've never successfully loaded (e.g. saved key + wrong base path
+      // → 404 on first try), surface the login modal so the user can either
+      // re-enter a key or use Logout to clear the bad saved one.
+      if (!hasLoadedOnce) showAuthModal();
     }
   }
 
