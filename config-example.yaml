@@ -33,10 +33,14 @@ channels:
   # numPastStreams is the number of past streams to keep.
   # If numPastStreams is 0, it will keep only the current stream.
   # Note: if using R2, numPastStreams is ignored and the bucket's lifecycle policy is used instead.
+  # adminKey gates the per-channel admin UI (/{name}/ui) and admin endpoints
+  # (/{name}/admin/*). Leave empty to disable admin operations for the channel.
   - name: key1
     numPastStreams: 5
+    adminKey: ""
   - name: key2
     numPastStreams: 0
+    adminKey: ""
 
 # Discord configuration used to send system notifications.
 # Optional. If left empty, no notifications will be sent.

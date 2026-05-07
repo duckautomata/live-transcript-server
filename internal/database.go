@@ -112,6 +112,16 @@ func InitDB(path string, config DatabaseConfig) (*sql.DB, error) {
 		return nil, fmt.Errorf("error creating incoming_streams table: %w", err)
 	}
 
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS worker_restart_requests (
+		channel_key TEXT PRIMARY KEY,
+		requested_at INTEGER NOT NULL
+	);
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("error creating worker_restart_requests table: %w", err)
+	}
+
 	// Connection pool settings
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(25)
@@ -484,6 +494,21 @@ func (a *App) UpsertWorkerStatus(ctx context.Context, key, version, buildTime st
 	return tx.Commit()
 }
 
+// GetWorkerStatusByKey returns the worker status for a single channel, or nil
+// if no status row exists yet.
+func (a *App) GetWorkerStatusByKey(ctx context.Context, channelKey string) (*WorkerStatus, error) {
+	row := a.DB.QueryRowContext(ctx, "SELECT channel_key, worker_version, worker_build_time, last_seen FROM worker_status WHERE channel_key = ?", channelKey)
+	var s WorkerStatus
+	err := row.Scan(&s.ChannelKey, &s.WorkerVersion, &s.WorkerBuildTime, &s.LastSeen)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 // GetAllWorkerStatus retrieves the status of all workers.
 func (a *App) GetAllWorkerStatus(ctx context.Context) ([]WorkerStatus, error) {
 	rows, err := a.DB.QueryContext(ctx, "SELECT channel_key, worker_version, worker_build_time, last_seen FROM worker_status ORDER BY last_seen DESC")
@@ -560,6 +585,52 @@ func (a *App) DeleteIncomingStream(ctx context.Context, channelKey, url string) 
 // CleanupExpiredIncomingStreams deletes incoming stream entries whose received_at is older than the cutoff.
 func (a *App) CleanupExpiredIncomingStreams(ctx context.Context, cutoff int64) (int64, error) {
 	res, err := a.DB.ExecContext(ctx, "DELETE FROM incoming_streams WHERE received_at < ?", cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ClearIncomingStreams removes every queued URL for a channel. Used by the
+// admin "stop current stream" action.
+func (a *App) ClearIncomingStreams(ctx context.Context, channelKey string) (int64, error) {
+	res, err := a.DB.ExecContext(ctx, "DELETE FROM incoming_streams WHERE channel_key = ?", channelKey)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// UpsertRestartRequest marks the given channel as needing a worker restart by
+// recording the request timestamp. Repeated calls overwrite the timestamp so
+// the worker always sees the most recent request.
+func (a *App) UpsertRestartRequest(ctx context.Context, channelKey string, requestedAt int64) error {
+	_, err := a.DB.ExecContext(ctx, `
+	INSERT INTO worker_restart_requests (channel_key, requested_at)
+	VALUES (?, ?)
+	ON CONFLICT(channel_key) DO UPDATE SET requested_at = excluded.requested_at;
+	`, channelKey, requestedAt)
+	return err
+}
+
+// GetRestartRequest returns the requested_at timestamp for a pending restart,
+// or 0 if none is pending.
+func (a *App) GetRestartRequest(ctx context.Context, channelKey string) (int64, error) {
+	var requestedAt int64
+	err := a.DB.QueryRowContext(ctx, "SELECT requested_at FROM worker_restart_requests WHERE channel_key = ?", channelKey).Scan(&requestedAt)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return requestedAt, nil
+}
+
+// DeleteRestartRequest clears the pending restart for a channel. Returns the
+// number of rows deleted (1 if cleared, 0 if no request was pending).
+func (a *App) DeleteRestartRequest(ctx context.Context, channelKey string) (int64, error) {
+	res, err := a.DB.ExecContext(ctx, "DELETE FROM worker_restart_requests WHERE channel_key = ?", channelKey)
 	if err != nil {
 		return 0, err
 	}

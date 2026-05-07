@@ -163,6 +163,7 @@ type EventPastStreamsData struct {
 // ChannelState holds the state and connections for a specific channel.
 type ChannelState struct {
 	Key               string
+	AdminKey          string
 	ClientsLock       sync.Mutex
 	Clients           []*Client
 	ClientConnections int

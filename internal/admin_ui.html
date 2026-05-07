@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Admin · Live Transcript</title>
+<style>
+  :root {
+    /* Dark theme (default). Overridden by the light-mode media query below
+       when the user's OS reports prefers-color-scheme: light. */
+    --bg: #0b1220;
+    --bg-elev: #131c2e;
+    --bg-elev-2: #1a2538;
+    --border: #243049;
+    --border-strong: #364866;
+    --text: #e6eaf2;
+    --text-muted: #8b95a8;
+    --text-faint: #5b6679;
+    --accent: #38bdf8;
+    --accent-hover: #7dd3fc;
+    --on-accent: #001624;
+    --success: #34d399;
+    --danger: #f87171;
+    --danger-hover: #fca5a5;
+    --on-danger: #1a0606;
+    --warning: #fbbf24;
+    --shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    --radius: 10px;
+    --radius-sm: 6px;
+    --gap: 16px;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f7fa;
+      --bg-elev: #ffffff;
+      --bg-elev-2: #eef1f5;
+      --border: #e1e6ec;
+      --border-strong: #cbd2db;
+      --text: #1a2538;
+      --text-muted: #5b6679;
+      --text-faint: #8b95a8;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --on-accent: #ffffff;
+      --success: #059669;
+      --danger: #dc2626;
+      --danger-hover: #b91c1c;
+      --on-danger: #ffffff;
+      --warning: #d97706;
+      --shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  code, .mono {
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+    font-size: 0.9em;
+  }
+
+  .container {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+  }
+
+  /* Header */
+  header.page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 28px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .title-block h1 {
+    margin: 0;
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .title-block .subtitle {
+    color: var(--text-muted);
+    font-size: 13px;
+    margin-top: 2px;
+  }
+  .auth-strip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .auth-strip .auth-status {
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 4px 10px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+  .auth-strip .auth-status.ok { color: var(--success); border-color: rgba(52, 211, 153, 0.3); }
+  .auth-strip .auth-status.bad { color: var(--danger); border-color: rgba(248, 113, 113, 0.3); }
+
+  /* Stat cards row */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: var(--gap);
+    margin-bottom: var(--gap);
+  }
+  .stat {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .stat .label {
+    color: var(--text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
+  }
+  .stat .value {
+    font-size: 20px;
+    font-weight: 600;
+  }
+  .stat .meta {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-top: 4px;
+  }
+  .stat .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .stat .dot.online { background: var(--success); box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.15); }
+  .stat .dot.offline { background: var(--danger); }
+
+  /* Cards */
+  .card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: var(--gap);
+    overflow: hidden;
+  }
+  .card-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .card-header h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+  .card-header .badge {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .restart-status-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-body { padding: 8px 0; }
+
+  /* List rows */
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .row:last-child { border-bottom: none; }
+  .row:hover { background: var(--bg-elev-2); }
+  .row .row-main {
+    flex: 1;
+    min-width: 0;
+  }
+  .row .row-title {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row .row-meta {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row .row-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .empty {
+    padding: 24px 20px;
+    color: var(--text-muted);
+    text-align: center;
+    font-size: 13px;
+  }
+
+  /* Live badge */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .pill.live { background: rgba(248, 113, 113, 0.12); color: var(--danger); border: 1px solid rgba(248, 113, 113, 0.3); }
+  .pill.live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--danger); animation: pulse 1.4s infinite; }
+  .pill.past { background: rgba(139, 149, 168, 0.12); color: var(--text-muted); border: 1px solid var(--border-strong); }
+  .pill.warning { background: rgba(251, 191, 36, 0.12); color: var(--warning); border: 1px solid rgba(251, 191, 36, 0.3); }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* Buttons */
+  button, .btn {
+    font: inherit;
+    cursor: pointer;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-elev-2);
+    color: var(--text);
+    padding: 7px 14px;
+    border-radius: var(--radius-sm);
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  button:hover:not(:disabled), .btn:hover:not(:disabled) {
+    background: var(--bg-elev);
+    border-color: var(--accent);
+  }
+  button:disabled, .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+  button.danger { background: transparent; color: var(--danger); border-color: rgba(248, 113, 113, 0.4); }
+  button.danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.1); color: var(--danger-hover); border-color: var(--danger); }
+  button.danger-solid { background: var(--danger); color: var(--on-danger); border-color: var(--danger); font-weight: 600; }
+  button.danger-solid:hover:not(:disabled) { background: var(--danger-hover); border-color: var(--danger-hover); }
+  button.ghost { background: transparent; border-color: transparent; color: var(--text-muted); padding: 4px 8px; }
+  button.ghost:hover:not(:disabled) { color: var(--text); background: var(--bg-elev-2); border-color: var(--border); }
+  button.small { padding: 4px 10px; font-size: 12px; }
+
+  /* Add-incoming form */
+  .add-row {
+    display: flex;
+    gap: 8px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-elev-2);
+  }
+  .add-row input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    font: inherit;
+  }
+  .add-row input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  /* Worker control card body */
+  .control-body {
+    padding: 16px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+  .control-body .restart-info {
+    flex: 1;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  /* Modal */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    backdrop-filter: blur(2px);
+  }
+  .modal-backdrop.show { display: flex; }
+  .modal {
+    background: var(--bg-elev);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    width: min(440px, 92vw);
+    padding: 24px;
+  }
+  .modal h3 { margin: 0 0 8px; font-size: 16px; }
+  .modal p { color: var(--text-muted); margin: 0 0 20px; }
+  .modal input[type="password"], .modal input[type="text"], .modal input[type="url"] {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    font: inherit;
+    margin-bottom: 16px;
+  }
+  .modal input:focus { outline: none; border-color: var(--accent); }
+  .modal-checkbox {
+    display: none;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    margin-bottom: 16px;
+    cursor: pointer;
+  }
+  .modal-checkbox.show { display: flex; }
+  .modal-checkbox input { margin-top: 3px; flex-shrink: 0; }
+  .modal-checkbox .check-text { flex: 1; }
+  .modal-checkbox .check-text strong { display: block; font-size: 13px; }
+  .modal-checkbox .check-text .hint { display: block; color: var(--text-muted); font-size: 12px; margin-top: 4px; }
+  .modal .actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  /* Toasts */
+  .toasts {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 200;
+    pointer-events: none;
+  }
+  .toast {
+    background: var(--bg-elev);
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm);
+    padding: 10px 16px;
+    box-shadow: var(--shadow);
+    pointer-events: auto;
+    min-width: 240px;
+    animation: slidein 0.18s ease-out;
+  }
+  .toast.success { border-left-color: var(--success); }
+  .toast.error { border-left-color: var(--danger); }
+  @keyframes slidein {
+    from { opacity: 0; transform: translateX(20px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  /* Utility */
+  .url-text {
+    word-break: break-all;
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+  }
+  .stream-id { color: var(--text-faint); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+
+  /* Responsive */
+  @media (max-width: 600px) {
+    .container { padding: 20px 14px 80px; }
+    .row { flex-wrap: wrap; }
+    .row .row-actions { width: 100%; justify-content: flex-end; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <header class="page-header">
+    <div class="title-block">
+      <h1 id="channel-name">…</h1>
+      <div class="subtitle">Live transcript admin panel</div>
+    </div>
+    <div class="auth-strip">
+      <span id="auth-status" class="auth-status">unauthenticated</span>
+      <button id="logout-btn" class="ghost small" style="display:none">Logout</button>
+    </div>
+  </header>
+
+  <section class="stats">
+    <div class="stat">
+      <div class="label">Worker</div>
+      <div class="value" id="worker-status"><span class="dot offline"></span>—</div>
+      <div class="meta" id="worker-meta">…</div>
+    </div>
+    <div class="stat">
+      <div class="label">Connected clients</div>
+      <div class="value" id="client-count">—</div>
+      <div class="meta">via WebSocket</div>
+    </div>
+    <div class="stat">
+      <div class="label">Server</div>
+      <div class="value mono" id="server-version">—</div>
+      <div class="meta" id="server-build">…</div>
+    </div>
+  </section>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>Streams</h2>
+      <span class="badge" id="streams-count">0 stored</span>
+    </div>
+    <div class="card-body" id="streams-body">
+      <div class="empty">Loading…</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>Incoming queue</h2>
+      <span class="badge" id="incoming-count">0 queued</span>
+    </div>
+    <div class="card-body" id="incoming-body">
+      <div class="empty">Loading…</div>
+    </div>
+    <form class="add-row" id="add-incoming-form">
+      <input type="url" id="add-incoming-input" placeholder="https://twitch.tv/… or https://www.youtube.com/…" required />
+      <button type="submit" class="primary">Add</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>Worker controls</h2>
+      <div class="restart-status-wrap">
+        <span class="badge" id="restart-status">no restart pending</span>
+        <button id="cancel-restart-btn" class="ghost small" style="display:none" type="button">Cancel</button>
+      </div>
+    </div>
+    <div class="control-body">
+      <div class="restart-info">
+        <strong>Restart</strong> sets a flag the worker reads on its next poll. Use it to recycle without affecting the queue.
+        <br/>
+        <strong>Stop current stream</strong> clears the entire queue <em>and</em> sets the restart flag. Use when you want the worker to stop whatever it's doing right now.
+      </div>
+      <button id="restart-btn" class="primary">Restart worker</button>
+      <button id="stop-btn" class="danger-solid">Stop current stream</button>
+    </div>
+  </div>
+</div>
+
+<!-- Auth modal -->
+<div class="modal-backdrop" id="auth-modal">
+  <div class="modal">
+    <h3>Login</h3>
+    <p>Enter the admin key for this channel.</p>
+    <form id="auth-form">
+      <input type="password" id="auth-input" placeholder="Admin key" autocomplete="off" required autofocus />
+      <label class="modal-checkbox show" id="auth-save-row">
+        <input type="checkbox" id="auth-save-checkbox" checked />
+        <span class="check-text">
+          <strong>Save key in this browser</strong>
+          <span class="hint">Skip the login next time you visit this page on this device. Uncheck on a shared computer.</span>
+        </span>
+      </label>
+      <div class="actions">
+        <button type="submit" class="primary">Login</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Confirm modal -->
+<div class="modal-backdrop" id="confirm-modal">
+  <div class="modal">
+    <h3 id="confirm-title">Are you sure?</h3>
+    <p id="confirm-message">This action cannot be undone.</p>
+    <label class="modal-checkbox" id="confirm-checkbox-row">
+      <input type="checkbox" id="confirm-checkbox" />
+      <span class="check-text">
+        <strong id="confirm-checkbox-label"></strong>
+        <span class="hint" id="confirm-checkbox-hint"></span>
+      </span>
+    </label>
+    <div class="actions">
+      <button id="confirm-cancel" type="button">Cancel</button>
+      <button id="confirm-ok" type="button" class="danger-solid">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+(() => {
+  const channel = decodeURIComponent(window.location.pathname.split('/')[1] || '');
+  const storageKey = `lt-admin-key:${channel}`;
+  const REFRESH_MS = 30000;
+
+  // ---------- DOM ----------
+  const $ = (id) => document.getElementById(id);
+  const channelNameEl = $('channel-name');
+  const authStatusEl = $('auth-status');
+  const logoutBtn = $('logout-btn');
+  const workerStatusEl = $('worker-status');
+  const workerMetaEl = $('worker-meta');
+  const clientCountEl = $('client-count');
+  const serverVersionEl = $('server-version');
+  const serverBuildEl = $('server-build');
+  const streamsCountEl = $('streams-count');
+  const streamsBodyEl = $('streams-body');
+  const incomingCountEl = $('incoming-count');
+  const incomingBodyEl = $('incoming-body');
+  const restartStatusEl = $('restart-status');
+  const restartBtn = $('restart-btn');
+  const cancelRestartBtn = $('cancel-restart-btn');
+  const stopBtn = $('stop-btn');
+  const addIncomingForm = $('add-incoming-form');
+  const addIncomingInput = $('add-incoming-input');
+  const authModal = $('auth-modal');
+  const authForm = $('auth-form');
+  const authInput = $('auth-input');
+  const authSaveCheckbox = $('auth-save-checkbox');
+  const confirmModal = $('confirm-modal');
+  const confirmTitleEl = $('confirm-title');
+  const confirmMessageEl = $('confirm-message');
+  const confirmOkBtn = $('confirm-ok');
+  const confirmCancelBtn = $('confirm-cancel');
+  const confirmCheckboxRow = $('confirm-checkbox-row');
+  const confirmCheckboxEl = $('confirm-checkbox');
+  const confirmCheckboxLabel = $('confirm-checkbox-label');
+  const confirmCheckboxHint = $('confirm-checkbox-hint');
+  const toastsEl = $('toasts');
+
+  channelNameEl.textContent = channel;
+  document.title = `${channel} · admin`;
+
+  // ---------- Auth ----------
+  // The key is held either in localStorage (persisted across reloads) or in
+  // an in-memory sessionKey variable (cleared on reload). The login modal
+  // checkbox decides which on submit. sessionKey wins if both are set so the
+  // most recent explicit login takes precedence.
+  let sessionKey = '';
+  function getKey() { return sessionKey || localStorage.getItem(storageKey) || ''; }
+  function setKey(k, persist) {
+    if (persist) {
+      sessionKey = '';
+      localStorage.setItem(storageKey, k);
+    } else {
+      sessionKey = k;
+      localStorage.removeItem(storageKey);
+    }
+  }
+  function clearKey() {
+    sessionKey = '';
+    localStorage.removeItem(storageKey);
+  }
+
+  function setAuthState(state) {
+    authStatusEl.classList.remove('ok', 'bad');
+    if (state === 'ok') {
+      authStatusEl.textContent = 'authenticated';
+      authStatusEl.classList.add('ok');
+      logoutBtn.style.display = '';
+    } else if (state === 'bad') {
+      authStatusEl.textContent = 'invalid key';
+      authStatusEl.classList.add('bad');
+      logoutBtn.style.display = '';
+    } else {
+      authStatusEl.textContent = 'unauthenticated';
+      logoutBtn.style.display = 'none';
+    }
+  }
+
+  function showAuthModal() {
+    authInput.value = '';
+    // Default the save-checkbox back to checked every time we re-prompt so
+    // the choice doesn't silently flip on the user.
+    authSaveCheckbox.checked = true;
+    authModal.classList.add('show');
+    setTimeout(() => authInput.focus(), 50);
+  }
+  function hideAuthModal() { authModal.classList.remove('show'); }
+
+  authForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const k = authInput.value.trim();
+    if (!k) return;
+    setKey(k, authSaveCheckbox.checked);
+    hideAuthModal();
+    refresh();
+  });
+
+  logoutBtn.addEventListener('click', () => {
+    clearKey();
+    setAuthState(null);
+    showAuthModal();
+  });
+
+  // ---------- Confirm ----------
+  // Returns a Promise that resolves to { ok: boolean, checked: boolean }.
+  // `checked` is meaningful only when the caller passes a `checkbox` config.
+  let confirmResolver = null;
+  function confirmAction({ title = 'Are you sure?', message = 'This cannot be undone.', okLabel = 'Confirm', danger = true, checkbox = null }) {
+    return new Promise((resolve) => {
+      confirmTitleEl.textContent = title;
+      confirmMessageEl.textContent = message;
+      confirmOkBtn.textContent = okLabel;
+      confirmOkBtn.className = danger ? 'danger-solid' : 'primary';
+      if (checkbox) {
+        confirmCheckboxRow.classList.add('show');
+        confirmCheckboxEl.checked = !!checkbox.defaultChecked;
+        confirmCheckboxLabel.textContent = checkbox.label || '';
+        confirmCheckboxHint.textContent = checkbox.hint || '';
+      } else {
+        confirmCheckboxRow.classList.remove('show');
+        confirmCheckboxEl.checked = false;
+      }
+      confirmModal.classList.add('show');
+      confirmResolver = resolve;
+    });
+  }
+  function closeConfirm(ok) {
+    const checked = ok && confirmCheckboxRow.classList.contains('show') && confirmCheckboxEl.checked;
+    confirmModal.classList.remove('show');
+    if (confirmResolver) confirmResolver({ ok: !!ok, checked });
+    confirmResolver = null;
+  }
+  confirmOkBtn.addEventListener('click', () => closeConfirm(true));
+  confirmCancelBtn.addEventListener('click', () => closeConfirm(false));
+  confirmModal.addEventListener('click', (e) => { if (e.target === confirmModal) closeConfirm(false); });
+
+  // ---------- Toasts ----------
+  function toast(message, kind = '') {
+    const el = document.createElement('div');
+    el.className = `toast ${kind}`;
+    el.textContent = message;
+    toastsEl.appendChild(el);
+    setTimeout(() => {
+      el.style.transition = 'opacity 0.3s';
+      el.style.opacity = '0';
+      setTimeout(() => el.remove(), 300);
+    }, 3500);
+  }
+
+  // ---------- API ----------
+  async function api(method, path, body) {
+    const key = getKey();
+    if (!key) throw new Error('not-authenticated');
+    const res = await fetch(`/${encodeURIComponent(channel)}/admin${path}`, {
+      method,
+      headers: {
+        'X-Admin-Key': key,
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {})
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    if (res.status === 403 || res.status === 401) {
+      setAuthState('bad');
+      showAuthModal();
+      throw new Error('forbidden');
+    }
+    if (res.status === 204) return null;
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${res.status} ${res.statusText}: ${text}`);
+    }
+    const ct = res.headers.get('Content-Type') || '';
+    if (ct.includes('application/json')) return res.json();
+    return res.text();
+  }
+
+  // ---------- Render ----------
+  function timeAgo(unix) {
+    if (!unix) return 'never';
+    const diff = Math.max(0, Math.floor(Date.now() / 1000) - unix);
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+  }
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function render(info) {
+    // Worker
+    if (info.worker) {
+      const online = info.worker.isActive;
+      workerStatusEl.innerHTML = `<span class="dot ${online ? 'online' : 'offline'}"></span>${online ? 'Online' : 'Offline'}`;
+      workerMetaEl.innerHTML = `<span class="mono">${escapeHtml(info.worker.workerVersion || '—')}</span> · last seen ${timeAgo(info.worker.lastSeen)}`;
+    } else {
+      workerStatusEl.innerHTML = `<span class="dot offline"></span>Unknown`;
+      workerMetaEl.textContent = 'no status reported';
+    }
+
+    // Clients
+    clientCountEl.textContent = String(info.connectedClients ?? 0);
+
+    // Server
+    serverVersionEl.textContent = info.server?.version || '—';
+    serverBuildEl.textContent = info.server?.buildTime || '';
+
+    // Streams
+    const streams = info.streams || [];
+    streamsCountEl.textContent = `${streams.length} stored`;
+    if (streams.length === 0) {
+      streamsBodyEl.innerHTML = '<div class="empty">No streams yet.</div>';
+    } else {
+      streamsBodyEl.innerHTML = streams.map(s => {
+        const isLive = !!s.isLive;
+        const startedAgo = s.startTime ? timeAgo(parseInt(s.startTime, 10)) : '—';
+        return `
+          <div class="row">
+            <div class="row-main">
+              <div class="row-title">
+                ${isLive ? '<span class="pill live">Live</span> ' : '<span class="pill past">Past</span> '}
+                ${escapeHtml(s.streamTitle || '(untitled)')}
+              </div>
+              <div class="row-meta">
+                <span class="stream-id">${escapeHtml(s.streamId)}</span>
+                · started ${startedAgo}
+                · ${escapeHtml(s.mediaType || 'none')}
+              </div>
+            </div>
+            <div class="row-actions">
+              <button class="danger small" data-stream-id="${escapeHtml(s.streamId)}" data-stream-title="${escapeHtml(s.streamTitle || '')}" data-was-live="${isLive}">Delete</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+      streamsBodyEl.querySelectorAll('button[data-stream-id]').forEach(btn => {
+        btn.addEventListener('click', () => onDeleteStream(btn.dataset.streamId, btn.dataset.streamTitle, btn.dataset.wasLive === 'true'));
+      });
+    }
+
+    // Incoming
+    const urls = info.incomingUrls || [];
+    incomingCountEl.textContent = `${urls.length} queued`;
+    if (urls.length === 0) {
+      incomingBodyEl.innerHTML = '<div class="empty">Nothing queued.</div>';
+    } else {
+      incomingBodyEl.innerHTML = urls.map(u => `
+        <div class="row">
+          <div class="row-main">
+            <div class="url-text">${escapeHtml(u)}</div>
+          </div>
+          <div class="row-actions">
+            <button class="danger small" data-url="${escapeHtml(u)}">Remove</button>
+          </div>
+        </div>
+      `).join('');
+      incomingBodyEl.querySelectorAll('button[data-url]').forEach(btn => {
+        btn.addEventListener('click', () => onRemoveIncoming(btn.dataset.url));
+      });
+    }
+
+    // Restart status
+    if (info.restartPending) {
+      restartStatusEl.innerHTML = '<span class="pill warning">Restart pending</span>';
+      cancelRestartBtn.style.display = '';
+    } else {
+      restartStatusEl.textContent = 'no restart pending';
+      cancelRestartBtn.style.display = 'none';
+    }
+  }
+
+  // ---------- Actions ----------
+  let inFlight = 0;
+  async function withButton(btn, fn) {
+    btn.disabled = true;
+    inFlight++;
+    try { await fn(); }
+    catch (e) {
+      if (e.message !== 'forbidden' && e.message !== 'not-authenticated') {
+        toast(e.message || 'Request failed', 'error');
+      }
+    }
+    finally { btn.disabled = false; inFlight--; }
+  }
+
+  async function refresh() {
+    if (!getKey()) {
+      setAuthState(null);
+      showAuthModal();
+      return;
+    }
+    try {
+      const info = await api('GET', '/info');
+      setAuthState('ok');
+      render(info);
+    } catch (e) {
+      if (e.message === 'forbidden' || e.message === 'not-authenticated') return;
+      toast(`Refresh failed: ${e.message}`, 'error');
+    }
+  }
+
+  async function onDeleteStream(streamID, title, wasLive) {
+    const result = await confirmAction({
+      title: wasLive ? 'Delete live stream?' : 'Delete stream?',
+      message: `${wasLive ? 'This stream is currently live. ' : ''}Removes "${title || streamID}" and its transcript from the server. Media files are kept by default.`,
+      okLabel: 'Delete',
+      checkbox: {
+        label: 'Also delete media files from storage',
+        hint: 'Permanently removes audio, video, clips, and frame files for this stream.',
+        defaultChecked: false,
+      },
+    });
+    if (!result.ok) return;
+    const qs = result.checked ? '?media=true' : '';
+    await withButton(document.activeElement || stopBtn, async () => {
+      await api('DELETE', `/stream/${encodeURIComponent(streamID)}${qs}`);
+      toast(result.checked ? 'Stream and media deleted' : 'Stream deleted (media kept)', 'success');
+      await refresh();
+    });
+  }
+
+  async function onRemoveIncoming(url) {
+    await withButton(document.activeElement || stopBtn, async () => {
+      await api('DELETE', `/incoming?url=${encodeURIComponent(url)}`);
+      toast('Removed from queue', 'success');
+      await refresh();
+    });
+  }
+
+  addIncomingForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const url = addIncomingInput.value.trim();
+    if (!url) return;
+    withButton(addIncomingForm.querySelector('button'), async () => {
+      await api('POST', '/incoming', { url });
+      addIncomingInput.value = '';
+      toast('Added to queue', 'success');
+      await refresh();
+    });
+  });
+
+  restartBtn.addEventListener('click', async () => {
+    const result = await confirmAction({
+      title: 'Restart worker?',
+      message: 'The worker will drop the current stream on its next poll. The incoming queue is left alone.',
+      okLabel: 'Restart',
+      danger: false,
+    });
+    if (!result.ok) return;
+    await withButton(restartBtn, async () => {
+      await api('POST', '/restart');
+      toast('Restart requested', 'success');
+      await refresh();
+    });
+  });
+
+  cancelRestartBtn.addEventListener('click', async () => {
+    await withButton(cancelRestartBtn, async () => {
+      await api('DELETE', '/restart');
+      toast('Restart cancelled', 'success');
+      await refresh();
+    });
+  });
+
+  stopBtn.addEventListener('click', async () => {
+    const result = await confirmAction({
+      title: 'Stop current stream?',
+      message: 'This clears every URL from the incoming queue and tells the worker to restart. The worker will be idle until something new is queued.',
+      okLabel: 'Stop',
+    });
+    if (!result.ok) return;
+    await withButton(stopBtn, async () => {
+      await api('POST', '/stop');
+      toast('Stop signal sent', 'success');
+      await refresh();
+    });
+  });
+
+  // ---------- Init ----------
+  if (!getKey()) {
+    showAuthModal();
+  } else {
+    refresh();
+  }
+
+  setInterval(() => {
+    if (document.hidden) return;
+    if (inFlight > 0) return;
+    refresh();
+  }, REFRESH_MS);
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refresh();
+  });
+})();
+</script>
+</body>
+</html>

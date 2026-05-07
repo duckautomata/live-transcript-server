@@ -27,7 +27,11 @@ func setupTestApp(t *testing.T, channels []string) (*App, *http.ServeMux, *sql.D
 	apiKey := "test-api-key"
 	var channelConfigs []ChannelConfig
 	for _, c := range channels {
-		channelConfigs = append(channelConfigs, ChannelConfig{Name: c, NumPastStreams: 1})
+		channelConfigs = append(channelConfigs, ChannelConfig{
+			Name:           c,
+			NumPastStreams: 1,
+			AdminKey:       "admin-" + c, // deterministic per-channel admin key for tests
+		})
 	}
 	testConfig := Config{
 		Credentials: struct {
