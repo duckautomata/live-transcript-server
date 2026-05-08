@@ -10,6 +10,7 @@ import (
 type ChannelConfig struct {
 	Name           string `yaml:"name"`
 	NumPastStreams int    `yaml:"numPastStreams"`
+	AdminKey       string `yaml:"adminKey"`
 }
 
 type R2Config struct {

@@ -2,9 +2,11 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -220,6 +222,102 @@ func TestIncomingEndpoints(t *testing.T) {
 	mux.ServeHTTP(rec, bad)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("unknown channel: status=%d want 404", rec.Code)
+	}
+}
+
+func TestRestartEndpoints(t *testing.T) {
+	app, mux, _ := setupTestApp(t, []string{"doki"})
+
+	do := func(method, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, nil)
+		req.Header.Set("X-API-Key", app.ApiKey)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Initially: no restart pending
+	rec := do(http.MethodGet, "/doki/restart")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET initial: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var status RestartStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if status.Pending || status.RequestedAt != 0 {
+		t.Errorf("expected no pending restart, got %+v", status)
+	}
+
+	// POST -> sets pending
+	beforePost := time.Now().Unix()
+	rec = do(http.MethodPost, "/doki/restart")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("POST: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	afterPost := time.Now().Unix()
+
+	rec = do(http.MethodGet, "/doki/restart")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET after post: status=%d", rec.Code)
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !status.Pending {
+		t.Error("expected pending=true after POST")
+	}
+	if status.RequestedAt < beforePost || status.RequestedAt > afterPost {
+		t.Errorf("requestedAt=%d not in [%d, %d]", status.RequestedAt, beforePost, afterPost)
+	}
+	firstTimestamp := status.RequestedAt
+
+	// POST again -> updates timestamp (idempotent re-request)
+	time.Sleep(1100 * time.Millisecond) // ensure unix-second tick
+	rec = do(http.MethodPost, "/doki/restart")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("re-POST: status=%d", rec.Code)
+	}
+	rec = do(http.MethodGet, "/doki/restart")
+	if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if status.RequestedAt <= firstTimestamp {
+		t.Errorf("expected requestedAt to advance after re-POST, first=%d second=%d", firstTimestamp, status.RequestedAt)
+	}
+
+	// DELETE -> clears
+	rec = do(http.MethodDelete, "/doki/restart")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(http.MethodGet, "/doki/restart")
+	if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if status.Pending || status.RequestedAt != 0 {
+		t.Errorf("expected no pending restart after DELETE, got %+v", status)
+	}
+
+	// DELETE again -> 404 (no pending)
+	rec = do(http.MethodDelete, "/doki/restart")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("DELETE no-op: status=%d want 404", rec.Code)
+	}
+
+	// Unknown channel -> 404
+	rec = do(http.MethodPost, "/unknown/restart")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown channel POST: status=%d want 404", rec.Code)
+	}
+
+	// Unauthenticated -> 403
+	req := httptest.NewRequest(http.MethodPost, "/doki/restart", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("no api key: status=%d want 403", rec.Code)
 	}
 }
 

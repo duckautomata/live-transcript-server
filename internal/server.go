@@ -46,6 +46,19 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /status", app.apiKeyMiddleware(app.workerStatusHandler))
 	mux.HandleFunc("GET /{channel}/incoming", app.apiKeyMiddleware(app.getIncomingHandler))
 	mux.HandleFunc("DELETE /{channel}/incoming", app.apiKeyMiddleware(app.deleteIncomingHandler))
+	mux.HandleFunc("POST /{channel}/restart", app.apiKeyMiddleware(app.postRestartHandler))
+	mux.HandleFunc("GET /{channel}/restart", app.apiKeyMiddleware(app.getRestartHandler))
+	mux.HandleFunc("DELETE /{channel}/restart", app.apiKeyMiddleware(app.deleteRestartHandler))
+
+	// Admin UI + admin-key protected routes
+	mux.HandleFunc("GET /{channel}/ui", app.adminUIHandler)
+	mux.HandleFunc("GET /{channel}/admin/info", app.adminKeyMiddleware(app.getAdminInfoHandler))
+	mux.HandleFunc("POST /{channel}/admin/incoming", app.adminKeyMiddleware(app.postAdminIncomingHandler))
+	mux.HandleFunc("DELETE /{channel}/admin/incoming", app.adminKeyMiddleware(app.deleteAdminIncomingHandler))
+	mux.HandleFunc("POST /{channel}/admin/restart", app.adminKeyMiddleware(app.postAdminRestartHandler))
+	mux.HandleFunc("DELETE /{channel}/admin/restart", app.adminKeyMiddleware(app.deleteAdminRestartHandler))
+	mux.HandleFunc("DELETE /{channel}/admin/stream/{streamID}", app.adminKeyMiddleware(app.deleteAdminStreamHandler))
+	mux.HandleFunc("POST /{channel}/admin/stop", app.adminKeyMiddleware(app.postAdminStopHandler))
 
 	// Public routes
 	mux.HandleFunc("GET /status", app.getStatusHandler)
@@ -66,6 +79,30 @@ func (app *App) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		key := r.Header.Get("X-API-Key")
 		if key != app.ApiKey {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// adminKeyMiddleware enforces a per-channel admin key (configured in
+// channels[].adminKey). The key is read from the X-Admin-Key header. A channel
+// without an admin key configured rejects all admin operations.
+func (app *App) adminKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		channelKey := r.PathValue("channel")
+		cs, ok := app.Channels[channelKey]
+		if !ok {
+			http.Error(w, "Channel not found", http.StatusNotFound)
+			return
+		}
+		if cs.AdminKey == "" {
+			http.Error(w, "Admin operations are disabled for this channel", http.StatusForbidden)
+			return
+		}
+		provided := r.Header.Get("X-Admin-Key")
+		if provided == "" || provided != cs.AdminKey {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
@@ -143,6 +180,7 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 
 		cs := &ChannelState{
 			Key:             cc.Name,
+			AdminKey:        cc.AdminKey,
 			BaseMediaFolder: baseFolder,
 			NumPastStreams:  cc.NumPastStreams,
 		}
@@ -1014,6 +1052,100 @@ func (app *App) deleteIncomingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("incoming stream removed", "key", cs.Key, "func", "deleteIncomingHandler", "url", url)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// RestartStatusResponse is returned by GET /{channel}/restart.
+type RestartStatusResponse struct {
+	Pending     bool  `json:"pending"`
+	RequestedAt int64 `json:"requestedAt"`
+}
+
+// postRestartHandler marks the channel as needing a worker restart. The worker
+// reads this signal on its poll loop, abandons the current stream, and calls
+// DELETE /{channel}/restart to acknowledge.
+func (app *App) postRestartHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "postRestartHandler", "key", key)
+		return
+	}
+
+	now := time.Now().Unix()
+	if err := app.UpsertRestartRequest(r.Context(), cs.Key, now); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to upsert restart request: %w", err), r.URL.Path)
+		slog.Error("failed to upsert restart request", "key", cs.Key, "func", "postRestartHandler", "err", err)
+		return
+	}
+
+	slog.Info("worker restart requested", "key", cs.Key, "func", "postRestartHandler", "requestedAt", now)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// getRestartHandler returns whether a restart is pending for the channel.
+// Idempotent and side-effect free.
+func (app *App) getRestartHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "getRestartHandler", "key", key)
+		return
+	}
+
+	requestedAt, err := app.GetRestartRequest(r.Context(), cs.Key)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to get restart request: %w", err), r.URL.Path)
+		slog.Error("failed to get restart request", "key", cs.Key, "func", "getRestartHandler", "err", err)
+		return
+	}
+
+	resp := RestartStatusResponse{
+		Pending:     requestedAt > 0,
+		RequestedAt: requestedAt,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Error("failed to encode restart response", "key", cs.Key, "func", "getRestartHandler", "err", err)
+	}
+}
+
+// deleteRestartHandler clears the pending restart flag. The worker calls this
+// once it has acted on the restart. Returns 204 if cleared, 404 if no restart
+// was pending.
+func (app *App) deleteRestartHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("channel")
+	cs, ok := app.Channels[key]
+	if !ok {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		Http400Errors.Inc()
+		slog.Warn("invalid channel name", "func", "deleteRestartHandler", "key", key)
+		return
+	}
+
+	rowsAffected, err := app.DeleteRestartRequest(r.Context(), cs.Key)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		Http500Errors.Inc()
+		app.Discord.Notify500Error(fmt.Errorf("failed to delete restart request: %w", err), r.URL.Path)
+		slog.Error("failed to delete restart request", "key", cs.Key, "func", "deleteRestartHandler", "err", err)
+		return
+	}
+
+	if rowsAffected == 0 {
+		http.Error(w, "No restart pending", http.StatusNotFound)
+		return
+	}
+
+	slog.Info("restart request cleared", "key", cs.Key, "func", "deleteRestartHandler")
 	w.WriteHeader(http.StatusNoContent)
 }
 
