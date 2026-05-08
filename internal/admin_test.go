@@ -269,6 +269,45 @@ func TestAdminDeleteStreamDataOnly(t *testing.T) {
 	}
 }
 
+func TestAdminDeleteStreamBroadcastsEvent(t *testing.T) {
+	app, mux, _ := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki")
+
+	// Hook a fake client into the channel so we can read what's broadcast.
+	cs := app.Channels["doki"]
+	client := &Client{send: make(chan WebSocketMessage, 4)}
+	cs.ClientsLock.Lock()
+	cs.Clients = append(cs.Clients, client)
+	cs.ClientsLock.Unlock()
+
+	rec := adminReq(t, mux, http.MethodDelete, "/doki/admin/stream/stream-1", "admin-doki", nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case msg := <-client.send:
+		if msg.Event != EventDeletedStream {
+			t.Fatalf("event=%q want %q", msg.Event, EventDeletedStream)
+		}
+		data, ok := msg.Data.(EventDeletedStreamData)
+		if !ok {
+			t.Fatalf("data type=%T want EventDeletedStreamData", msg.Data)
+		}
+		if data.StreamID != "stream-1" {
+			t.Errorf("streamID=%q want stream-1", data.StreamID)
+		}
+		if data.StreamTitle != "Test Stream Title" {
+			t.Errorf("streamTitle=%q", data.StreamTitle)
+		}
+		if !data.WasLive {
+			t.Error("wasLive=false; seedExampleData marks the stream live")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no deletedStream event received within 1s")
+	}
+}
+
 func TestAdminDeleteStreamWithMedia(t *testing.T) {
 	app, mux, _ := setupTestApp(t, []string{"doki"})
 	seedExampleData(t, app, "doki")

@@ -282,7 +282,8 @@ func (app *App) postAdminStopHandler(w http.ResponseWriter, r *http.Request) {
 // clears the Prometheus activation metric. If deleteMedia is true, it also
 // asynchronously removes the stream's media folder from storage; otherwise
 // the media files are left intact (useful for local testing against shared
-// storage).
+// storage). On success, broadcasts a deletedStream event to all WebSocket
+// clients for the channel so they can drop the stream from local state.
 func (app *App) removeStream(ctx context.Context, channelKey string, stream *Stream, deleteMedia bool) error {
 	if err := app.DeleteStream(ctx, channelKey, stream.StreamID); err != nil {
 		return fmt.Errorf("delete stream: %w", err)
@@ -294,6 +295,19 @@ func (app *App) removeStream(ctx context.Context, channelKey string, stream *Str
 	}
 	if stream.StreamTitle != "" {
 		ActivatedStreams.DeleteLabelValues(channelKey, stream.StreamID, stream.StreamTitle)
+	}
+
+	// Notify connected clients. Done after the DB delete succeeds so we never
+	// announce a deletion that didn't actually happen.
+	if cs, ok := app.Channels[channelKey]; ok {
+		cs.broadcast(WebSocketMessage{
+			Event: EventDeletedStream,
+			Data: EventDeletedStreamData{
+				StreamID:    stream.StreamID,
+				StreamTitle: stream.StreamTitle,
+				WasLive:     stream.IsLive,
+			},
+		})
 	}
 
 	if !deleteMedia {

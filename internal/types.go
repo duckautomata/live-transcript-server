@@ -87,15 +87,16 @@ type FullInfoResponse struct {
 type EventType string
 
 const (
-	EventNewLine     EventType = "newLine"
-	EventNewStream   EventType = "newStream"
-	EventStatus      EventType = "status"
-	EventSync        EventType = "sync"
-	EventPartialSync EventType = "partialSync"
-	EventNewMedia    EventType = "newMedia"
-	EventPing        EventType = "ping"
-	EventPong        EventType = "pong"
-	EventPastStreams EventType = "pastStreams"
+	EventNewLine       EventType = "newLine"
+	EventNewStream     EventType = "newStream"
+	EventStatus        EventType = "status"
+	EventSync          EventType = "sync"
+	EventPartialSync   EventType = "partialSync"
+	EventNewMedia      EventType = "newMedia"
+	EventPing          EventType = "ping"
+	EventPong          EventType = "pong"
+	EventPastStreams   EventType = "pastStreams"
+	EventDeletedStream EventType = "deletedStream"
 )
 
 // WebSocketMessage represents a message sent over the WebSocket connection.
@@ -156,6 +157,15 @@ type EventPingPongData struct {
 // EventPastStreamsData represents the data sent to notify the client of past streams.
 type EventPastStreamsData struct {
 	Streams []Stream `json:"streams"`
+}
+
+// EventDeletedStreamData notifies clients that a stream has been removed
+// (typically by an admin via the admin UI). Clients should drop the stream
+// from their local state and refresh past-stream lists.
+type EventDeletedStreamData struct {
+	StreamID    string `json:"streamId"`
+	StreamTitle string `json:"streamTitle"`
+	WasLive     bool   `json:"wasLive"`
 }
 
 // ===== Server State =====
