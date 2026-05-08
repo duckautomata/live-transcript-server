@@ -226,6 +226,10 @@ func TestAdminRestart(t *testing.T) {
 func TestAdminDeleteStreamDataOnly(t *testing.T) {
 	app, mux, _ := setupTestApp(t, []string{"doki"})
 	seedExampleData(t, app, "doki")
+	// Live streams cannot be deleted — deactivate before testing the happy path.
+	if err := app.SetStreamLive(context.Background(), "doki", "stream-1", false); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
 
 	// Plant a fake media file under the local-storage path so we can verify it
 	// is preserved when ?media is not requested.
@@ -272,6 +276,9 @@ func TestAdminDeleteStreamDataOnly(t *testing.T) {
 func TestAdminDeleteStreamBroadcastsEvent(t *testing.T) {
 	app, mux, _ := setupTestApp(t, []string{"doki"})
 	seedExampleData(t, app, "doki")
+	if err := app.SetStreamLive(context.Background(), "doki", "stream-1", false); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
 
 	// Hook a fake client into the channel so we can read what's broadcast.
 	cs := app.Channels["doki"]
@@ -300,17 +307,51 @@ func TestAdminDeleteStreamBroadcastsEvent(t *testing.T) {
 		if data.StreamTitle != "Test Stream Title" {
 			t.Errorf("streamTitle=%q", data.StreamTitle)
 		}
-		if !data.WasLive {
-			t.Error("wasLive=false; seedExampleData marks the stream live")
+		if data.WasLive {
+			t.Error("wasLive=true; we deactivated before delete")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no deletedStream event received within 1s")
 	}
 }
 
+func TestAdminDeleteStreamRejectsLive(t *testing.T) {
+	app, mux, _ := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki") // seeds with IsLive=true
+
+	rec := adminReq(t, mux, http.MethodDelete, "/doki/admin/stream/stream-1", "admin-doki", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("live delete: status=%d want 409, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Stop current stream") {
+		t.Errorf("error body should mention the recommended action; got: %s", rec.Body.String())
+	}
+
+	// Stream should still exist
+	stream, err := app.GetStreamByID(context.Background(), "doki", "stream-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if stream == nil {
+		t.Fatal("stream was deleted despite 409 response")
+	}
+
+	// After deactivating, delete works
+	if err := app.SetStreamLive(context.Background(), "doki", "stream-1", false); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	rec = adminReq(t, mux, http.MethodDelete, "/doki/admin/stream/stream-1", "admin-doki", nil)
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("post-deactivate delete: status=%d want 204", rec.Code)
+	}
+}
+
 func TestAdminDeleteStreamWithMedia(t *testing.T) {
 	app, mux, _ := setupTestApp(t, []string{"doki"})
 	seedExampleData(t, app, "doki")
+	if err := app.SetStreamLive(context.Background(), "doki", "stream-1", false); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
 
 	mediaPath := filepath.Join(app.TempDir, "doki", "stream-1", "audio", "fake.m4a")
 	if err := os.MkdirAll(filepath.Dir(mediaPath), 0755); err != nil {

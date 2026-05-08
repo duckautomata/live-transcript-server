@@ -217,6 +217,12 @@
     display: flex;
     gap: 6px;
     flex-shrink: 0;
+    align-items: center;
+  }
+  .row .row-actions .row-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-style: italic;
   }
 
   .empty {
@@ -791,6 +797,13 @@
       streamsBodyEl.innerHTML = streams.map(s => {
         const isLive = !!s.isLive;
         const startedAgo = s.startTime ? timeAgo(parseInt(s.startTime, 10)) : '—';
+        // Live streams cannot be deleted: the worker would resync on its next
+        // push and resurrect the stream. Show a disabled button + hint so the
+        // admin understands why and what to do instead.
+        const deleteBtn = isLive
+          ? `<span class="row-hint">stop to delete</span>
+             <button class="danger small" disabled title="Live streams can't be deleted. Click 'Stop current stream' below first, then delete once it's marked Past.">Delete</button>`
+          : `<button class="danger small" data-stream-id="${escapeHtml(s.streamId)}" data-stream-title="${escapeHtml(s.streamTitle || '')}">Delete</button>`;
         return `
           <div class="row">
             <div class="row-main">
@@ -805,13 +818,13 @@
               </div>
             </div>
             <div class="row-actions">
-              <button class="danger small" data-stream-id="${escapeHtml(s.streamId)}" data-stream-title="${escapeHtml(s.streamTitle || '')}" data-was-live="${isLive}">Delete</button>
+              ${deleteBtn}
             </div>
           </div>
         `;
       }).join('');
       streamsBodyEl.querySelectorAll('button[data-stream-id]').forEach(btn => {
-        btn.addEventListener('click', () => onDeleteStream(btn.dataset.streamId, btn.dataset.streamTitle, btn.dataset.wasLive === 'true'));
+        btn.addEventListener('click', () => onDeleteStream(btn.dataset.streamId, btn.dataset.streamTitle));
       });
     }
 
@@ -882,10 +895,10 @@
     }
   }
 
-  async function onDeleteStream(streamID, title, wasLive) {
+  async function onDeleteStream(streamID, title) {
     const result = await confirmAction({
-      title: wasLive ? 'Delete live stream?' : 'Delete stream?',
-      message: `${wasLive ? 'This stream is currently live. ' : ''}Removes "${title || streamID}" and its transcript from the server. Media files are kept by default.`,
+      title: 'Delete stream?',
+      message: `Removes "${title || streamID}" and its transcript from the server. Media files are kept by default.`,
       okLabel: 'Delete',
       checkbox: {
         label: 'Also delete media files from storage',

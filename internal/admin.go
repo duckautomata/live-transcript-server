@@ -241,6 +241,13 @@ func (app *App) deleteAdminStreamHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "stream not found", http.StatusNotFound)
 		return
 	}
+	if stream.IsLive {
+		// Refuse: a live worker would resync via /sync after the next push and
+		// resurrect the stream, causing confusing flicker for clients. Force
+		// the operator to stop the stream first (Stop current stream button).
+		http.Error(w, "Cannot delete a live stream. Use \"Stop current stream\" first, then delete it once the worker has deactivated it.", http.StatusConflict)
+		return
+	}
 
 	if err := app.removeStream(r.Context(), channelKey, stream, deleteMedia); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
