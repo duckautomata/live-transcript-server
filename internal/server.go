@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"live-transcript-server/internal/storage"
@@ -514,9 +515,7 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := app.UpsertStream(r.Context(), stream); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to upsert stream: %w", err), r.URL.Path)
-		slog.Error("failed to upsert stream", "err", err)
+		app.report500(r, err, "failed to upsert stream")
 		return
 	}
 
@@ -538,9 +537,7 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := app.ReplaceTranscript(r.Context(), cs.Key, data.StreamID, data.Transcript); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to replace transcript: %w", err), r.URL.Path)
-		slog.Error("failed to replace transcript", "err", err)
+		app.report500(r, err, "failed to replace transcript")
 		return
 	}
 
@@ -599,9 +596,7 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 	lastID, err := app.GetLastLineID(r.Context(), cs.Key, streamID)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to get last line id: %w", err), r.URL.Path)
-		slog.Error("failed to get last line id", "err", err)
+		app.report500(r, err, "failed to get last line id")
 		return
 	}
 	timings["db_check"] = time.Since(dbGetStart).Seconds()
@@ -624,9 +619,7 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 	dbInsertStart := time.Now()
 	if err := app.InsertTranscriptLine(r.Context(), cs.Key, streamID, data); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to insert transcript line: %w", err), r.URL.Path)
-		slog.Error("failed to insert transcript line", "err", err)
+		app.report500(r, err, "failed to insert transcript line")
 		return
 	}
 	timings["db_insert"] = time.Since(dbInsertStart).Seconds()
@@ -690,9 +683,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	MediaProcessingDuration.WithLabelValues("verification", cs.Key).Observe(timings["verification"])
 
 	if err != nil {
-		slog.Error("failed to check stream exists", "key", cs.Key, "func", "mediaHandler", "err", err)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to check stream exists: %w", err), r.URL.Path)
+		app.report500(r, err, "failed to check stream exists", "key", cs.Key, "func", "mediaHandler")
 		return
 	}
 	if !exists {
@@ -706,9 +697,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	dst, err := os.Create(tempRawHost)
 	if err != nil {
 		http.Error(w, "Unable to create temp file", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to create temp raw file: %w", err), r.URL.Path)
-		slog.Error("unable to create temp raw file", "key", cs.Key, "func", "mediaHandler", "err", err)
+		app.report500(r, err, "unable to create temp raw file", "key", cs.Key, "func", "mediaHandler")
 		return
 	}
 
@@ -716,9 +705,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		dst.Close()
 		os.Remove(tempRawHost)
 		http.Error(w, "Unable to save file", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to save temp raw file: %w", err), r.URL.Path)
-		slog.Error("unable to save temp raw file", "key", cs.Key, "func", "mediaHandler", "err", err)
+		app.report500(r, err, "unable to save temp raw file", "key", cs.Key, "func", "mediaHandler")
 		return
 	}
 	dst.Close()
@@ -733,9 +720,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	tempM4aHost := ChangeExtension(tempRawHost, ".m4a")
 	if err := FfmpegConvert(tempRawHost, tempM4aHost); err != nil {
 		http.Error(w, "Unable to convert media", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to convert media: %w", err), r.URL.Path)
-		slog.Error("unable to convert media", "key", cs.Key, "func", "mediaHandler", "err", err)
+		app.report500(r, err, "unable to convert media", "key", cs.Key, "func", "mediaHandler")
 		return
 	}
 	timings["convert_m4a"] = time.Since(convertStart).Seconds()
@@ -752,10 +737,8 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	uploadCtx := context.WithoutCancel(r.Context())
 	rawInfo, _ := os.Stat(tempRawHost)
 	if _, err := app.Storage.Save(uploadCtx, rawKey, rawReader, rawInfo.Size()); err != nil {
-		slog.Error("failed to upload raw file", "key", cs.Key, "err", err)
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to upload raw file: %w", err), r.URL.Path)
+		app.report500(r, err, "failed to upload raw file", "key", cs.Key)
 		return
 	}
 	timings["upload_raw"] = time.Since(uploadRawStart).Seconds()
@@ -768,10 +751,8 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	defer m4aReader.Close()
 	m4aInfo, _ := os.Stat(tempM4aHost)
 	if _, err := app.Storage.Save(uploadCtx, m4aKey, m4aReader, m4aInfo.Size()); err != nil {
-		slog.Error("failed to upload m4a file", "key", cs.Key, "err", err)
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to upload m4a file: %w", err), r.URL.Path)
+		app.report500(r, err, "failed to upload m4a file", "key", cs.Key)
 		return
 	}
 	timings["upload_m4a"] = time.Since(uploadM4aStart).Seconds()
@@ -815,15 +796,11 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		if err.Error() == "line not found" {
 			time.Sleep(500 * time.Millisecond)
 			if err := app.SetMediaAvailable(uploadCtx, cs.Key, streamID, id, fileID, true); err != nil {
-				slog.Error("failed to set media available on retry", "key", cs.Key, "id", id, "err", err)
-				Http500Errors.Inc()
-				app.Discord.Notify500Error(fmt.Errorf("failed to set media available on retry: %w", err), r.URL.Path)
+				app.report500(r, err, "failed to set media available on retry", "key", cs.Key, "id", id)
 				success = false
 			}
 		} else {
-			slog.Error("failed to set media available", "key", cs.Key, "id", id, "err", err)
-			Http500Errors.Inc()
-			app.Discord.Notify500Error(fmt.Errorf("failed to set media available: %w", err), r.URL.Path)
+			app.report500(r, err, "failed to set media available", "key", cs.Key, "id", id)
 			success = false
 		}
 	}
@@ -1001,9 +978,7 @@ func (app *App) getIncomingHandler(w http.ResponseWriter, r *http.Request) {
 	urls, err := app.GetIncomingStreams(r.Context(), cs.Key)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to get incoming streams: %w", err), r.URL.Path)
-		slog.Error("failed to get incoming streams", "key", cs.Key, "func", "getIncomingHandler", "err", err)
+		app.report500(r, err, "failed to get incoming streams", "key", cs.Key, "func", "getIncomingHandler")
 		return
 	}
 
@@ -1040,9 +1015,7 @@ func (app *App) deleteIncomingHandler(w http.ResponseWriter, r *http.Request) {
 	rowsAffected, err := app.DeleteIncomingStream(r.Context(), cs.Key, url)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to delete incoming stream: %w", err), r.URL.Path)
-		slog.Error("failed to delete incoming stream", "key", cs.Key, "func", "deleteIncomingHandler", "url", url, "err", err)
+		app.report500(r, err, "failed to delete incoming stream", "key", cs.Key, "func", "deleteIncomingHandler", "url", url)
 		return
 	}
 
@@ -1077,9 +1050,7 @@ func (app *App) postRestartHandler(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	if err := app.UpsertRestartRequest(r.Context(), cs.Key, now); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to upsert restart request: %w", err), r.URL.Path)
-		slog.Error("failed to upsert restart request", "key", cs.Key, "func", "postRestartHandler", "err", err)
+		app.report500(r, err, "failed to upsert restart request", "key", cs.Key, "func", "postRestartHandler")
 		return
 	}
 
@@ -1102,9 +1073,7 @@ func (app *App) getRestartHandler(w http.ResponseWriter, r *http.Request) {
 	requestedAt, err := app.GetRestartRequest(r.Context(), cs.Key)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to get restart request: %w", err), r.URL.Path)
-		slog.Error("failed to get restart request", "key", cs.Key, "func", "getRestartHandler", "err", err)
+		app.report500(r, err, "failed to get restart request", "key", cs.Key, "func", "getRestartHandler")
 		return
 	}
 
@@ -1134,9 +1103,7 @@ func (app *App) deleteRestartHandler(w http.ResponseWriter, r *http.Request) {
 	rowsAffected, err := app.DeleteRestartRequest(r.Context(), cs.Key)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to delete restart request: %w", err), r.URL.Path)
-		slog.Error("failed to delete restart request", "key", cs.Key, "func", "deleteRestartHandler", "err", err)
+		app.report500(r, err, "failed to delete restart request", "key", cs.Key, "func", "deleteRestartHandler")
 		return
 	}
 
@@ -1229,9 +1196,7 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to check file: %w", err), r.URL.Path)
-		slog.Error("unable to check file", "key", cs.Key, "func", "streamHandler", "id", idStr, "err", err)
+		app.report500(r, err, "unable to check file", "key", cs.Key, "func", "streamHandler", "id", idStr)
 		return
 	}
 
@@ -1307,9 +1272,7 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to check frame file: %w", err), r.URL.Path)
-		slog.Error("unable to check frame file", "key", cs.Key, "func", "getFrameHandler", "filename", filename, "err", err)
+		app.report500(r, err, "unable to check frame file", "key", cs.Key, "func", "getFrameHandler", "filename", filename)
 		return
 	}
 
@@ -1408,10 +1371,8 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	dbGetStart := time.Now()
 	fileIDs, err := app.GetFileIDsInRange(r.Context(), cs.Key, req.StreamID, start, end)
 	if err != nil {
-		slog.Error("failed to get file ids for clip", "key", cs.Key, "err", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to get file ids for clip: %w", err), r.URL.Path)
+		app.report500(r, err, "failed to get file ids for clip", "key", cs.Key)
 		return
 	}
 	timings["db_get_files"] = time.Since(dbGetStart).Seconds()
@@ -1420,10 +1381,8 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	// Check if all requested IDs were found
 	expectedCount := end - start + 1
 	if len(fileIDs) != expectedCount {
-		slog.Warn("missing file ids for clip", "key", cs.Key, "func", "postClipHandler", "expected", expectedCount, "got", len(fileIDs))
 		http.Error(w, "Missing media files for requested range", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to get file ids for clip: %w", err), r.URL.Path)
+		app.report500(r, fmt.Errorf("expected %d file ids, got %d", expectedCount, len(fileIDs)), "missing file ids for clip", "key", cs.Key, "func", "postClipHandler")
 		return
 	}
 
@@ -1432,9 +1391,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		os.Remove(mergedRawPath)
 		http.Error(w, "Server error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to merge raw audio: %w", err), r.URL.Path)
-		slog.Error("unable to merge raw audio", "key", cs.Key, "func", "postClipHandler", "startID", start, "endID", end, "err", err)
+		app.report500(r, err, "unable to merge raw audio", "key", cs.Key, "func", "postClipHandler", "startID", start, "endID", end)
 		return
 	}
 	defer os.Remove(mergedRawPath) // Delete the merged raw file when done
@@ -1467,10 +1424,8 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		os.Remove(tempMediaFile)
-		slog.Error("unable to convert raw media to new extension", "key", cs.Key, "func", "postClipHandler", "extension", clipExt, "err", err)
 		http.Error(w, "Server error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to convert raw media to new extension: %w", err), r.URL.Path)
+		app.report500(r, err, "unable to convert raw media to new extension", "key", cs.Key, "func", "postClipHandler", "extension", clipExt)
 		return
 	}
 	defer os.Remove(tempMediaFile)
@@ -1750,9 +1705,7 @@ func (app *App) getTranscriptHandler(w http.ResponseWriter, r *http.Request) {
 	lines, err := app.GetTranscript(r.Context(), cs.Key, streamID)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
-		Http500Errors.Inc()
-		app.Discord.Notify500Error(fmt.Errorf("failed to get transcript: %w", err), r.URL.Path)
-		slog.Error("failed to get transcript", "key", cs.Key, "streamID", streamID, "err", err)
+		app.report500(r, err, "failed to get transcript", "key", cs.Key, "streamID", streamID)
 		return
 	}
 	timings["db_fetch"] = time.Since(dbFetchStart).Seconds()
@@ -1974,4 +1927,24 @@ func (app *App) pruneExpiredStreams() {
 			}
 		}
 	}
+}
+
+// isClientGone reports whether err is a request-context cancellation —
+// typically a client disconnect — rather than a real server failure.
+func isClientGone(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// report500 records a server-side error: bumps the 500 metric, notifies
+// Discord, and logs at Error level. If the error is a client disconnect,
+// it logs at Info level and skips the alert. The caller is responsible
+// for writing the HTTP response and any cleanup.
+func (app *App) report500(r *http.Request, err error, msg string, attrs ...any) {
+	if isClientGone(err) {
+		slog.Info("client canceled request", append(attrs, "path", r.URL.Path, "err", err)...)
+		return
+	}
+	Http500Errors.Inc()
+	app.Discord.Notify500Error(fmt.Errorf("%s: %w", msg, err), r.URL.Path)
+	slog.Error(msg, append(attrs, "err", err)...)
 }
