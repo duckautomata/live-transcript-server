@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,6 +22,19 @@ import (
 	"github.com/kennygrant/sanitize"
 	"github.com/lithammer/shortuuid/v4"
 )
+
+// validIDPattern matches the identifier format used for channel keys, stream
+// IDs, clip IDs, and file IDs (YouTube and Twitch IDs and shortuuid values all
+// fit). It excludes '/', '.', and every other character that could enable path
+// traversal when the value is interpolated into a storage key or filesystem
+// path.
+var validIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// isValidID reports whether s is safe to interpolate into storage keys and file
+// paths. Empty and over-long values are rejected.
+func isValidID(s string) bool {
+	return len(s) > 0 && len(s) <= 128 && validIDPattern.MatchString(s)
+}
 
 func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	err := os.MkdirAll(app.TempDir, 0755)
@@ -75,7 +89,9 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 func (app *App) apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if app.ApiKey == "" {
-			next(w, r)
+			// Fail closed: never serve a protected route when no key is set.
+			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+			slog.Error("rejecting protected request: no API key configured", "func", "apiKeyMiddleware", "path", r.URL.Path)
 			return
 		}
 		key := r.Header.Get("X-API-Key")
@@ -501,6 +517,12 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("unable to decode JSON data", "key", cs.Key, "func", "syncHandler", "err", err)
 		return
 	}
+	if !isValidID(data.StreamID) {
+		http.Error(w, "Invalid stream ID", http.StatusBadRequest)
+		Http400Errors.Inc()
+		slog.Warn("invalid stream id", "key", cs.Key, "func", "syncHandler", "streamID", data.StreamID)
+		return
+	}
 	uploadTime := time.Since(uploadStartTime).Milliseconds()
 	processStartTime := time.Now()
 
@@ -585,10 +607,10 @@ func (app *App) lineHandler(w http.ResponseWriter, r *http.Request) {
 	processStartTime := time.Now()
 
 	streamID := r.PathValue("streamID")
-	if streamID == "" {
-		http.Error(w, "Stream ID required", http.StatusBadRequest)
+	if !isValidID(streamID) {
+		http.Error(w, "Invalid stream ID", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Warn("stream id required", "key", cs.Key, "func", "lineHandler")
+		slog.Warn("invalid stream id", "key", cs.Key, "func", "lineHandler", "streamID", streamID)
 		return
 	}
 
@@ -675,6 +697,11 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	streamID := r.PathValue("streamID")
+	if !isValidID(streamID) {
+		http.Error(w, "Invalid stream ID", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
 
 	// Verification
 	verifStart := time.Now()
@@ -687,6 +714,7 @@ func (app *App) mediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !exists {
+		http.Error(w, "Stream not found", http.StatusNotFound)
 		slog.Warn("stream does not exist", "key", cs.Key, "func", "mediaHandler", "streamID", streamID)
 		Http400Errors.Inc()
 		return
@@ -845,6 +873,12 @@ func (app *App) activateHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("invalid parameters", "key", cs.Key, "func", "activateHandler", "streamID", streamID, "title", title, "startTime", startTime)
 		return
 	}
+	if !isValidID(streamID) {
+		http.Error(w, "Invalid stream ID", http.StatusBadRequest)
+		Http400Errors.Inc()
+		slog.Warn("invalid stream id", "key", cs.Key, "func", "activateHandler", "streamID", streamID)
+		return
+	}
 
 	var startTimeUnix int64
 
@@ -890,10 +924,10 @@ func (app *App) deactivateHandler(w http.ResponseWriter, r *http.Request) {
 	streamID := query.Get("id")
 
 	// Check if the required parameters are present
-	if streamID == "" {
-		http.Error(w, "Missing required parameters", http.StatusBadRequest)
+	if !isValidID(streamID) {
+		http.Error(w, "Invalid stream ID", http.StatusBadRequest)
 		Http400Errors.Inc()
-		slog.Warn("invalid parameters, streamID is empty", "key", cs.Key, "func", "deactivateHandler")
+		slog.Warn("invalid parameters, streamID is empty or malformed", "key", cs.Key, "func", "deactivateHandler", "streamID", streamID)
 		return
 	}
 
@@ -1183,6 +1217,11 @@ func (app *App) streamHandler(w http.ResponseWriter, r *http.Request) {
 		Http400Errors.Inc()
 		return
 	}
+	if !isValidID(requestedStreamID) || !isValidID(idStr) {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
 	// Local Storage Path: BaseMediaFolder/streamID/type/filename
 	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, mediaType, fmt.Sprintf("%s%s", idStr, ext))
 
@@ -1261,7 +1300,13 @@ func (app *App) getFrameHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("invalid extension", "key", cs.Key, "func", "getFrameHandler", "ext", ext)
 		return
 	}
-	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, "frame", filename)
+	idStr := strings.TrimSuffix(filename, ext)
+	if !isValidID(requestedStreamID) || !isValidID(idStr) {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
+	filePath := filepath.Join(cs.BaseMediaFolder, requestedStreamID, "frame", idStr+ext)
 
 	// Check if the file exists
 	_, err := os.Stat(filePath)
@@ -1325,6 +1370,12 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	timings["decode_json"] = time.Since(decodeStart).Seconds()
 	MediaProcessingDuration.WithLabelValues("decode_json", cs.Key).Observe(timings["decode_json"])
+
+	if !isValidID(req.StreamID) {
+		http.Error(w, "Invalid stream ID", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
 
 	stream, err := app.GetStreamByID(r.Context(), cs.Key, req.StreamID)
 	mediaType := "none"
@@ -1515,6 +1566,12 @@ func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !isValidID(requestedStreamID) {
+		http.Error(w, "Invalid stream ID", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
+
 	if _, err := os.Stat(filepath.Join(cs.BaseMediaFolder, requestedStreamID)); err != nil {
 		http.Error(w, "Stream not found", http.StatusNotFound)
 		Http400Errors.Inc()
@@ -1524,6 +1581,11 @@ func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
 
 	ext := filepath.Ext(filename)
 	idStr := strings.TrimSuffix(filename, ext)
+	if !isValidID(idStr) {
+		http.Error(w, "Invalid file name", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
 
 	// Check for optional name query param
 	queryName := r.URL.Query().Get("name")
@@ -1614,6 +1676,12 @@ func (app *App) postTrimHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !isValidID(trimReq.StreamID) || !isValidID(trimReq.ClipID) {
+		http.Error(w, "Invalid stream or clip ID", http.StatusBadRequest)
+		Http400Errors.Inc()
+		return
+	}
+
 	uniqueID := shortuuid.New()
 	sourceKey := fmt.Sprintf("%s/%s/clips/%s.%s", cs.Key, trimReq.StreamID, trimReq.ClipID, trimReq.FileFormat)
 
@@ -1695,8 +1763,8 @@ func (app *App) getTranscriptHandler(w http.ResponseWriter, r *http.Request) {
 	timings := make(map[string]float64)
 
 	streamID := r.PathValue("streamID")
-	if streamID == "" {
-		http.Error(w, "Missing streamID", http.StatusBadRequest)
+	if !isValidID(streamID) {
+		http.Error(w, "Invalid stream ID", http.StatusBadRequest)
 		Http400Errors.Inc()
 		return
 	}

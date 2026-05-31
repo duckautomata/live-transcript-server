@@ -131,10 +131,10 @@ func (app *App) broadcastNewLine(ctx context.Context, cs *ChannelState, activeID
 	}
 
 	data := EventNewLineData{
-		LineID:     newLine.ID,
-		Timestamp:  newLine.Timestamp,
-		UploadTime: uploadTime,
-		Segments:   newLine.Segments,
+		LineID:      newLine.ID,
+		Timestamp:   newLine.Timestamp,
+		UploadTime:  uploadTime,
+		Segments:    newLine.Segments,
 		VodAccurate: newLine.VodAccurate,
 	}
 
@@ -296,15 +296,26 @@ func (app *App) wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reserve a slot under the lock so the cap is enforced atomically. A plain
+	// unlocked read here would both race with the locked writes in closeSocket
+	// and let concurrent upgrades slip past MaxConn (TOCTOU).
+	cs.ClientsLock.Lock()
 	if cs.ClientConnections >= app.MaxConn {
+		cs.ClientsLock.Unlock()
 		http.Error(w, "Max number of connection already reached", http.StatusBadRequest)
 		slog.Error("max number of connections already reached", "key", cs.Key, "func", "wsHandler", "maxConn", app.MaxConn)
 		WebsocketError.Inc()
 		return
 	}
+	cs.ClientConnections++
+	cs.ClientsLock.Unlock()
 
 	conn, err := app.Upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		// Release the slot we reserved above.
+		cs.ClientsLock.Lock()
+		cs.ClientConnections--
+		cs.ClientsLock.Unlock()
 		if _, ok := err.(websocket.HandshakeError); !ok {
 			slog.Error("unable to establish handshake with client", "key", cs.Key, "func", "wsHandler", "err", err)
 		} else {
@@ -325,8 +336,8 @@ func (app *App) wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	client := &Client{conn: conn, send: make(chan WebSocketMessage, 256)}
 
+	// Slot already reserved above; just register the client.
 	cs.ClientsLock.Lock()
-	cs.ClientConnections++
 	cs.Clients = append(cs.Clients, client)
 	cs.ClientsLock.Unlock()
 

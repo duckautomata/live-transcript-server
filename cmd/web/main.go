@@ -75,6 +75,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Fail closed: an empty API key would disable authentication on every
+	// worker endpoint (activate/sync/line/media/...). Refuse to start rather
+	// than silently expose them.
+	if config.Credentials.ApiKey == "" {
+		slog.Error("refusing to start: credentials.apiKey is empty; worker endpoints would be unauthenticated", "func", "main")
+		os.Exit(1)
+	}
+
 	// --- Database Setup ---
 	dbPath := filepath.Join("tmp", "server.db")
 	db, err := internal.InitDB(dbPath, config.Database)

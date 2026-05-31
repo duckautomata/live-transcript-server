@@ -223,8 +223,8 @@ func (app *App) deleteAdminRestartHandler(w http.ResponseWriter, r *http.Request
 func (app *App) deleteAdminStreamHandler(w http.ResponseWriter, r *http.Request) {
 	channelKey := r.PathValue("channel")
 	streamID := r.PathValue("streamID")
-	if streamID == "" {
-		http.Error(w, "stream id required", http.StatusBadRequest)
+	if !isValidID(streamID) {
+		http.Error(w, "invalid stream id", http.StatusBadRequest)
 		Http400Errors.Inc()
 		return
 	}
