@@ -153,6 +153,54 @@ func (d *DiscordClient) NotifyWorkerOffline(channelKey string, lastSeen int64) {
 	go d.send(payload)
 }
 
+// NotifyDiscordBotOffline alerts that the Discord listener bot's gateway has
+// gone stale (stopped receiving updates). lastSeen is the Unix time of the last
+// heartbeat ACK. Mirrors NotifyWorkerOffline so it pings the same operator.
+func (d *DiscordClient) NotifyDiscordBotOffline(lastSeen int64) {
+	if d.WebhookURL == "" {
+		return
+	}
+	timeAgo := time.Since(time.Unix(lastSeen, 0)).Round(time.Second).String()
+	payload := map[string]any{
+		"content": d.NotifyPing,
+		"embeds": []map[string]any{
+			{
+				"title":       "Discord Bot Offline Alert",
+				"description": fmt.Sprintf("The Discord listener bot has stopped receiving gateway updates and may miss stream starts.\nLast heartbeat: %s ago.\nForcing a reconnect.", timeAgo),
+				"color":       15158332, // Red
+				"timestamp":   time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("Version: %s", d.Version),
+				},
+			},
+		},
+	}
+	go d.send(payload)
+}
+
+// NotifyDiscordBotRecovered announces that the listener bot's gateway is
+// receiving updates again, sent once after a prior offline alert.
+func (d *DiscordClient) NotifyDiscordBotRecovered() {
+	if d.WebhookURL == "" {
+		return
+	}
+	payload := map[string]any{
+		"content": d.NotifyPing,
+		"embeds": []map[string]any{
+			{
+				"title":       "Discord Bot Recovered",
+				"description": "The Discord listener bot is receiving gateway updates again.",
+				"color":       3066993, // Green
+				"timestamp":   time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("Version: %s", d.Version),
+				},
+			},
+		},
+	}
+	go d.send(payload)
+}
+
 func (d *DiscordClient) Notify500Error(err error, contextMsg string) {
 	if d.Disabled || d.WebhookURL == "" {
 		return

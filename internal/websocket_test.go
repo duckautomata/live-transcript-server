@@ -177,13 +177,16 @@ func TestWebsocketDoubleClose(t *testing.T) {
 		t.Fatalf("channel state not found for key %s", key)
 	}
 
-	// Wait for connection to be registered (it happens in wsHandler goroutine)
-	// We can loop check cs.ClientConnections
-	// Simple retry loop
+	// Wait for the client to be registered in the slice. Gate on len(cs.Clients),
+	// NOT cs.ClientConnections: wsHandler reserves the cap slot (ClientConnections++)
+	// under the lock BEFORE Upgrade and appends to cs.Clients only afterward, so the
+	// counter can read 1 while the slice is still empty. The cs.Clients[0] access
+	// below would then panic with "index out of range". The slice length is the
+	// real "registered" signal.
 	registered := false
-	for range 10 {
+	for range 50 {
 		cs.ClientsLock.Lock()
-		if cs.ClientConnections == 1 {
+		if len(cs.Clients) == 1 {
 			registered = true
 			cs.ClientsLock.Unlock()
 			break
