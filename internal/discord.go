@@ -201,6 +201,30 @@ func (d *DiscordClient) NotifyDiscordBotRecovered() {
 	go d.send(payload)
 }
 
+// NotifyDiscordBotStartupError alerts that the Discord listener bot failed its
+// initial gateway connection at startup (e.g. a transient Discord API timeout).
+// The watchdog keeps retrying, so a recovery ping follows once it connects.
+func (d *DiscordClient) NotifyDiscordBotStartupError(err error) {
+	if d.WebhookURL == "" {
+		return
+	}
+	payload := map[string]any{
+		"content": d.NotifyPing,
+		"embeds": []map[string]any{
+			{
+				"title":       "Discord Bot Failed to Start",
+				"description": fmt.Sprintf("The Discord listener bot could not connect to the gateway at startup and is not receiving stream announcements.\n**Error:** %v\nRetrying automatically.", err),
+				"color":       15158332, // Red
+				"timestamp":   time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("Version: %s", d.Version),
+				},
+			},
+		},
+	}
+	go d.send(payload)
+}
+
 func (d *DiscordClient) Notify500Error(err error, contextMsg string) {
 	if d.Disabled || d.WebhookURL == "" {
 		return

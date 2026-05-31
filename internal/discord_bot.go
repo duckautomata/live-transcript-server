@@ -98,6 +98,7 @@ func (b *DiscordBot) Start() error {
 		return nil
 	}
 	if err := b.session.Open(); err != nil {
+		b.app.Discord.NotifyDiscordBotStartupError(err)
 		return fmt.Errorf("open discord session: %w", err)
 	}
 	slog.Info("discord bot connected", "func", "DiscordBot.Start", "listening_channels", len(b.channelIDs), "mapped_keys", len(b.channelMap))
