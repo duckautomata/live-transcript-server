@@ -1,5 +1,5 @@
 # 1. Build Stage
-FROM golang:1.26.3-alpine AS gobuilder
+FROM golang:1.26.4-alpine AS gobuilder
 WORKDIR /app
 
 # Install build tools (required for CGO on Alpine)
