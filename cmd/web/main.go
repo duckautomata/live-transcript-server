@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"live-transcript-server/internal"
 	"log/slog"
 	"net/http"
@@ -49,23 +48,13 @@ func main() {
 	}
 
 	// --- Logging Setup ---
-	if err := os.MkdirAll(filepath.Join("tmp", "_logs"), 0755); err != nil {
-		fmt.Printf("failed to create log directory: %v\n", err)
-	}
+	// lumberjack creates the log directory and file lazily, then rotates the
+	// file once it reaches 1MB.
+	logPath := filepath.Join("tmp", "_logs", "server.log")
+	logCloser := internal.SetupLogging(logPath)
+	defer logCloser.Close()
 
-	timestamp := time.Now().Format("2006-01-02_15-04-05")
-	fileName := fmt.Sprintf("%s-server.log", timestamp)
-	filePath := filepath.Join("tmp", "_logs", fileName)
-
-	// Open the log file.
-	logFile, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-	if err != nil {
-		fmt.Printf("unable to open log file: %v\n", err)
-	}
-	defer logFile.Close()
-
-	internal.SetupLogging(logFile)
-
+	slog.Info("========== SERVER START ==========")
 	slog.Info("server starting up", "version", Version, "build_time", BuildTime)
 
 	// --- App Setup ---
@@ -134,6 +123,7 @@ func main() {
 	// Wait for signal
 	<-stop
 
+	slog.Info("========== SERVER STOP ==========")
 	slog.Info("shutting down server...", "func", "main")
 
 	// --- Shutdown Sequence ---

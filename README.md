@@ -145,7 +145,7 @@ When all of that is done, you can run `scripts/run.sh` (or just `go run ./cmd/we
 
 ### Debugging/Logging
 
-Logging is set up for the entire program, and everything should be logged. The console will print info and higher logs (everything but debug). On startup, a log file under `tmp/_logs` will be created and will contain every log. In the event of an error, check this log file to see what went wrong.
+Logging is set up for the entire program, and everything should be logged. The console prints info and higher logs (everything but debug). Every log is also written as JSON to `tmp/_logs/server.log`, which rotates once it reaches 1MB; up to 10 timestamped backups (e.g. `server-<time>.log`) are kept for 90 days, uncompressed so they stay greppable on disk. Each run is bracketed by `========== SERVER START ==========` and `========== SERVER STOP ==========` banner lines so you can quickly find run boundaries. In the event of an error, check `server.log` (or the rotated backups) to see what went wrong.
 
 
 ## Docker

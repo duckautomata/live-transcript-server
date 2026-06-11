@@ -2,8 +2,11 @@ package internal
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 type MultiHandler struct {
@@ -50,12 +53,26 @@ func (m *MultiHandler) WithGroup(name string) slog.Handler {
 	return NewMultiHandler(newHandlers...)
 }
 
-func SetupLogging(logFile *os.File) {
+// SetupLogging configures slog to emit Info+ records to stdout (text) and
+// Debug+ records to a size-rotating JSON log file at logPath. The file rotates
+// once it reaches 1MB; up to 10 rotated backups are retained for 90 days, left
+// uncompressed so the archived logs stay greppable on disk. It returns an
+// io.Closer that flushes and closes the file writer, which the caller should
+// close on shutdown.
+func SetupLogging(logPath string) io.Closer {
+	fileWriter := &lumberjack.Logger{
+		Filename:   logPath,
+		MaxSize:    1,    // megabytes; rotate when the log file reaches 1MB
+		MaxBackups: 10,   // keep up to 10 rotated files
+		MaxAge:     90,   // days to retain rotated files
+		LocalTime:  true, // timestamp backups in local time
+	}
+
 	consoleHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})
 
-	fileHandler := slog.NewJSONHandler(logFile, &slog.HandlerOptions{
+	fileHandler := slog.NewJSONHandler(fileWriter, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	})
 
@@ -63,4 +80,6 @@ func SetupLogging(logFile *os.File) {
 
 	logger := slog.New(multiHandler)
 	slog.SetDefault(logger)
+
+	return fileWriter
 }
