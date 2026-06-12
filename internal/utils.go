@@ -154,6 +154,15 @@ func (app *App) MergeRawAudio(ctx context.Context, channelKey, streamID string, 
 	if err != nil {
 		return "", fmt.Errorf("failed to create merged file: %v", err)
 	}
+	// Remove the merged file unless we successfully hand it back to the caller.
+	// Registered before the Close defer so that (LIFO) the file is closed first,
+	// then removed. Without this, any error below orphans the .raw file in TempDir.
+	success := false
+	defer func() {
+		if !success {
+			os.Remove(mergedFilePath)
+		}
+	}()
 	defer mergedFile.Close()
 
 	// Temporary directory for chunks to ensure thread safety and easy cleanup
@@ -262,6 +271,7 @@ func (app *App) MergeRawAudio(ctx context.Context, channelKey, streamID string, 
 		f.Close()
 	}
 
+	success = true
 	return mergedFilePath, nil
 }
 

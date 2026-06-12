@@ -1440,7 +1440,7 @@ func (app *App) postClipHandler(w http.ResponseWriter, r *http.Request) {
 	mergeAudioStart := time.Now()
 	mergedRawPath, err := app.MergeRawAudio(r.Context(), cs.Key, req.StreamID, fileIDs, uniqueID)
 	if err != nil {
-		os.Remove(mergedRawPath)
+		// MergeRawAudio cleans up its own partial output on error; mergedRawPath is "" here.
 		http.Error(w, "Server error", http.StatusInternalServerError)
 		app.report500(r, err, "unable to merge raw audio", "key", cs.Key, "func", "postClipHandler", "startID", start, "endID", end)
 		return

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"live-transcript-server/internal/storage"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -67,5 +68,42 @@ func TestMergeRawAudio(t *testing.T) {
 	expected := "Part1Part2"
 	if string(content) != expected {
 		t.Errorf("expected %s, got %s", expected, string(content))
+	}
+}
+
+// TestMergeRawAudioCleansUpOnError ensures a failed merge does not leave an
+// orphaned {outputName}.raw file (or temp merge dir) behind in TempDir.
+func TestMergeRawAudioCleansUpOnError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	store, _ := storage.NewLocalStorage(tmpDir, "")
+	app := &App{
+		TempDir: tmpDir,
+		Storage: store,
+	}
+
+	channelKey := "testchannel"
+	streamID := "stream1"
+
+	// Only file1 exists; the missing second file forces a download error mid-merge.
+	file1Key := fmt.Sprintf("%s/%s/raw/%s.raw", channelKey, streamID, "file1")
+	app.Storage.Save(context.TODO(), file1Key, strings.NewReader("Part1"), int64(len("Part1")))
+
+	outputName := "orphan_check"
+	fileIDs := []string{"file1", "missing_file"}
+
+	if _, err := app.MergeRawAudio(context.TODO(), channelKey, streamID, fileIDs, outputName); err == nil {
+		t.Fatal("expected MergeRawAudio to fail when a source file is missing, got nil")
+	}
+
+	// The merged output file must not be left behind in TempDir.
+	mergedPath := filepath.Join(tmpDir, outputName+".raw")
+	if _, statErr := os.Stat(mergedPath); !os.IsNotExist(statErr) {
+		t.Errorf("orphaned merged file left behind at %s (stat err: %v)", mergedPath, statErr)
+	}
+
+	// No temp merge directories should remain either.
+	if leftovers, _ := filepath.Glob(filepath.Join(tmpDir, "merge_"+outputName+"_*")); len(leftovers) > 0 {
+		t.Errorf("orphaned temp merge dirs left behind: %v", leftovers)
 	}
 }
