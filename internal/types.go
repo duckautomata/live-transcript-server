@@ -182,6 +182,12 @@ type ChannelState struct {
 	ActiveMediaFolder string
 	BaseMediaFolder   string
 	NumPastStreams    int
+
+	// AdminChangeCounter versions the admin-visible state of the channel for
+	// the GET /{channel}/admin/poll long poll. Bumped (via bumpAdminChange)
+	// on incoming/restart/stream changes; seeded from the clock so a client
+	// holding a pre-restart counter resyncs immediately. Access atomically.
+	AdminChangeCounter int64
 }
 
 // App holds the application-wide dependencies and configuration.

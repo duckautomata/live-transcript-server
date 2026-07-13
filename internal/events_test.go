@@ -209,3 +209,120 @@ func TestEvents_ShutdownReleasesParkedPoll(t *testing.T) {
 		t.Fatal("parked poll was not released on shutdown")
 	}
 }
+
+// pollAdmin performs a GET /{channel}/admin/poll request. counter is -100 for
+// non-200 responses.
+func pollAdmin(t *testing.T, mux *http.ServeMux, adminKey, channel string, since int64, wait int) (int, int64) {
+	t.Helper()
+	url := fmt.Sprintf("/%s/admin/poll?since=%d&wait=%d", channel, since, wait)
+	req, _ := http.NewRequest("GET", url, nil)
+	if adminKey != "" {
+		req.Header.Set("X-Admin-Key", adminKey)
+	}
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		return rr.Code, -100
+	}
+	var resp AdminPollResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode admin poll response: %v", err)
+	}
+	return rr.Code, resp.Counter
+}
+
+func TestAdminPoll_FirstPollAndTimeout(t *testing.T) {
+	key := "adminpoll-basic"
+	_, mux, _ := setupTestApp(t, []string{key})
+
+	// No admin key -> 403.
+	code, _ := pollAdmin(t, mux, "", key, -1, 0)
+	if code != http.StatusForbidden {
+		t.Errorf("expected 403 without admin key, got %d", code)
+	}
+
+	// First poll (since=-1) answers immediately with the current counter.
+	code, counter := pollAdmin(t, mux, "admin-"+key, key, -1, 0)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 on first poll, got %d", code)
+	}
+	if counter <= 0 {
+		t.Fatalf("expected clock-seeded counter, got %d", counter)
+	}
+
+	// Nothing changed: same since times out with 204.
+	code, _ = pollAdmin(t, mux, "admin-"+key, key, counter, 0)
+	if code != http.StatusNoContent {
+		t.Errorf("expected 204 when counter unchanged, got %d", code)
+	}
+}
+
+func TestAdminPoll_BumpsOnAdminAndWorkerActions(t *testing.T) {
+	key := "adminpoll-bumps"
+	app, mux, _ := setupTestApp(t, []string{key})
+
+	_, counter := pollAdmin(t, mux, "admin-"+key, key, -1, 0)
+
+	// Admin queues a URL -> counter advances.
+	body := strings.NewReader(`{"url": "https://twitch.tv/foo"}`)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/admin/incoming", key), body)
+	req.Header.Set("X-Admin-Key", "admin-"+key)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("failed to queue incoming url: %d", rr.Code)
+	}
+	code, next := pollAdmin(t, mux, "admin-"+key, key, counter, 0)
+	if code != http.StatusOK || next <= counter {
+		t.Fatalf("expected advanced counter after admin action, got %d %d->%d", code, counter, next)
+	}
+	counter = next
+
+	// Worker removes the URL -> counter advances again (the page shows the queue).
+	req, _ = http.NewRequest("DELETE", fmt.Sprintf("/%s/incoming?url=%s", key, "https://twitch.tv/foo"), nil)
+	req.Header.Set("X-API-Key", app.ApiKey)
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("worker failed to delete incoming url: %d", rr.Code)
+	}
+	code, next = pollAdmin(t, mux, "admin-"+key, key, counter, 0)
+	if code != http.StatusOK || next <= counter {
+		t.Fatalf("expected advanced counter after worker ack, got %d %d->%d", code, counter, next)
+	}
+}
+
+func TestAdminPoll_WakesParkedPoll(t *testing.T) {
+	key := "adminpoll-wake"
+	_, mux, _ := setupTestApp(t, []string{key})
+
+	_, counter := pollAdmin(t, mux, "admin-"+key, key, -1, 0)
+
+	type result struct {
+		code    int
+		counter int64
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, next := pollAdmin(t, mux, "admin-"+key, key, counter, 10)
+		done <- result{code, next}
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("/%s/admin/restart", key), nil)
+	req.Header.Set("X-Admin-Key", "admin-"+key)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("failed to request restart: %d", rr.Code)
+	}
+
+	select {
+	case res := <-done:
+		if res.code != http.StatusOK || res.counter <= counter {
+			t.Errorf("expected woken poll with advanced counter, got %d %d->%d", res.code, counter, res.counter)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("parked admin poll was not woken by the restart post")
+	}
+}

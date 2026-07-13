@@ -161,7 +161,7 @@ func (app *App) postAdminIncomingHandler(w http.ResponseWriter, r *http.Request)
 		slog.Error("failed to upsert incoming stream", "key", channelKey, "func", "postAdminIncomingHandler", "err", err)
 		return
 	}
-	app.notifyWorkerEvents()
+	app.bumpAdminChange(channelKey)
 	slog.Info("admin queued incoming stream", "key", channelKey, "func", "postAdminIncomingHandler", "url", url)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -187,6 +187,7 @@ func (app *App) deleteAdminIncomingHandler(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "URL not queued", http.StatusNotFound)
 		return
 	}
+	app.bumpAdminChange(channelKey)
 	slog.Info("admin removed incoming stream", "key", channelKey, "func", "deleteAdminIncomingHandler", "url", url)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -201,7 +202,7 @@ func (app *App) postAdminRestartHandler(w http.ResponseWriter, r *http.Request) 
 		slog.Error("failed to set restart request", "key", channelKey, "func", "postAdminRestartHandler", "err", err)
 		return
 	}
-	app.notifyWorkerEvents()
+	app.bumpAdminChange(channelKey)
 	slog.Info("admin requested worker restart", "key", channelKey, "func", "postAdminRestartHandler", "requestedAt", now)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -217,6 +218,9 @@ func (app *App) deleteAdminRestartHandler(w http.ResponseWriter, r *http.Request
 		Http500Errors.Inc()
 		slog.Error("failed to clear restart request", "key", channelKey, "func", "deleteAdminRestartHandler", "err", err)
 		return
+	}
+	if rowsAffected > 0 {
+		app.bumpAdminChange(channelKey)
 	}
 	slog.Info("admin cleared restart request", "key", channelKey, "func", "deleteAdminRestartHandler", "wasPending", rowsAffected > 0)
 	w.WriteHeader(http.StatusNoContent)
@@ -262,6 +266,7 @@ func (app *App) deleteAdminStreamHandler(w http.ResponseWriter, r *http.Request)
 		slog.Error("failed to remove stream", "key", channelKey, "func", "deleteAdminStreamHandler", "streamID", streamID, "err", err)
 		return
 	}
+	app.bumpAdminChange(channelKey)
 	slog.Info("admin deleted stream", "key", channelKey, "func", "deleteAdminStreamHandler", "streamID", streamID, "wasLive", stream.IsLive, "deleteMedia", deleteMedia)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -288,7 +293,7 @@ func (app *App) postAdminStopHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("failed to set restart request", "key", channelKey, "func", "postAdminStopHandler", "err", err)
 		return
 	}
-	app.notifyWorkerEvents()
+	app.bumpAdminChange(channelKey)
 	slog.Info("admin stopped current stream", "key", channelKey, "func", "postAdminStopHandler", "queueCleared", cleared, "restartAt", now)
 	w.WriteHeader(http.StatusNoContent)
 }

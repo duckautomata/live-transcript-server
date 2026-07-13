@@ -69,6 +69,7 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	// Admin UI + admin-key protected routes
 	mux.HandleFunc("GET /{channel}/ui", app.adminUIHandler)
 	mux.HandleFunc("GET /{channel}/admin/info", app.adminKeyMiddleware(app.getAdminInfoHandler))
+	mux.HandleFunc("GET /{channel}/admin/poll", app.adminKeyMiddleware(app.adminPollHandler))
 	mux.HandleFunc("POST /{channel}/admin/incoming", app.adminKeyMiddleware(app.postAdminIncomingHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/incoming", app.adminKeyMiddleware(app.deleteAdminIncomingHandler))
 	mux.HandleFunc("POST /{channel}/admin/restart", app.adminKeyMiddleware(app.postAdminRestartHandler))
@@ -205,11 +206,12 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 		os.MkdirAll(baseFolder, 0755)
 
 		cs := &ChannelState{
-			Key:             cc.Name,
-			AdminKey:        cc.AdminKey,
-			MembersName:     cc.MembersName,
-			BaseMediaFolder: baseFolder,
-			NumPastStreams:  cc.NumPastStreams,
+			Key:                cc.Name,
+			AdminKey:           cc.AdminKey,
+			MembersName:        cc.MembersName,
+			BaseMediaFolder:    baseFolder,
+			NumPastStreams:     cc.NumPastStreams,
+			AdminChangeCounter: time.Now().UnixMilli(),
 		}
 		app.Channels[cc.Name] = cs
 	}
@@ -456,6 +458,7 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, streamID s
 
 	if msg.Event != "" {
 		cs.broadcast(msg)
+		app.bumpAdminChange(cs.Key)
 		return true
 	}
 
@@ -500,6 +503,7 @@ func (app *App) deactivateStream(ctx context.Context, cs *ChannelState, streamID
 
 	if msg.Event != "" {
 		cs.broadcast(msg)
+		app.bumpAdminChange(cs.Key)
 		return true
 	}
 
@@ -572,6 +576,7 @@ func (app *App) syncHandler(w http.ResponseWriter, r *http.Request) {
 		app.report500(r, err, "failed to replace transcript")
 		return
 	}
+	app.bumpAdminChange(cs.Key)
 
 	app.broadcastNewLine(r.Context(), cs, data.StreamID, uploadTime, nil)
 
@@ -1067,6 +1072,7 @@ func (app *App) deleteIncomingHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "URL not queued", http.StatusNotFound)
 		return
 	}
+	app.bumpAdminChange(cs.Key)
 
 	slog.Info("incoming stream removed", "key", cs.Key, "func", "deleteIncomingHandler", "url", url)
 	w.WriteHeader(http.StatusNoContent)
@@ -1097,7 +1103,7 @@ func (app *App) postRestartHandler(w http.ResponseWriter, r *http.Request) {
 		app.report500(r, err, "failed to upsert restart request", "key", cs.Key, "func", "postRestartHandler")
 		return
 	}
-	app.notifyWorkerEvents()
+	app.bumpAdminChange(cs.Key)
 
 	slog.Info("worker restart requested", "key", cs.Key, "func", "postRestartHandler", "requestedAt", now)
 	w.WriteHeader(http.StatusNoContent)
@@ -1156,6 +1162,7 @@ func (app *App) deleteRestartHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No restart pending", http.StatusNotFound)
 		return
 	}
+	app.bumpAdminChange(cs.Key)
 
 	slog.Info("restart request cleared", "key", cs.Key, "func", "deleteRestartHandler")
 	w.WriteHeader(http.StatusNoContent)

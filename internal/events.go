@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,29 @@ const (
 type WorkerEventsResponse struct {
 	Cursor int64               `json:"cursor"`
 	Events map[string][]string `json:"events"`
+}
+
+// AdminPollResponse is returned by GET /{channel}/admin/poll. Counter is the
+// channel's current admin change counter; the page echoes it back via ?since=
+// so the poll only answers when something it displays has changed.
+type AdminPollResponse struct {
+	Counter int64 `json:"counter"`
+}
+
+// bumpAdminChange advances the channel's admin change counter and wakes every
+// parked long poll (both GET /events and GET /{channel}/admin/poll — they
+// share the app-wide signal; a spurious wakeup costs one cheap recheck).
+// Call it after any write an admin page viewer should see promptly: incoming
+// queue changes, restart flag changes, and stream state changes. Deliberately
+// NOT bumped: worker status heartbeats and client connect/disconnect — they
+// churn constantly and the page has a slow fallback refresh for them.
+func (app *App) bumpAdminChange(channelKey string) {
+	cs, ok := app.Channels[channelKey]
+	if !ok {
+		return
+	}
+	atomic.AddInt64(&cs.AdminChangeCounter, 1)
+	app.notifyWorkerEvents()
 }
 
 // notifyWorkerEvents wakes every parked GET /events long-poll. The broadcast
@@ -95,6 +119,73 @@ func (app *App) collectWorkerEvents(ctx context.Context, keys []string, since in
 	return resp, nil
 }
 
+// parseWaitSeconds reads the `wait` query parameter, clamped to
+// [0, maxEventsWaitSeconds], defaulting to defaultEventsWaitSeconds.
+func parseWaitSeconds(r *http.Request) time.Duration {
+	waitSeconds := defaultEventsWaitSeconds
+	if v := r.URL.Query().Get("wait"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed >= 0 {
+			waitSeconds = min(parsed, maxEventsWaitSeconds)
+		}
+	}
+	return time.Duration(waitSeconds) * time.Second
+}
+
+// adminPollHandler is the admin page's long-poll notification endpoint:
+// GET /{channel}/admin/poll?since=<counter>&wait=<seconds>.
+// It answers with the channel's current change counter as soon as it differs
+// from `since` (immediately for a first poll or after a server restart, since
+// counters are seeded from the clock), and otherwise parks until a bump or
+// the wait elapses (204 No Content). The page then fetches /admin/info as
+// usual — this endpoint only says when, never what.
+func (app *App) adminPollHandler(w http.ResponseWriter, r *http.Request) {
+	channelKey := r.PathValue("channel")
+	cs := app.Channels[channelKey] // existence guaranteed by adminKeyMiddleware
+
+	since, err := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+	if err != nil {
+		since = -1
+	}
+	deadline := time.Now().Add(parseWaitSeconds(r))
+
+	for {
+		// Subscribe before checking so a bump that lands between the check
+		// and the park still closes this signal and wakes the select below.
+		signal := app.workerEventsSignal()
+
+		current := atomic.LoadInt64(&cs.AdminChangeCounter)
+		if current != since {
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(AdminPollResponse{Counter: current}); err != nil {
+				slog.Error("failed to encode admin poll response", "key", channelKey, "func", "adminPollHandler", "err", err)
+			}
+			return
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-signal:
+			timer.Stop()
+			// Something was bumped somewhere — loop to recheck our counter.
+		case <-timer.C:
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case <-r.Context().Done():
+			timer.Stop()
+			return
+		case <-app.eventsShutdown:
+			timer.Stop()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+}
+
 // getEventsHandler is the worker's long-poll notification endpoint:
 // GET /events?channels=a,b&since=<cursor>&wait=<seconds>.
 // It answers immediately when any listed channel has a pending signal and
@@ -124,13 +215,7 @@ func (app *App) getEventsHandler(w http.ResponseWriter, r *http.Request) {
 		since = 0
 	}
 
-	waitSeconds := defaultEventsWaitSeconds
-	if v := r.URL.Query().Get("wait"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed >= 0 {
-			waitSeconds = min(parsed, maxEventsWaitSeconds)
-		}
-	}
-	deadline := time.Now().Add(time.Duration(waitSeconds) * time.Second)
+	deadline := time.Now().Add(parseWaitSeconds(r))
 
 	for {
 		// Subscribe before checking so a write that lands between the check

@@ -615,7 +615,10 @@
   const apiBase = window.location.pathname.replace(/\/ui\/?$/, '');
   const channel = decodeURIComponent(apiBase.split('/').pop() || '');
   const storageKey = `lt-admin-key:${channel}`;
-  const REFRESH_MS = 5000;
+  // Fallback refresh cadence. Instant updates come from the /admin/poll long
+  // poll below; this interval only covers what the poll deliberately ignores
+  // (worker last-seen heartbeats, connected-client counts).
+  const REFRESH_MS = 60000;
 
   // ---------- DOM ----------
   const $ = (id) => document.getElementById(id);
@@ -733,6 +736,7 @@
     try {
       const info = await api('GET', '/info');
       setAuthState('ok');
+      lastInfo = info;
       render(info);
       hasLoadedOnce = true;
       hideAuthModal();
@@ -1040,6 +1044,7 @@
   }
 
   let hasLoadedOnce = false;
+  let lastInfo = null;
   let membershipLoaded = false;
   async function refresh() {
     if (!getKey()) {
@@ -1050,6 +1055,7 @@
     try {
       const info = await api('GET', '/info');
       setAuthState('ok');
+      lastInfo = info;
       render(info);
       hasLoadedOnce = true;
     } catch (e) {
@@ -1182,9 +1188,44 @@
     refresh();
   }, REFRESH_MS);
 
+  // Re-render from cached data so relative labels ("last seen 30s ago") keep
+  // ticking between refreshes.
+  setInterval(() => {
+    if (!document.hidden && lastInfo) render(lastInfo);
+  }, 10000);
+
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) refresh();
   });
+
+  // ---------- Live updates ----------
+  // Long poll /admin/poll: the server answers with its change counter as soon
+  // as something this page displays changes (incoming queue, restart flag,
+  // stream state), or 204 after ~25s of nothing. Each answer triggers a
+  // normal /info refresh — the poll only says when, never what.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let pollCounter = -1;
+  async function pollLoop() {
+    for (;;) {
+      if (document.hidden || !getKey()) { await sleep(1000); continue; }
+      try {
+        const res = await fetch(`${apiBase}/admin/poll?since=${pollCounter}&wait=25`, {
+          headers: { 'X-Admin-Key': getKey() },
+        });
+        if (res.status === 200) {
+          pollCounter = (await res.json()).counter;
+          await refresh();
+        } else if (res.status !== 204) {
+          // Bad key or transient server error: back off. Auth handling (the
+          // modal and status pill) is owned by the refresh()/api() path.
+          await sleep(5000);
+        }
+      } catch (e) {
+        await sleep(5000);
+      }
+    }
+  }
+  pollLoop();
 })();
 </script>
 </body>

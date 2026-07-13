@@ -168,7 +168,7 @@ func (b *DiscordBot) onMessage(_ *discordgo.Session, m *discordgo.MessageCreate)
 		slog.Error("failed to store incoming stream", "func", "DiscordBot.onMessage", "key", key, "url", url, "err", err)
 		return
 	}
-	b.app.notifyWorkerEvents()
+	b.app.bumpAdminChange(key)
 	slog.Info("incoming stream queued", "func", "DiscordBot.onMessage", "key", key, "url", url, "messageId", m.ID)
 }
 
