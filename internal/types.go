@@ -207,6 +207,15 @@ type App struct {
 	ArchiveKey    string
 	ArchiveClient *http.Client
 
+	// Signals for the GET /events worker long-poll. eventsSignal is closed
+	// and replaced on every notifyWorkerEvents call; eventsShutdown is closed
+	// once (via ReleaseEventPolls) to release parked polls before the HTTP
+	// server drains on shutdown.
+	eventsLock         sync.Mutex
+	eventsSignal       chan struct{}
+	eventsShutdown     chan struct{}
+	eventsShutdownOnce sync.Once
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup

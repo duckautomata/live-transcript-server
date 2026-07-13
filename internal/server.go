@@ -59,6 +59,7 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /{channel}/media/{streamID}/{id}", app.apiKeyMiddleware(app.mediaHandler))
 	mux.HandleFunc("GET /{channel}/statuscheck", app.apiKeyMiddleware(app.statuscheckHandler))
 	mux.HandleFunc("POST /status", app.apiKeyMiddleware(app.workerStatusHandler))
+	mux.HandleFunc("GET /events", app.apiKeyMiddleware(app.getEventsHandler))
 	mux.HandleFunc("GET /{channel}/incoming", app.apiKeyMiddleware(app.getIncomingHandler))
 	mux.HandleFunc("DELETE /{channel}/incoming", app.apiKeyMiddleware(app.deleteIncomingHandler))
 	mux.HandleFunc("POST /{channel}/restart", app.apiKeyMiddleware(app.postRestartHandler))
@@ -188,6 +189,8 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 		ArchiveURL:        strings.TrimRight(config.ArchiveURL, "/"),
 		ArchiveKey:        config.ArchiveKey,
 		ArchiveClient:     &http.Client{Timeout: 10 * time.Second},
+		eventsSignal:      make(chan struct{}),
+		eventsShutdown:    make(chan struct{}),
 	}
 	app.ctx, app.cancel = context.WithCancel(context.Background())
 
@@ -1094,6 +1097,7 @@ func (app *App) postRestartHandler(w http.ResponseWriter, r *http.Request) {
 		app.report500(r, err, "failed to upsert restart request", "key", cs.Key, "func", "postRestartHandler")
 		return
 	}
+	app.notifyWorkerEvents()
 
 	slog.Info("worker restart requested", "key", cs.Key, "func", "postRestartHandler", "requestedAt", now)
 	w.WriteHeader(http.StatusNoContent)
