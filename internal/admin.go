@@ -161,6 +161,7 @@ func (app *App) postAdminIncomingHandler(w http.ResponseWriter, r *http.Request)
 		slog.Error("failed to upsert incoming stream", "key", channelKey, "func", "postAdminIncomingHandler", "err", err)
 		return
 	}
+	app.notifyWorkerEvents()
 	slog.Info("admin queued incoming stream", "key", channelKey, "func", "postAdminIncomingHandler", "url", url)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -200,6 +201,7 @@ func (app *App) postAdminRestartHandler(w http.ResponseWriter, r *http.Request) 
 		slog.Error("failed to set restart request", "key", channelKey, "func", "postAdminRestartHandler", "err", err)
 		return
 	}
+	app.notifyWorkerEvents()
 	slog.Info("admin requested worker restart", "key", channelKey, "func", "postAdminRestartHandler", "requestedAt", now)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -286,6 +288,7 @@ func (app *App) postAdminStopHandler(w http.ResponseWriter, r *http.Request) {
 		slog.Error("failed to set restart request", "key", channelKey, "func", "postAdminStopHandler", "err", err)
 		return
 	}
+	app.notifyWorkerEvents()
 	slog.Info("admin stopped current stream", "key", channelKey, "func", "postAdminStopHandler", "queueCleared", cleared, "restartAt", now)
 	w.WriteHeader(http.StatusNoContent)
 }

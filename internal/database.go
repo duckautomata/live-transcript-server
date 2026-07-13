@@ -572,6 +572,19 @@ func (a *App) GetIncomingStreams(ctx context.Context, channelKey string) ([]stri
 	return urls, nil
 }
 
+// GetLatestIncomingTime returns the newest received_at among the URLs queued
+// for a channel, or 0 when the queue is empty. Used by the GET /events long
+// poll as an edge-trigger cursor so a queue that stays populated for a whole
+// stream is only reported once.
+func (a *App) GetLatestIncomingTime(ctx context.Context, channelKey string) (int64, error) {
+	var latest int64
+	err := a.DB.QueryRowContext(ctx, "SELECT COALESCE(MAX(received_at), 0) FROM incoming_streams WHERE channel_key = ?", channelKey).Scan(&latest)
+	if err != nil {
+		return 0, err
+	}
+	return latest, nil
+}
+
 // DeleteIncomingStream removes a single (channel_key, url) entry. Returns the
 // number of rows deleted so callers can distinguish "not found" from "removed".
 func (a *App) DeleteIncomingStream(ctx context.Context, channelKey, url string) (int64, error) {

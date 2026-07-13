@@ -130,6 +130,9 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
+	// Release parked GET /events long-polls so Shutdown doesn't wait for them
+	app.ReleaseEventPolls()
+
 	// Shutdown HTTP Server first
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("failed to shutdown HTTP server", "func", "main", "err", err)
