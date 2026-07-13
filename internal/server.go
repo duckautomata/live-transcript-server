@@ -74,6 +74,9 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /{channel}/admin/restart", app.adminKeyMiddleware(app.deleteAdminRestartHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/stream/{streamID}", app.adminKeyMiddleware(app.deleteAdminStreamHandler))
 	mux.HandleFunc("POST /{channel}/admin/stop", app.adminKeyMiddleware(app.postAdminStopHandler))
+	mux.HandleFunc("GET /{channel}/admin/membership", app.adminKeyMiddleware(app.getAdminMembershipHandler))
+	mux.HandleFunc("POST /{channel}/admin/membership", app.adminKeyMiddleware(app.postAdminMembershipHandler))
+	mux.HandleFunc("DELETE /{channel}/admin/membership", app.adminKeyMiddleware(app.deleteAdminMembershipHandler))
 
 	// Public routes
 	mux.HandleFunc("GET /status", app.getStatusHandler)
@@ -182,6 +185,9 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 		IncomingStreamTTL: time.Duration(ttlMinutes) * time.Minute,
 		Version:           version,
 		BuildTime:         buildTime,
+		ArchiveURL:        strings.TrimRight(config.ArchiveURL, "/"),
+		ArchiveKey:        config.ArchiveKey,
+		ArchiveClient:     &http.Client{Timeout: 10 * time.Second},
 	}
 	app.ctx, app.cancel = context.WithCancel(context.Background())
 
@@ -198,6 +204,7 @@ func NewApp(config Config, db *sql.DB, tempDir, version, buildTime string) *App 
 		cs := &ChannelState{
 			Key:             cc.Name,
 			AdminKey:        cc.AdminKey,
+			MembersName:     cc.MembersName,
 			BaseMediaFolder: baseFolder,
 			NumPastStreams:  cc.NumPastStreams,
 		}

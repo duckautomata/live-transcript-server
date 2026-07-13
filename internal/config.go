@@ -11,6 +11,10 @@ type ChannelConfig struct {
 	Name           string `yaml:"name"`
 	NumPastStreams int    `yaml:"numPastStreams"`
 	AdminKey       string `yaml:"adminKey"`
+	// MembersName is the archive server's channel name for this channel's
+	// membership keys. Empty means the membership-key admin section is
+	// disabled for this channel.
+	MembersName string `yaml:"membersName"`
 }
 
 type R2Config struct {
@@ -54,10 +58,14 @@ type Config struct {
 	Credentials struct {
 		ApiKey string `yaml:"apiKey"`
 	} `yaml:"credentials"`
-	Database DatabaseConfig  `yaml:"database"`
-	Storage  StorageConfig   `yaml:"storage"`
-	Channels []ChannelConfig `yaml:"channels"`
-	Discord  DiscordConfig   `yaml:"discord"`
+	// ArchiveURL and ArchiveKey connect the admin page to the archive server
+	// for membership-key management. Leave blank to disable the feature.
+	ArchiveURL string          `yaml:"archiveUrl"`
+	ArchiveKey string          `yaml:"archiveKey"`
+	Database   DatabaseConfig  `yaml:"database"`
+	Storage    StorageConfig   `yaml:"storage"`
+	Channels   []ChannelConfig `yaml:"channels"`
+	Discord    DiscordConfig   `yaml:"discord"`
 }
 
 func GetConfig() (Config, error) {

@@ -9,6 +9,11 @@ credentials:
   # credentials used to restrict the activate/deactive/update/upload endpoints
   apiKey: ""
 
+# Config for connecting the admin page to the archive server.
+# Used for managing the membership keys. Leave blank if you do not want this feature.
+archiveUrl: ""
+archiveKey: ""
+
 # Database configuration used to tune performance
 # See https://www.sqlite.org/pragma.html for more information
 database:
@@ -35,13 +40,14 @@ channels:
   # Note: if using R2, numPastStreams is ignored and the bucket's lifecycle policy is used instead.
   # adminKey gates the per-channel admin UI (/{name}/ui) and admin endpoints
   # (/{name}/admin/*). Leave empty to disable admin operations for the channel.
+  # membersName is for the admin page membership key management. omit/empty -> no members
   - name: key1
     numPastStreams: 5
     adminKey: ""
+    membersName: ""
   - name: key2
     numPastStreams: 0
     adminKey: ""
-
 # Discord configuration used to send system notifications.
 # Optional. If left empty, no notifications will be sent.
 discord:

@@ -48,6 +48,10 @@ type AdminInfoResponse struct {
 	RestartAt        int64         `json:"restartRequestedAt"`
 	Server           ServerInfo    `json:"server"`
 	ConnectedClients int           `json:"connectedClients"`
+	// MembershipEnabled tells the admin UI whether to render the membership-key
+	// section for this channel. True only when the archive server is configured
+	// and this channel has an archive-side name mapped.
+	MembershipEnabled bool `json:"membershipEnabled"`
 }
 
 func (app *App) getAdminInfoHandler(w http.ResponseWriter, r *http.Request) {
@@ -110,15 +114,16 @@ func (app *App) getAdminInfoHandler(w http.ResponseWriter, r *http.Request) {
 	cs.ClientsLock.Unlock()
 
 	resp := AdminInfoResponse{
-		Channel:          channelKey,
-		Worker:           worker,
-		CurrentStream:    currentStream,
-		Streams:          streams,
-		IncomingURLs:     incoming,
-		RestartPending:   restartAt > 0,
-		RestartAt:        restartAt,
-		Server:           ServerInfo{Version: app.Version, BuildTime: app.BuildTime},
-		ConnectedClients: connections,
+		Channel:           channelKey,
+		Worker:            worker,
+		CurrentStream:     currentStream,
+		Streams:           streams,
+		IncomingURLs:      incoming,
+		RestartPending:    restartAt > 0,
+		RestartAt:         restartAt,
+		Server:            ServerInfo{Version: app.Version, BuildTime: app.BuildTime},
+		ConnectedClients:  connections,
+		MembershipEnabled: app.membershipEnabled(cs),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -282,6 +287,81 @@ func (app *App) postAdminStopHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("admin stopped current stream", "key", channelKey, "func", "postAdminStopHandler", "queueCleared", cleared, "restartAt", now)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// getAdminMembershipHandler lists the membership keys for this channel by
+// proxying to the archive server. The archive-side channel name is taken from
+// config (cs.MembersName), never from the request, so a channel admin can only
+// ever see their own channel's keys. Side-effect-free.
+func (app *App) getAdminMembershipHandler(w http.ResponseWriter, r *http.Request) {
+	channelKey := r.PathValue("channel")
+	cs := app.Channels[channelKey] // existence guaranteed by middleware
+	if !app.membershipEnabled(cs) {
+		http.Error(w, "Membership management is disabled for this channel", http.StatusNotFound)
+		return
+	}
+
+	keys, err := app.listMembershipKeys(r.Context(), cs.MembersName)
+	if err != nil {
+		http.Error(w, "Archive server error", http.StatusBadGateway)
+		Http500Errors.Inc()
+		slog.Error("failed to list membership keys", "key", channelKey, "membersName", cs.MembersName, "func", "getAdminMembershipHandler", "err", err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(keys); err != nil {
+		slog.Error("failed to encode membership keys", "key", channelKey, "func", "getAdminMembershipHandler", "err", err)
+	}
+}
+
+// postAdminMembershipHandler creates (or rotates) a membership key for this
+// channel by proxying to the archive server. The archive enforces a 2-key cap
+// and prunes older keys itself.
+func (app *App) postAdminMembershipHandler(w http.ResponseWriter, r *http.Request) {
+	channelKey := r.PathValue("channel")
+	cs := app.Channels[channelKey] // existence guaranteed by middleware
+	if !app.membershipEnabled(cs) {
+		http.Error(w, "Membership management is disabled for this channel", http.StatusNotFound)
+		return
+	}
+
+	key, err := app.createMembershipKey(r.Context(), cs.MembersName)
+	if err != nil {
+		http.Error(w, "Archive server error", http.StatusBadGateway)
+		Http500Errors.Inc()
+		slog.Error("failed to create membership key", "key", channelKey, "membersName", cs.MembersName, "func", "postAdminMembershipHandler", "err", err)
+		return
+	}
+
+	// Deliberately do not log the key value.
+	slog.Info("admin created membership key", "key", channelKey, "membersName", cs.MembersName, "func", "postAdminMembershipHandler", "expiresAt", key.ExpiresAt)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(key); err != nil {
+		slog.Error("failed to encode created membership key", "key", channelKey, "func", "postAdminMembershipHandler", "err", err)
+	}
+}
+
+// deleteAdminMembershipHandler deletes all membership keys for this channel by
+// proxying to the archive server. The archive API has no per-key delete, so
+// this removes every key for the channel.
+func (app *App) deleteAdminMembershipHandler(w http.ResponseWriter, r *http.Request) {
+	channelKey := r.PathValue("channel")
+	cs := app.Channels[channelKey] // existence guaranteed by middleware
+	if !app.membershipEnabled(cs) {
+		http.Error(w, "Membership management is disabled for this channel", http.StatusNotFound)
+		return
+	}
+
+	if err := app.deleteMembershipKeys(r.Context(), cs.MembersName); err != nil {
+		http.Error(w, "Archive server error", http.StatusBadGateway)
+		Http500Errors.Inc()
+		slog.Error("failed to delete membership keys", "key", channelKey, "membersName", cs.MembersName, "func", "deleteAdminMembershipHandler", "err", err)
+		return
+	}
+
+	slog.Info("admin deleted all membership keys", "key", channelKey, "membersName", cs.MembersName, "func", "deleteAdminMembershipHandler")
 	w.WriteHeader(http.StatusNoContent)
 }
 

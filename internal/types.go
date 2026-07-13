@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/http"
 	"sync"
 	"time"
 
@@ -174,6 +175,7 @@ type EventDeletedStreamData struct {
 type ChannelState struct {
 	Key               string
 	AdminKey          string
+	MembersName       string // archive-server channel name; empty disables membership-key admin
 	ClientsLock       sync.Mutex
 	Clients           []*Client
 	ClientConnections int
@@ -197,6 +199,13 @@ type App struct {
 	IncomingStreamTTL time.Duration
 	Version           string
 	BuildTime         string
+
+	// Archive server connection for membership-key management. ArchiveURL is
+	// stored without a trailing slash. ArchiveClient is nil-safe: it's only
+	// used when membership is enabled for a channel.
+	ArchiveURL    string
+	ArchiveKey    string
+	ArchiveClient *http.Client
 
 	ctx    context.Context
 	cancel context.CancelFunc

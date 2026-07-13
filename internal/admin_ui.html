@@ -4,6 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Admin · Live Transcript</title>
+<!-- Inlined SVG favicon (gear/cog admin mark on a dark tile). Inlined as a data
+     URI so it needs no extra server route and works under a reverse-proxy
+     subpath, where a root /favicon.ico request would 404. -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230b1220'/><g fill='%2338bdf8'><rect x='14.3' y='1.8' width='3.4' height='6.4' rx='1'/><rect x='14.3' y='1.8' width='3.4' height='6.4' rx='1' transform='rotate(45 16 16)'/><rect x='14.3' y='1.8' width='3.4' height='6.4' rx='1' transform='rotate(90 16 16)'/><rect x='14.3' y='1.8' width='3.4' height='6.4' rx='1' transform='rotate(135 16 16)'/><rect x='14.3' y='1.8' width='3.4' height='6.4' rx='1' transform='rotate(180 16 16)'/><rect x='14.3' y='1.8' width='3.4' height='6.4' rx='1' transform='rotate(225 16 16)'/><rect x='14.3' y='1.8' width='3.4' height='6.4' rx='1' transform='rotate(270 16 16)'/><rect x='14.3' y='1.8' width='3.4' height='6.4' rx='1' transform='rotate(315 16 16)'/><circle cx='16' cy='16' r='8.5'/></g><circle cx='16' cy='16' r='3.6' fill='%230b1220'/></svg>" />
 <style>
   :root {
     /* Dark theme (default). Overridden by the light-mode media query below
@@ -152,6 +156,36 @@
   }
   .stat .dot.online { background: var(--success); box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.15); }
   .stat .dot.offline { background: var(--danger); }
+
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: var(--gap);
+    border-bottom: 1px solid var(--border);
+  }
+  button.tab-btn {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    color: var(--text-muted);
+    padding: 10px 16px;
+    font-weight: 500;
+    margin-bottom: -1px;
+  }
+  button.tab-btn:hover:not(:disabled) {
+    background: transparent;
+    border-color: transparent;
+    border-bottom-color: var(--border-strong);
+    color: var(--text);
+  }
+  button.tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
 
   /* Cards */
   .card {
@@ -435,6 +469,12 @@
     </div>
   </header>
 
+  <nav class="tabs">
+    <button id="tab-worker-btn" class="tab-btn active" type="button">Worker &amp; streams</button>
+    <button id="tab-membership-btn" class="tab-btn" type="button" style="display:none">Membership keys</button>
+  </nav>
+
+  <div id="tab-worker" class="tab-panel active">
   <section class="stats">
     <div class="stat">
       <div class="label">Worker</div>
@@ -495,6 +535,32 @@
       <button id="stop-btn" class="danger-solid">Stop current stream</button>
     </div>
   </div>
+  </div><!-- /#tab-worker -->
+
+  <!-- Membership keys. The tab button (and this panel) are only shown when the
+       channel has membersName configured and the archive server is reachable
+       (info.membershipEnabled). -->
+  <div id="tab-membership" class="tab-panel">
+  <div class="card" id="membership-card">
+    <div class="card-header">
+      <h2>Membership keys</h2>
+      <span class="badge" id="membership-count">0 keys</span>
+    </div>
+    <div class="card-body" id="membership-body">
+      <div class="empty">Loading…</div>
+    </div>
+    <div class="control-body">
+      <div class="restart-info">
+        Membership keys gate access to this channel's protected content on the
+        archive server. The archive keeps at most <strong>2 keys</strong> per
+        channel — generating a new one prunes the oldest. Deleting removes
+        <strong>all</strong> keys at once (there is no per-key delete).
+      </div>
+      <button id="generate-key-btn" class="primary">Generate new key</button>
+      <button id="delete-keys-btn" class="danger-solid">Delete all keys</button>
+    </div>
+  </div>
+  </div><!-- /#tab-membership -->
 </div>
 
 <!-- Auth modal -->
@@ -569,6 +635,14 @@
   const restartBtn = $('restart-btn');
   const cancelRestartBtn = $('cancel-restart-btn');
   const stopBtn = $('stop-btn');
+  const workerTabBtn = $('tab-worker-btn');
+  const membershipTabBtn = $('tab-membership-btn');
+  const workerPanel = $('tab-worker');
+  const membershipPanel = $('tab-membership');
+  const membershipCountEl = $('membership-count');
+  const membershipBodyEl = $('membership-body');
+  const generateKeyBtn = $('generate-key-btn');
+  const deleteKeysBtn = $('delete-keys-btn');
   const addIncomingForm = $('add-incoming-form');
   const addIncomingInput = $('add-incoming-input');
   const authModal = $('auth-modal');
@@ -588,6 +662,17 @@
 
   channelNameEl.textContent = channel;
   document.title = `${channel} · admin`;
+
+  // ---------- Tabs ----------
+  function showTab(name) {
+    const onWorker = name !== 'membership';
+    workerPanel.classList.toggle('active', onWorker);
+    membershipPanel.classList.toggle('active', !onWorker);
+    workerTabBtn.classList.toggle('active', onWorker);
+    membershipTabBtn.classList.toggle('active', !onWorker);
+  }
+  workerTabBtn.addEventListener('click', () => showTab('worker'));
+  membershipTabBtn.addEventListener('click', () => showTab('membership'));
 
   // ---------- Auth ----------
   // The key is held either in localStorage (persisted across reloads) or in
@@ -681,6 +766,11 @@
     incomingBodyEl.innerHTML = '<div class="empty">Login to view</div>';
     restartStatusEl.textContent = 'no restart pending';
     cancelRestartBtn.style.display = 'none';
+    membershipTabBtn.style.display = 'none';
+    membershipCountEl.textContent = '0 keys';
+    membershipBodyEl.innerHTML = '<div class="empty">Login to view</div>';
+    membershipLoaded = false;
+    showTab('worker');
     hasLoadedOnce = false;
   }
 
@@ -857,6 +947,82 @@
       restartStatusEl.textContent = 'no restart pending';
       cancelRestartBtn.style.display = 'none';
     }
+
+    // Membership keys live behind their own tab. The list is fetched from the
+    // archive server via a separate proxied request, so we don't fetch it on
+    // every 5s /info poll — only the first time the tab is available (and after
+    // mutations). generate/delete both re-list, so no manual reload is needed.
+    if (info.membershipEnabled) {
+      membershipTabBtn.style.display = '';
+      if (!membershipLoaded) {
+        membershipLoaded = true;
+        refreshMembership();
+      }
+    } else {
+      membershipTabBtn.style.display = 'none';
+      membershipLoaded = false;
+      // If the feature became unavailable while the user was on that tab,
+      // fall back to the worker tab so they aren't stranded on a hidden panel.
+      if (membershipPanel.classList.contains('active')) showTab('worker');
+    }
+  }
+
+  // ---------- Membership keys ----------
+  // Format an RFC3339 expiry into an absolute date plus a relative hint.
+  function formatExpiry(iso) {
+    if (!iso) return 'unknown';
+    const t = Date.parse(iso);
+    if (isNaN(t)) return escapeHtml(iso);
+    const date = new Date(t).toLocaleString();
+    const diffDays = Math.round((t - Date.now()) / 86400000);
+    let rel;
+    if (diffDays < 0) rel = `expired ${-diffDays}d ago`;
+    else if (diffDays === 0) rel = 'expires today';
+    else rel = `expires in ${diffDays}d`;
+    return `${escapeHtml(date)} · ${rel}`;
+  }
+
+  function renderMembership(keys) {
+    keys = keys || [];
+    membershipCountEl.textContent = `${keys.length} key${keys.length === 1 ? '' : 's'}`;
+    if (keys.length === 0) {
+      membershipBodyEl.innerHTML = '<div class="empty">No keys. Generate one to grant access.</div>';
+      return;
+    }
+    membershipBodyEl.innerHTML = keys.map(k => `
+      <div class="row">
+        <div class="row-main">
+          <div class="row-title mono">${escapeHtml(k.key)}</div>
+          <div class="row-meta">${formatExpiry(k.expiresAt)}</div>
+        </div>
+        <div class="row-actions">
+          <button class="ghost small" data-copy-key="${escapeHtml(k.key)}">Copy</button>
+        </div>
+      </div>
+    `).join('');
+    membershipBodyEl.querySelectorAll('button[data-copy-key]').forEach(btn => {
+      btn.addEventListener('click', () => copyKey(btn.dataset.copyKey));
+    });
+  }
+
+  async function copyKey(key) {
+    try {
+      await navigator.clipboard.writeText(key);
+      toast('Key copied to clipboard', 'success');
+    } catch {
+      toast('Copy failed — select and copy manually', 'error');
+    }
+  }
+
+  async function refreshMembership() {
+    try {
+      const keys = await api('GET', '/membership');
+      renderMembership(keys);
+    } catch (e) {
+      if (e.message === 'forbidden' || e.message === 'not-authenticated') return;
+      membershipBodyEl.innerHTML = '<div class="empty">Could not load membership keys.</div>';
+      toast(`Membership load failed: ${e.message}`, 'error');
+    }
   }
 
   // ---------- Actions ----------
@@ -874,6 +1040,7 @@
   }
 
   let hasLoadedOnce = false;
+  let membershipLoaded = false;
   async function refresh() {
     if (!getKey()) {
       setAuthState(null);
@@ -969,6 +1136,36 @@
       await api('POST', '/stop');
       toast('Stop signal sent', 'success');
       await refresh();
+    });
+  });
+
+  generateKeyBtn.addEventListener('click', async () => {
+    const result = await confirmAction({
+      title: 'Generate membership key?',
+      message: 'Creates a new key on the archive server. If 2 keys already exist, the oldest is removed.',
+      okLabel: 'Generate',
+      danger: false,
+    });
+    if (!result.ok) return;
+    await withButton(generateKeyBtn, async () => {
+      const key = await api('POST', '/membership');
+      toast('New membership key generated', 'success');
+      if (key && key.key) copyKey(key.key);
+      await refreshMembership();
+    });
+  });
+
+  deleteKeysBtn.addEventListener('click', async () => {
+    const result = await confirmAction({
+      title: 'Delete all membership keys?',
+      message: 'Removes every membership key for this channel on the archive server. Anyone using them will lose access immediately. This cannot be undone.',
+      okLabel: 'Delete all',
+    });
+    if (!result.ok) return;
+    await withButton(deleteKeysBtn, async () => {
+      await api('DELETE', '/membership');
+      toast('All membership keys deleted', 'success');
+      await refreshMembership();
     });
   });
 
