@@ -447,6 +447,21 @@
   }
   .stream-id { color: var(--text-faint); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
 
+  /* Guide tab */
+  .guide-body { padding: 16px 20px; font-size: 13px; }
+  .guide-body p { margin: 0 0 12px; }
+  .guide-body p:last-child { margin-bottom: 0; }
+  .guide-body ol, .guide-body ul { margin: 0 0 12px; padding-left: 20px; }
+  .guide-body ol:last-child, .guide-body ul:last-child { margin-bottom: 0; }
+  .guide-body li { margin-bottom: 6px; }
+  .guide-body li:last-child { margin-bottom: 0; }
+  .guide-note { color: var(--text-muted); }
+  .guide-dl + .guide-note { margin-top: 16px; }
+  .guide-dl { margin: 0; }
+  .guide-dl dt { font-weight: 600; }
+  .guide-dl dd { margin: 2px 0 12px; color: var(--text-muted); }
+  .guide-dl dd:last-child { margin-bottom: 0; }
+
   /* Responsive */
   @media (max-width: 600px) {
     .container { padding: 20px 14px 80px; }
@@ -472,6 +487,7 @@
   <nav class="tabs">
     <button id="tab-worker-btn" class="tab-btn active" type="button">Worker &amp; streams</button>
     <button id="tab-membership-btn" class="tab-btn" type="button" style="display:none">Membership keys</button>
+    <button id="tab-guide-btn" class="tab-btn" type="button">Guide</button>
   </nav>
 
   <div id="tab-worker" class="tab-panel active">
@@ -561,6 +577,114 @@
     </div>
   </div>
   </div><!-- /#tab-membership -->
+
+  <!-- Guide. Static help content — no data fetched, always available. -->
+  <div id="tab-guide" class="tab-panel">
+
+  <div class="card">
+    <div class="card-header"><h2>What each part of this page shows</h2></div>
+    <div class="guide-body">
+      <dl class="guide-dl">
+        <dt>Worker</dt>
+        <dd>The transcription worker assigned to this channel. <strong>Online</strong> means it has reported its status within the last 5 minutes; the line below shows its version and when it last checked in. <strong>Offline</strong> usually means the worker process is down or can't reach the server.</dd>
+        <dt>Connected clients</dt>
+        <dd>How many viewers currently hold a live WebSocket connection to this channel's transcript page. Clients connecting or disconnecting don't trigger an instant update — this count refreshes about once a minute.</dd>
+        <dt>Server</dt>
+        <dd>The version and build time of the transcript server itself (this backend, not the worker).</dd>
+        <dt>Streams</dt>
+        <dd>Every stream stored for this channel. <span class="pill live">Live</span> means the worker is transcribing it right now; <span class="pill past">Past</span> means it has ended. Each row shows the title, the stream ID, when it started, and what kind of media was captured.</dd>
+        <dt>Incoming queue</dt>
+        <dd>Stream URLs waiting for the worker. The worker takes a URL out of the queue when it picks it up; <strong>Remove</strong> takes one out by hand before that happens. The form at the bottom queues a new URL.</dd>
+        <dt>Worker controls</dt>
+        <dd>The Restart and Stop signals for the worker, plus a badge showing whether a restart is pending. See the “Restart vs. Stop” card below for what each one does.</dd>
+        <dt>Membership keys (tab)</dt>
+        <dd>Only shown when this channel has membership configured and the archive server is reachable. Manages the keys that gate members-only content — see the “Membership keys” card below.</dd>
+      </dl>
+      <p class="guide-note">Queue, stream, and restart changes show up within a second or two — no need to reload. The connected-client count and the worker's last-seen time are the exception: they refresh about once a minute, plus whenever you perform an action or return to this tab.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Start a stream (queue it)</h2></div>
+    <div class="guide-body">
+      <ol>
+        <li>Paste the full stream URL (e.g. <code>https://twitch.tv/…</code> or <code>https://www.youtube.com/…</code>) into the input at the bottom of the <strong>Incoming queue</strong> card and click <strong>Add</strong>.</li>
+        <li>The worker is notified within seconds. As soon as it isn't busy with another stream, it takes the URL from the queue and starts capturing.</li>
+        <li>The stream then appears in <strong>Streams</strong> with a <span class="pill live">Live</span> pill once transcription begins.</li>
+      </ol>
+      <p class="guide-note">Adding a URL that's already queued just re-queues it — no duplicates. If the worker is offline, the URL simply waits in the queue until the worker comes back.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Delete a stream</h2></div>
+    <div class="guide-body">
+      <p><strong>Past (inactive) stream:</strong></p>
+      <ol>
+        <li>Click <strong>Delete</strong> on its row in the Streams card.</li>
+        <li>In the confirmation, choose whether to also delete its media files (kept by default — see the next card).</li>
+        <li>Confirm. The stream and its transcript are removed from the server, and connected viewers drop it immediately.</li>
+      </ol>
+      <p><strong>Live (active) stream:</strong> the Delete button is disabled while a stream is live — the worker would just re-create it on its next push. Instead:</p>
+      <ol>
+        <li>Click <strong>Stop current stream</strong> under Worker controls and confirm.</li>
+        <li>Wait for the stream's pill to flip from Live to <span class="pill past">Past</span> — typically a few seconds; the page updates on its own.</li>
+        <li>Delete it like any past stream.</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Delete media from a stream</h2></div>
+    <div class="guide-body">
+      <p>Media (the audio, video, clip, and frame files in storage) is deleted together with its stream — there is no separate media-only delete.</p>
+      <ol>
+        <li>Click <strong>Delete</strong> on the stream's row.</li>
+        <li>Tick <strong>“Also delete media files from storage”</strong> in the confirmation dialog.</li>
+        <li>Confirm — the stream's entire storage folder is permanently removed.</li>
+      </ol>
+      <p class="guide-note">Left unticked (the default), only the stream record and transcript are deleted; every media file stays in storage.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Worker controls: Restart vs. Stop</h2></div>
+    <div class="guide-body">
+      <dl class="guide-dl">
+        <dt>Restart worker</dt>
+        <dd>Sets a flag the worker reads on its next poll, making it drop whatever it's doing and recycle. The incoming queue is untouched, so anything queued gets picked right back up. Use this to un-stick a misbehaving worker.</dd>
+        <dt>Stop current stream</dt>
+        <dd>Clears <em>every</em> URL from the incoming queue <em>and</em> sets the restart flag. The worker drops the current stream and then sits idle, since nothing is left to pick up. Use this to end a capture on purpose — and as step one of deleting a live stream.</dd>
+        <dt>Restart pending / Cancel</dt>
+        <dd>While a restart is waiting for the worker, the card header shows <span class="pill warning">Restart pending</span> with a Cancel button. Cancel withdraws the request if the worker hasn't acted on it yet; the badge clears on its own once the worker restarts.</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Membership keys</h2></div>
+    <div class="guide-body">
+      <p>The <strong>Membership keys</strong> tab appears only when this channel has membership configured and the archive server is reachable. Keys gate access to this channel's members-only content on the archive server.</p>
+      <dl class="guide-dl">
+        <dt>Generate new key</dt>
+        <dd>Creates a key on the archive server and copies it to your clipboard. The archive keeps at most <strong>2 keys</strong> per channel, so generating a third silently removes the oldest. To rotate: generate a new key, hand it out, and let the old one get pruned by the rotation after that.</dd>
+        <dt>Copy</dt>
+        <dd>Copies that row's key to the clipboard. Each row also shows when the key expires.</dd>
+        <dt>Delete all keys</dt>
+        <dd>Removes every key for the channel at once — there is no per-key delete. Anyone using one of the keys loses access immediately.</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Login &amp; the admin key</h2></div>
+    <div class="guide-body">
+      <p>Everything on this page is protected by this channel's admin key, sent along with every request. The pill in the top-right corner shows whether your key is currently accepted.</p>
+      <p class="guide-note">“Save key in this browser” keeps the key in this browser's local storage so you skip the login next time on this device — leave it unchecked on shared computers. <strong>Logout</strong> forgets the saved key and returns to the login prompt.</p>
+    </div>
+  </div>
+
+  </div><!-- /#tab-guide -->
 </div>
 
 <!-- Auth modal -->
@@ -640,8 +764,10 @@
   const stopBtn = $('stop-btn');
   const workerTabBtn = $('tab-worker-btn');
   const membershipTabBtn = $('tab-membership-btn');
+  const guideTabBtn = $('tab-guide-btn');
   const workerPanel = $('tab-worker');
   const membershipPanel = $('tab-membership');
+  const guidePanel = $('tab-guide');
   const membershipCountEl = $('membership-count');
   const membershipBodyEl = $('membership-body');
   const generateKeyBtn = $('generate-key-btn');
@@ -667,15 +793,21 @@
   document.title = `${channel} · admin`;
 
   // ---------- Tabs ----------
+  const tabs = {
+    worker: { btn: workerTabBtn, panel: workerPanel },
+    membership: { btn: membershipTabBtn, panel: membershipPanel },
+    guide: { btn: guideTabBtn, panel: guidePanel },
+  };
   function showTab(name) {
-    const onWorker = name !== 'membership';
-    workerPanel.classList.toggle('active', onWorker);
-    membershipPanel.classList.toggle('active', !onWorker);
-    workerTabBtn.classList.toggle('active', onWorker);
-    membershipTabBtn.classList.toggle('active', !onWorker);
+    if (!tabs[name]) name = 'worker';
+    for (const [key, t] of Object.entries(tabs)) {
+      t.btn.classList.toggle('active', key === name);
+      t.panel.classList.toggle('active', key === name);
+    }
   }
   workerTabBtn.addEventListener('click', () => showTab('worker'));
   membershipTabBtn.addEventListener('click', () => showTab('membership'));
+  guideTabBtn.addEventListener('click', () => showTab('guide'));
 
   // ---------- Auth ----------
   // The key is held either in localStorage (persisted across reloads) or in
