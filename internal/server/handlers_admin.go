@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"live-transcript-server/internal/discord"
 	"live-transcript-server/internal/metrics"
 	"live-transcript-server/internal/model"
 )
@@ -47,6 +48,9 @@ type AdminInfoResponse struct {
 	// section for this channel. True only when the archive server is configured
 	// and this channel has an archive-side name mapped.
 	MembershipEnabled bool `json:"membershipEnabled"`
+	// DiscordBot is the gateway health of the app-wide Discord announcement
+	// bot, plus whether this channel can receive its announcements.
+	DiscordBot discord.BotStatus `json:"discordBot"`
 }
 
 func (app *App) getAdminInfoHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
@@ -104,6 +108,7 @@ func (app *App) getAdminInfoHandler(w http.ResponseWriter, r *http.Request, cs *
 		Server:            model.ServerInfo{Version: app.Version, BuildTime: app.BuildTime},
 		ConnectedClients:  cs.Hub.Connections(),
 		MembershipEnabled: app.membershipEnabled(cs),
+		DiscordBot:        app.DiscordBot.Status(cs.Key),
 	})
 }
 

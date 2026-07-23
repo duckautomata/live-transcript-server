@@ -1,9 +1,14 @@
 package discord
 
 import (
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
+
+	"live-transcript-server/internal/config"
 )
 
 func TestParsePingcordMessage(t *testing.T) {
@@ -127,5 +132,113 @@ func TestParsePingcordMessage_LongestNameWins(t *testing.T) {
 	}
 	if key != "mint" {
 		t.Errorf("expected longest-name match to win, got key=%q", key)
+	}
+}
+
+// newStatusTestBot builds a bot that never touches the network; state is
+// driven by calling the lifecycle handlers directly.
+func newStatusTestBot(t *testing.T) *Bot {
+	t.Helper()
+	bot, err := NewBot(config.DiscordBotConfig{
+		Token:      "test-token",
+		ChannelIDs: []string{"123"},
+		ChannelMap: map[string]string{"Dokibird": "doki"},
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewBot: %v", err)
+	}
+	return bot
+}
+
+func TestBotStatusNilBot(t *testing.T) {
+	var b *Bot
+	st := b.Status("doki")
+	if st.State != BotStateOff {
+		t.Errorf("state=%q want %q", st.State, BotStateOff)
+	}
+	if st.Detail == "" {
+		t.Error("expected a detail explaining the bot is not configured")
+	}
+}
+
+func TestBotStatusTransitions(t *testing.T) {
+	bot := newStatusTestBot(t)
+
+	// Never started: down, no error yet.
+	st := bot.Status("doki")
+	if st.State != BotStateDown {
+		t.Fatalf("unstarted: state=%q want %q", st.State, BotStateDown)
+	}
+	if st.LastError != "" {
+		t.Errorf("unstarted: lastError=%q want empty", st.LastError)
+	}
+
+	// Failed open: down, with the error surfaced in the detail.
+	bot.recordGatewayError(errors.New("401: unauthorized"))
+	st = bot.Status("doki")
+	if st.State != BotStateDown {
+		t.Fatalf("after open error: state=%q want %q", st.State, BotStateDown)
+	}
+	if !strings.Contains(st.Detail, "401: unauthorized") {
+		t.Errorf("after open error: detail=%q want it to contain the error", st.Detail)
+	}
+
+	// Connected with a fresh heartbeat ack: ok.
+	bot.onConnect(nil, nil)
+	bot.session.Lock()
+	bot.session.LastHeartbeatAck = time.Now()
+	bot.session.Unlock()
+	st = bot.Status("doki")
+	if st.State != BotStateOK {
+		t.Fatalf("connected: state=%q detail=%q want %q", st.State, st.Detail, BotStateOK)
+	}
+	if st.Detail != "" {
+		t.Errorf("connected: detail=%q want empty", st.Detail)
+	}
+	if st.ListeningChannels != 1 {
+		t.Errorf("listeningChannels=%d want 1", st.ListeningChannels)
+	}
+
+	// Connected but the gateway went silent: stale.
+	bot.session.Lock()
+	bot.session.LastHeartbeatAck = time.Now().Add(-heartbeatStaleThreshold - time.Minute)
+	bot.session.Unlock()
+	st = bot.Status("doki")
+	if st.State != BotStateStale {
+		t.Fatalf("stale ack: state=%q want %q", st.State, BotStateStale)
+	}
+	if !strings.Contains(st.Detail, "heartbeat") {
+		t.Errorf("stale ack: detail=%q want a heartbeat explanation", st.Detail)
+	}
+
+	// Disconnected again: down, and the pre-connect error must NOT be blamed
+	// because it predates the last successful connect.
+	bot.onDisconnect(nil, nil)
+	st = bot.Status("doki")
+	if st.State != BotStateDown {
+		t.Fatalf("disconnected: state=%q want %q", st.State, BotStateDown)
+	}
+	if strings.Contains(st.Detail, "401: unauthorized") {
+		t.Errorf("disconnected: detail=%q blames an error from before the last connect", st.Detail)
+	}
+	if st.LastDisconnect == 0 {
+		t.Error("disconnected: lastDisconnect not recorded")
+	}
+
+	// A fresh reconnect failure postdates the connect and is blamed again.
+	bot.recordGatewayError(errors.New("dial tcp: timeout"))
+	st = bot.Status("doki")
+	if !strings.Contains(st.Detail, "dial tcp: timeout") {
+		t.Errorf("after reopen error: detail=%q want it to contain the error", st.Detail)
+	}
+}
+
+func TestBotStatusChannelMapped(t *testing.T) {
+	bot := newStatusTestBot(t)
+	if !bot.Status("doki").ChannelMapped {
+		t.Error("doki is in the channel map; want ChannelMapped=true")
+	}
+	if bot.Status("unmapped").ChannelMapped {
+		t.Error("unmapped key reported as mapped")
 	}
 }

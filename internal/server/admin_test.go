@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"live-transcript-server/internal/config"
+	"live-transcript-server/internal/discord"
 	"live-transcript-server/internal/store"
 	"live-transcript-server/internal/ws"
 
@@ -142,6 +143,11 @@ func TestAdminInfoAggregates(t *testing.T) {
 	}
 	if info.Server.Version != "test-version" {
 		t.Errorf("server.version=%q", info.Server.Version)
+	}
+	// The test app has no bot token, so the status must degrade to "off"
+	// rather than panicking on the nil bot.
+	if info.DiscordBot.State != discord.BotStateOff {
+		t.Errorf("discordBot.state=%q want %q", info.DiscordBot.State, discord.BotStateOff)
 	}
 }
 

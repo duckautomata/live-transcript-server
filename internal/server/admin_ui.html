@@ -156,6 +156,7 @@
   }
   .stat .dot.online { background: var(--success); box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.15); }
   .stat .dot.offline { background: var(--danger); }
+  .stat .dot.warn { background: var(--warning); box-shadow: 0 0 0 4px rgba(251, 191, 36, 0.15); }
 
   /* Tabs */
   .tabs {
@@ -498,6 +499,11 @@
       <div class="meta" id="worker-meta">…</div>
     </div>
     <div class="stat">
+      <div class="label">Discord bot</div>
+      <div class="value" id="discord-status"><span class="dot"></span>—</div>
+      <div class="meta" id="discord-meta">…</div>
+    </div>
+    <div class="stat">
       <div class="label">Connected clients</div>
       <div class="value" id="client-count">—</div>
       <div class="meta">via WebSocket</div>
@@ -587,6 +593,8 @@
       <dl class="guide-dl">
         <dt>Worker</dt>
         <dd>The transcription worker assigned to this channel. <strong>Online</strong> means it has reported its status within the last 5 minutes; the line below shows its version and when it last checked in. <strong>Offline</strong> usually means the worker process is down or can't reach the server.</dd>
+        <dt>Discord bot</dt>
+        <dd>The server-side bot that watches Discord for stream announcements and queues them automatically. <strong>Online</strong> (green) means its connection to Discord is healthy and this channel's announcements will be picked up. <strong>Reconnecting</strong> (amber) means Discord has gone quiet and the server is re-establishing the connection. <strong>Offline</strong> (red) means the connection is down — the reason is shown below the status, and announcements are missed until it recovers, so queue URLs by hand in the meantime. <strong>Off</strong> (gray) means no bot is configured on this server at all. An amber dot next to <strong>Online</strong> flags a configuration problem (for example, this channel has no announcement name mapped) even though the bot itself is healthy.</dd>
         <dt>Connected clients</dt>
         <dd>How many viewers currently hold a live WebSocket connection to this channel's transcript page. Clients connecting or disconnecting don't trigger an instant update — this count refreshes about once a minute.</dd>
         <dt>Server</dt>
@@ -600,7 +608,7 @@
         <dt>Membership keys (tab)</dt>
         <dd>Only shown when this channel has membership configured and the archive server is reachable. Manages the keys that gate members-only content — see the “Membership keys” card below.</dd>
       </dl>
-      <p class="guide-note">Queue, stream, and restart changes show up within a second or two — no need to reload. The connected-client count and the worker's last-seen time are the exception: they refresh about once a minute, plus whenever you perform an action or return to this tab.</p>
+      <p class="guide-note">Queue, stream, and restart changes show up within a second or two — no need to reload. The connected-client count, the worker's last-seen time, and the Discord bot status are the exception: they refresh about once a minute, plus whenever you perform an action or return to this tab.</p>
     </div>
   </div>
 
@@ -751,6 +759,8 @@
   const logoutBtn = $('logout-btn');
   const workerStatusEl = $('worker-status');
   const workerMetaEl = $('worker-meta');
+  const discordStatusEl = $('discord-status');
+  const discordMetaEl = $('discord-meta');
   const clientCountEl = $('client-count');
   const serverVersionEl = $('server-version');
   const serverBuildEl = $('server-build');
@@ -893,6 +903,8 @@
   function clearRenderedState() {
     workerStatusEl.innerHTML = '<span class="dot offline"></span>—';
     workerMetaEl.textContent = '…';
+    discordStatusEl.innerHTML = '<span class="dot"></span>—';
+    discordMetaEl.textContent = '…';
     clientCountEl.textContent = '—';
     serverVersionEl.textContent = '—';
     serverBuildEl.textContent = '…';
@@ -1007,6 +1019,10 @@
       workerMetaEl.textContent = 'no status reported';
     }
 
+    // Discord bot. The dot answers "is anything wrong": green only when the
+    // gateway is healthy AND announcements can actually reach this channel.
+    renderDiscordBot(info.discordBot);
+
     // Clients
     clientCountEl.textContent = String(info.connectedClients ?? 0);
 
@@ -1100,6 +1116,29 @@
       // If the feature became unavailable while the user was on that tab,
       // fall back to the worker tab so they aren't stranded on a hidden panel.
       if (membershipPanel.classList.contains('active')) showTab('worker');
+    }
+  }
+
+  // Render the Discord bot stat card. `bot` is info.discordBot: gateway state
+  // plus per-channel mapping info. Detail strings from the server are set via
+  // textContent, never innerHTML — they can embed raw error text.
+  function renderDiscordBot(bot) {
+    function set(dotClass, value, meta) {
+      discordStatusEl.innerHTML = `<span class="dot ${dotClass}"></span>${value}`;
+      discordMetaEl.textContent = meta;
+    }
+    if (!bot || bot.state === 'off') {
+      set('', 'Off', 'not configured — queue stream URLs by hand');
+    } else if (bot.state === 'down') {
+      set('offline', 'Offline', bot.detail || 'gateway disconnected — announcements are being missed');
+    } else if (bot.state === 'stale') {
+      set('warn', 'Reconnecting', bot.detail || 'gateway went silent; forcing reconnects');
+    } else if (!bot.channelMapped) {
+      set('warn', 'Online', "connected, but this channel has no announcement name mapped — its streams will never be auto-queued");
+    } else if (!bot.listeningChannels) {
+      set('warn', 'Online', 'connected, but listening on no Discord channels — announcements will never match');
+    } else {
+      set('online', 'Online', `last heartbeat ${timeAgo(bot.lastHeartbeatAck)}`);
     }
   }
 

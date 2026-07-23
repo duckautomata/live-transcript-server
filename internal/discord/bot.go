@@ -58,12 +58,120 @@ type Bot struct {
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 
-	// mu guards alerted, the offline-alert debounce flag. It is set when an
-	// offline alert is sent and cleared when the gateway recovers, so we alert
-	// (and announce recovery) only on the healthy<->stale transitions rather
-	// than on every watchdog tick.
+	// mu guards alerted plus the gateway-health fields below.
+	//
+	// alerted is the offline-alert debounce flag. It is set when an offline
+	// alert is sent and cleared when the gateway recovers, so we alert (and
+	// announce recovery) only on the healthy<->stale transitions rather than
+	// on every watchdog tick.
 	mu      sync.Mutex
 	alerted bool
+
+	// Gateway-health trail for the admin UI, maintained by the lifecycle
+	// handlers and the open paths. Zero times mean "never".
+	connected      bool
+	lastConnect    time.Time
+	lastDisconnect time.Time
+	lastErr        string
+	lastErrAt      time.Time
+}
+
+// Bot gateway states reported by Status.
+const (
+	BotStateOff   = "off"   // no bot configured
+	BotStateOK    = "ok"    // gateway connected, heartbeats fresh
+	BotStateStale = "stale" // connected but the gateway went silent; watchdog is forcing reconnects
+	BotStateDown  = "down"  // gateway is not connected
+)
+
+// BotStatus is a point-in-time snapshot of the bot's gateway health for the
+// admin UI. Timestamps are unix seconds; zero means "never".
+type BotStatus struct {
+	State string `json:"state"`
+	// Detail explains what is wrong when State is not "ok".
+	Detail           string `json:"detail,omitempty"`
+	LastHeartbeatAck int64  `json:"lastHeartbeatAck,omitempty"`
+	LastConnect      int64  `json:"lastConnect,omitempty"`
+	LastDisconnect   int64  `json:"lastDisconnect,omitempty"`
+	LastError        string `json:"lastError,omitempty"`
+	LastErrorAt      int64  `json:"lastErrorAt,omitempty"`
+	// ListeningChannels is how many Discord channel IDs the bot listens on.
+	// Zero means the bot can never match a message, even when connected.
+	ListeningChannels int `json:"listeningChannels"`
+	// ChannelMapped reports whether the queried server channel has an
+	// announcement name mapped, i.e. whether a Pingcord message can ever be
+	// queued for it.
+	ChannelMapped bool `json:"channelMapped"`
+}
+
+// Status reports the bot's gateway health as seen from one server channel.
+// channelKey only selects the ChannelMapped answer; everything else is
+// app-wide. Safe to call on a nil receiver (bot not configured).
+func (b *Bot) Status(channelKey string) BotStatus {
+	if b == nil {
+		return BotStatus{State: BotStateOff, Detail: "no Discord bot token configured"}
+	}
+
+	b.session.RLock()
+	lastAck := b.session.LastHeartbeatAck
+	b.session.RUnlock()
+
+	b.mu.Lock()
+	connected := b.connected
+	// An error from before the most recent successful connect belongs to a
+	// previous outage and must not be blamed for the current one. Compared at
+	// full precision here because the snapshot only keeps unix seconds.
+	errPredatesConnect := b.lastErrAt.Before(b.lastConnect)
+	st := BotStatus{
+		LastHeartbeatAck:  unixOrZero(lastAck),
+		LastConnect:       unixOrZero(b.lastConnect),
+		LastDisconnect:    unixOrZero(b.lastDisconnect),
+		LastError:         b.lastErr,
+		LastErrorAt:       unixOrZero(b.lastErrAt),
+		ListeningChannels: len(b.channelIDs),
+	}
+	b.mu.Unlock()
+
+	// channelMap is never mutated after NewBot, so reading it unlocked is safe.
+	for _, key := range b.channelMap {
+		if key == channelKey {
+			st.ChannelMapped = true
+			break
+		}
+	}
+
+	stale := time.Since(lastAck)
+	switch {
+	case !connected && st.LastError != "" && !errPredatesConnect:
+		st.State = BotStateDown
+		st.Detail = "gateway connection failed: " + st.LastError
+	case !connected:
+		st.State = BotStateDown
+		st.Detail = "gateway disconnected; reconnect in progress"
+	case stale > heartbeatStaleThreshold:
+		st.State = BotStateStale
+		st.Detail = fmt.Sprintf("no gateway heartbeat for %s; watchdog is forcing reconnects", stale.Round(time.Second))
+	default:
+		st.State = BotStateOK
+	}
+	return st
+}
+
+// unixOrZero converts a time to unix seconds, mapping the zero time to 0 so
+// JSON consumers can treat 0 as "never".
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// recordGatewayError remembers the most recent gateway failure for Status.
+func (b *Bot) recordGatewayError(err error) {
+	b.mu.Lock()
+	b.lastErr = err.Error()
+	b.lastErrAt = time.Now()
+	b.mu.Unlock()
 }
 
 // NewBot constructs a bot from config. Returns (nil, nil) if the bot is not
@@ -116,6 +224,7 @@ func (b *Bot) Start() error {
 		return nil
 	}
 	if err := b.session.Open(); err != nil {
+		b.recordGatewayError(err)
 		b.alerts.NotifyDiscordBotStartupError(err)
 		b.startWatchdog()
 		return fmt.Errorf("open discord session: %w", err)
@@ -199,10 +308,18 @@ func (b *Bot) onMessage(_ *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func (b *Bot) onConnect(_ *discordgo.Session, _ *discordgo.Connect) {
+	b.mu.Lock()
+	b.connected = true
+	b.lastConnect = time.Now()
+	b.mu.Unlock()
 	slog.Info("discord gateway connected", "func", "Bot.onConnect")
 }
 
 func (b *Bot) onDisconnect(_ *discordgo.Session, _ *discordgo.Disconnect) {
+	b.mu.Lock()
+	b.connected = false
+	b.lastDisconnect = time.Now()
+	b.mu.Unlock()
 	slog.Warn("discord gateway disconnected", "func", "Bot.onDisconnect")
 }
 
@@ -282,6 +399,7 @@ func (b *Bot) forceReconnect() {
 		slog.Warn("error closing stale discord session", "func", "Bot.forceReconnect", "err", err)
 	}
 	if err := b.session.Open(); err != nil {
+		b.recordGatewayError(err)
 		slog.Error("failed to reopen discord session; will retry on next watchdog tick", "func", "Bot.forceReconnect", "err", err)
 		return
 	}
