@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"live-transcript-server/internal"
+	"live-transcript-server/internal/model"
+	"live-transcript-server/internal/store"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -58,12 +59,15 @@ func TestMigration(t *testing.T) {
 		t.Fatalf("failed to insert transcript: %v", err)
 	}
 
-	// 2. Setup New DB (New Schema via InitDB)
-	newDB, err := internal.InitDB(newDBPath, internal.DatabaseConfig{})
+	// 2. Setup New DB (New Schema via store.EnsureSchema)
+	newDB, err := sql.Open("sqlite3", newDBPath)
 	if err != nil {
-		t.Fatalf("failed to init new db: %v", err)
+		t.Fatalf("failed to open new db: %v", err)
 	}
 	defer newDB.Close()
+	if err := store.EnsureSchema(newDB); err != nil {
+		t.Fatalf("failed to init new db schema: %v", err)
+	}
 
 	// 3. Run Migration
 	if err := migrateStreams(oldDB, newDB); err != nil {
@@ -74,7 +78,7 @@ func TestMigration(t *testing.T) {
 	}
 
 	// 4. Verify
-	var s internal.Stream
+	var s model.Stream
 	row := newDB.QueryRow("SELECT channel_id, stream_id, start_time, activated_time FROM streams WHERE channel_id='ch1' AND stream_id='s1'")
 	if err := row.Scan(&s.ChannelID, &s.StreamID, &s.StartTime, &s.ActivatedTime); err != nil {
 		t.Fatalf("failed to scan migrated stream: %v", err)

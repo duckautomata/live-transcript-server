@@ -184,10 +184,12 @@ func runRateTest() {
 		log.Fatal("Invalid URL:", err)
 	}
 
-	ticker := time.NewTicker(time.Second / time.Duration(rate))
-	if rate == 0 {
-		ticker = time.NewTicker(time.Millisecond)
+	// Guard before dividing: rate 0 means "as fast as possible".
+	interval := time.Millisecond
+	if rate > 0 {
+		interval = time.Second / time.Duration(rate)
 	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	stop := time.After(duration)

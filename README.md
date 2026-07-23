@@ -124,8 +124,34 @@ When the client requests a clip (either audio or video) between and including tw
 
 ## Development
 
+### Code Layout
+
+The module is split into focused packages so each kind of change has one
+obvious home:
+
+| Package | Purpose |
+| --- | --- |
+| `cmd/web` | Server entrypoint: config/logging/DB wiring, `/healthcheck`, `/version`, `/metrics` |
+| `cmd/migrate`, `cmd/r2-cleanup`, `cmd/perf-test` | Operational tools |
+| `internal/server` | The application core: routes, HTTP handlers (grouped worker/admin/public), stream lifecycle, maintenance loops, admin UI |
+| `internal/store` | All SQLite persistence (schema, queries, transactions) |
+| `internal/storage` | Media blob storage backends (local disk, R2) and storage-key builders |
+| `internal/ws` | WebSocket hub: connection registry, broadcast, event payloads |
+| `internal/notify` | Long-poll signaling shared by `/events` and the admin poll |
+| `internal/media` | ffmpeg processing (`Processor` interface) and raw-audio merging |
+| `internal/discord` | Webhook notifier + Pingcord listener bot |
+| `internal/archive` | Archive-server client for membership keys |
+| `internal/config`, `internal/model`, `internal/metrics`, `internal/logging` | Leaf packages: config schema, shared data types, Prometheus metrics (single registration point), slog setup |
+
+Rules of thumb for extending it:
+- **New endpoint** → a handler in the matching `internal/server/handlers_*.go` file plus one line in `routes.go` (use `withChannel` / `withAdminChannel` for `/{channel}/...` routes).
+- **New WebSocket event** → a constant + payload struct in `internal/ws/events.go`, then `Hub.Broadcast` at the emitting site.
+- **New table or query** → `internal/store` only; handlers never see SQL.
+- **New integration** (Slack, etc.) → a new package like `internal/discord`, depending on small interfaces the server implements (see `discord.StreamSink`), wired in `server.NewApp`.
+- **New storage backend** → one file in `internal/storage` plus a case in its `New` factory.
+
 ### Tech Used
-- Go 1.24
+- Go 1.26
 - FFmpeg
 
 ### Requirements

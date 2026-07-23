@@ -41,10 +41,15 @@ channels:
   # adminKey gates the per-channel admin UI (/{name}/ui) and admin endpoints
   # (/{name}/admin/*). Leave empty to disable admin operations for the channel.
   # membersName is for the admin page membership key management. omit/empty -> no members
+  # displayName is the human-readable name used in Discord notifications
+  # (defaults to name). twitchLogin is the Twitch login used to build stream
+  # links for Twitch streams (defaults to lowercase displayName).
   - name: key1
     numPastStreams: 5
     adminKey: ""
     membersName: ""
+    displayName: ""
+    twitchLogin: ""
   - name: key2
     numPastStreams: 0
     adminKey: ""
@@ -56,6 +61,10 @@ discord:
   # Only one will be used. If both are set, the role id will be used.
   notifyUserId: ""
   notifyRoleId: ""
+  # Base URL for transcript links in stream-start notifications, e.g.
+  # "https://example.com/live-transcript". Empty derives a default from the
+  # server version (dev vs prod).
+  transcriptBaseUrl: ""
 
   # Optional Discord bot that listens for Pingcord stream-start messages and
   # queues the URL for the worker to pick up via GET /{channel}/incoming.

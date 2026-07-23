@@ -8,7 +8,7 @@
 cd "$(dirname "$0")/.."
 echo "Running from project root: $PWD"
 
-if go test -coverprofile=coverage.out ./internal/...; then
+if go test -coverprofile=coverage.out ./...; then
     go tool cover -html=coverage.out -o coverage.html
 else
     echo ""

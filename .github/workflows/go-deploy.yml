@@ -50,7 +50,7 @@ jobs:
         run: go install github.com/jstemmer/go-junit-report/v2@latest
 
       - name: Run Tests
-        run: go test ./internal/... -v 2>&1 | go-junit-report -set-exit-code > junit.xml
+        run: go vet ./... && go test -race ./... -v 2>&1 | go-junit-report -set-exit-code > junit.xml
 
       - name: Report Test Results
         uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
