@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 type R2Storage struct {
@@ -43,6 +45,16 @@ func getContentType(filename string) string {
 		}
 		return ct
 	}
+}
+
+// ensureTrailingSlash guards a listing prefix against prefix aliasing:
+// "chan/123" also matches "chan/1234". Callers may pass either form; the
+// slash is appended only when absent.
+func ensureTrailingSlash(prefix string) string {
+	if !strings.HasSuffix(prefix, "/") {
+		return prefix + "/"
+	}
+	return prefix
 }
 
 func NewR2Storage(ctx context.Context, accountId, accessKeyId, secretAccessKey, bucket, publicUrl string) (*R2Storage, error) {
@@ -106,16 +118,51 @@ func (s *R2Storage) GetURL(key string) string {
 	return fmt.Sprintf("%s/%s", s.PublicURL, key)
 }
 
-func (s *R2Storage) Delete(ctx context.Context, key string) error {
-	_, err := s.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(s.Bucket),
-		Key:    aws.String(key),
-	})
-	return err
-}
-
+// DeleteFolder deletes every object under the given prefix, in batches of up
+// to 1000 (the DeleteObjects limit, which is also the list page size).
 func (s *R2Storage) DeleteFolder(ctx context.Context, key string) error {
-	// We let the buckets lifecycle rules handle deleting old files
+	prefix := ensureTrailingSlash(key)
+
+	paginator := s3.NewListObjectsV2Paginator(s.Client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.Bucket),
+		Prefix: aws.String(prefix),
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list objects in R2: %w", err)
+		}
+
+		if len(page.Contents) == 0 {
+			continue
+		}
+
+		objects := make([]types.ObjectIdentifier, 0, len(page.Contents))
+		for _, obj := range page.Contents {
+			objects = append(objects, types.ObjectIdentifier{Key: obj.Key})
+		}
+
+		output, err := s.Client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(s.Bucket),
+			Delete: &types.Delete{
+				Objects: objects,
+				// Quiet mode: the response lists only the objects that
+				// failed to delete.
+				Quiet: aws.Bool(true),
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to delete batch from R2: %w", err)
+		}
+		if len(output.Errors) > 0 {
+			for _, e := range output.Errors {
+				slog.Error("failed to delete R2 object", "key", aws.ToString(e.Key), "code", aws.ToString(e.Code), "message", aws.ToString(e.Message))
+			}
+			return fmt.Errorf("failed to delete %d object(s) under prefix %s from R2", len(output.Errors), prefix)
+		}
+	}
+
 	return nil
 }
 
@@ -124,10 +171,14 @@ func (s *R2Storage) IsLocal() bool {
 }
 
 func (s *R2Storage) StreamExists(ctx context.Context, key string) (bool, error) {
+	// Probe with a trailing slash so "chan/123" cannot match "chan/1234" —
+	// a false positive here can permanently skip pruning a stream.
+	prefix := ensureTrailingSlash(key)
+
 	// Check if any objects exist with the prefix
 	listOutput, err := s.Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket:  aws.String(s.Bucket),
-		Prefix:  aws.String(key),
+		Prefix:  aws.String(prefix),
 		MaxKeys: aws.Int32(1),
 	})
 	if err != nil {

@@ -8,7 +8,8 @@ import (
 	"os"
 	"strconv"
 
-	"live-transcript-server/internal"
+	"live-transcript-server/internal/model"
+	"live-transcript-server/internal/store"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -27,14 +28,16 @@ func main() {
 		log.Fatalf("Old database file does not exist: %s", *oldDBPath)
 	}
 
-	// 1. Initialize New DB (creates schema)
-	// We use internal.InitDB to insure schema is correct being created
-	// Passing an empty config as we only need the DB connection and schema creation
-	newDB, err := internal.InitDB(*newDBPath, internal.DatabaseConfig{})
+	// 1. Initialize New DB (creates schema). store.EnsureSchema keeps this
+	// tool on the same schema definition the server uses.
+	newDB, err := sql.Open("sqlite3", *newDBPath)
 	if err != nil {
-		log.Fatalf("Failed to initialize new database: %v", err)
+		log.Fatalf("Failed to open new database: %v", err)
 	}
 	defer newDB.Close()
+	if err := store.EnsureSchema(newDB); err != nil {
+		log.Fatalf("Failed to initialize new database schema: %v", err)
+	}
 
 	// 2. Open Old DB
 	oldDB, err := sql.Open("sqlite3", *oldDBPath)
@@ -82,7 +85,7 @@ func migrateStreams(oldDB, newDB *sql.DB) error {
 	defer stmt.Close()
 
 	for rows.Next() {
-		var s internal.Stream
+		var s model.Stream
 		// Scan into struct fields (ActiveID -> StreamID, ActiveTitle -> StreamTitle)
 		if err := rows.Scan(&s.ChannelID, &s.StreamID, &s.StreamTitle, &s.StartTime, &s.IsLive, &s.MediaType); err != nil {
 			return err

@@ -28,6 +28,9 @@
 !CHANGELOG.md
 !LICENSE
 
+# Fuzz corpus files have no extension, so allowlist them explicitly
+!internal/media/testdata/fuzz/**
+
 # ...even if they are in subdirectories
 !*/
 

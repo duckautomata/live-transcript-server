@@ -1,3 +1,7 @@
+// r2-cleanup bulk-deletes objects from the R2 bucket by raw key prefix. It
+// exists for manual cleanup jobs that don't map to a stream folder (use the
+// admin UI's delete-with-media for those): arbitrary prefixes, or the whole
+// bucket via -prefix '*'.
 package main
 
 import (
@@ -5,29 +9,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"os"
+
+	"live-transcript-server/internal/config"
+	"live-transcript-server/internal/storage"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"gopkg.in/yaml.v3"
 )
-
-// Config structure matches config-example.yaml
-type Config struct {
-	Storage struct {
-		Type string `yaml:"type"`
-		R2   struct {
-			AccountId       string `yaml:"accountId"`
-			AccessKeyId     string `yaml:"accessKeyId"`
-			SecretAccessKey string `yaml:"secretAccessKey"`
-			Bucket          string `yaml:"bucket"`
-			PublicUrl       string `yaml:"publicUrl"`
-		} `yaml:"r2"`
-	} `yaml:"storage"`
-}
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to config file")
@@ -47,43 +36,30 @@ func main() {
 		fmt.Printf("Prefix set to: %s\n", prefix)
 	}
 
-	// Read Config
-	data, err := os.ReadFile(*configPath)
+	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to read config file %s: %v", *configPath, err)
+		log.Fatalf("Failed to load config: %v", err)
 	}
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		log.Fatalf("Failed to parse config file: %v", err)
-	}
-
 	if cfg.Storage.Type != "r2" {
 		log.Fatalf("Config storage type is not 'r2'. It is '%s'. This script is for R2.", cfg.Storage.Type)
 	}
-
-	r2Config := cfg.Storage.R2
-	if r2Config.AccountId == "" || r2Config.AccessKeyId == "" || r2Config.SecretAccessKey == "" || r2Config.Bucket == "" {
+	r2cfg := cfg.Storage.R2
+	if r2cfg.AccountId == "" || r2cfg.AccessKeyId == "" || r2cfg.SecretAccessKey == "" || r2cfg.Bucket == "" {
 		log.Fatal("Missing R2 configuration in config file.")
 	}
 
-	// Initialize AWS Client
-	ctx := context.TODO()
-	awsCfg, err := config.LoadDefaultConfig(ctx,
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(r2Config.AccessKeyId, r2Config.SecretAccessKey, "")),
-		config.WithRegion("auto"),
-	)
+	ctx := context.Background()
+	r2, err := storage.NewR2Storage(ctx, r2cfg.AccountId, r2cfg.AccessKeyId, r2cfg.SecretAccessKey, r2cfg.Bucket, r2cfg.PublicUrl)
 	if err != nil {
-		log.Fatalf("Unable to load SDK config: %v", err)
+		log.Fatalf("Unable to initialize R2 client: %v", err)
 	}
 
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(fmt.Sprintf("https://%s.r2.cloudflarestorage.com", r2Config.AccountId))
-	})
-
+	// Raw prefix deletion (deliberately NOT R2Storage.DeleteFolder, which is
+	// folder-scoped and appends a trailing slash): this tool matches any key
+	// prefix, including the empty one.
 	fmt.Println("Listing objects...")
-	paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(r2Config.Bucket),
+	paginator := s3.NewListObjectsV2Paginator(r2.Client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(r2.Bucket),
 		Prefix: aws.String(prefix),
 	})
 
@@ -93,19 +69,18 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to list objects: %v", err)
 		}
-
 		if len(page.Contents) == 0 {
 			continue
 		}
 
-		var objects []types.ObjectIdentifier
+		objects := make([]types.ObjectIdentifier, 0, len(page.Contents))
 		for _, obj := range page.Contents {
 			objects = append(objects, types.ObjectIdentifier{Key: obj.Key})
 		}
 
 		fmt.Printf("Deleting batch of %d objects...\n", len(objects))
-		_, err = client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
-			Bucket: aws.String(r2Config.Bucket),
+		_, err = r2.Client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(r2.Bucket),
 			Delete: &types.Delete{
 				Objects: objects,
 				Quiet:   aws.Bool(true),

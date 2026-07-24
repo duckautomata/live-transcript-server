@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"live-transcript-server/internal"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +10,11 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"live-transcript-server/internal/config"
+	"live-transcript-server/internal/logging"
+	"live-transcript-server/internal/server"
+	"live-transcript-server/internal/store"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -28,15 +31,9 @@ func healthcheckHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func versionHandler(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "application/json")
-	resp := map[string]string{
-		"version":   Version,
-		"buildTime": BuildTime,
-	}
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		slog.Error("failed to write /version JSON response", "err", err)
-	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"version":"` + Version + `","buildTime":"` + BuildTime + `"}`))
 }
 
 func main() {
@@ -51,14 +48,14 @@ func main() {
 	// lumberjack creates the log directory and file lazily, then rotates the
 	// file once it reaches 1MB.
 	logPath := filepath.Join("tmp", "_logs", "server.log")
-	logCloser := internal.SetupLogging(logPath)
+	logCloser := logging.Setup(logPath)
 	defer logCloser.Close()
 
 	slog.Info("========== SERVER START ==========")
 	slog.Info("server starting up", "version", Version, "build_time", BuildTime)
 
 	// --- App Setup ---
-	config, err := internal.GetConfig()
+	cfg, err := config.Load("config.yaml")
 	if err != nil {
 		slog.Error("unable to read in config", "func", "main", "err", err)
 		os.Exit(1)
@@ -67,19 +64,29 @@ func main() {
 	// Fail closed: an empty API key would disable authentication on every
 	// worker endpoint (activate/sync/line/media/...). Refuse to start rather
 	// than silently expose them.
-	if config.Credentials.ApiKey == "" {
+	if cfg.Credentials.ApiKey == "" {
 		slog.Error("refusing to start: credentials.apiKey is empty; worker endpoints would be unauthenticated", "func", "main")
 		os.Exit(1)
 	}
 
 	// --- Database Setup ---
 	dbPath := filepath.Join("tmp", "server.db")
-	db, err := internal.InitDB(dbPath, config.Database)
+	st, err := store.Open(dbPath, cfg.Database)
 	if err != nil {
 		slog.Error("unable to initialize database", "func", "main", "path", dbPath, "err", err)
 		os.Exit(1)
 	}
-	app := internal.NewApp(config, db, "tmp", Version, BuildTime)
+
+	app, err := server.NewApp(cfg, st, "tmp", Version, BuildTime)
+	if err != nil {
+		slog.Error("unable to construct app", "func", "main", "err", err)
+		os.Exit(1)
+	}
+	if err := app.Init(context.Background()); err != nil {
+		slog.Error("unable to initialize app environment", "func", "main", "err", err)
+		os.Exit(1)
+	}
+
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)
 
@@ -98,10 +105,9 @@ func main() {
 		}
 	}
 
-	corsHandler := internal.CorsMiddleware(mux)
-	server := &http.Server{
+	httpServer := &http.Server{
 		Addr:              ":8080",
-		Handler:           corsHandler,
+		Handler:           server.CorsMiddleware(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
@@ -114,7 +120,7 @@ func main() {
 
 	// Start server in its own goroutine
 	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("unable to start WebSocket server", "func", "main", "err", err)
 			os.Exit(1)
 		}
@@ -130,11 +136,11 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	// Release parked GET /events long-polls so Shutdown doesn't wait for them
-	app.ReleaseEventPolls()
+	// Release parked long-polls so Shutdown doesn't wait for them
+	app.Notifier.Release()
 
 	// Shutdown HTTP Server first
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("failed to shutdown HTTP server", "func", "main", "err", err)
 	}
 
