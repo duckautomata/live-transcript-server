@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -451,4 +452,213 @@ func TestAdminUIServesPage(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("unknown channel ui: status=%d want 404", rec.Code)
 	}
+}
+
+// captureAdminWebhook routes the app's admin audit posts to a test webhook and
+// returns a channel of the decoded payloads. Posts are sent from a goroutine,
+// so tests must receive from the channel rather than assert immediately.
+func captureAdminWebhook(t *testing.T, app *App) chan map[string]any {
+	t.Helper()
+	payloads := make(chan map[string]any, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			t.Errorf("decode admin webhook payload: %v", err)
+		}
+		payloads <- p
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	app.Discord.AdminWebhookURL = srv.URL
+	return payloads
+}
+
+// waitAdminAudit returns the embed title and its fields as a name->value map.
+func waitAdminAudit(t *testing.T, payloads chan map[string]any) (string, map[string]string) {
+	t.Helper()
+	var payload map[string]any
+	select {
+	case payload = <-payloads:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for admin audit webhook")
+	}
+
+	embeds, ok := payload["embeds"].([]any)
+	if !ok || len(embeds) != 1 {
+		t.Fatalf("payload embeds = %#v, want exactly one embed", payload["embeds"])
+	}
+	embed, ok := embeds[0].(map[string]any)
+	if !ok {
+		t.Fatalf("embed = %#v, want object", embeds[0])
+	}
+	title, _ := embed["title"].(string)
+
+	rawFields, ok := embed["fields"].([]any)
+	if !ok {
+		t.Fatalf("embed fields = %#v, want array", embed["fields"])
+	}
+	fields := make(map[string]string, len(rawFields))
+	for _, rf := range rawFields {
+		f, ok := rf.(map[string]any)
+		if !ok {
+			t.Fatalf("field = %#v, want object", rf)
+		}
+		name, _ := f["name"].(string)
+		value, _ := f["value"].(string)
+		fields[name] = value
+	}
+	return title, fields
+}
+
+func expectNoAdminAudit(t *testing.T, payloads chan map[string]any) {
+	t.Helper()
+	select {
+	case p := <-payloads:
+		t.Fatalf("unexpected admin audit webhook: %#v", p)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestAdminActionsNotifyDiscord(t *testing.T) {
+	const queuedURL = "https://www.youtube.com/watch?v=abc123"
+
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, app *App)
+		method     string
+		path       string
+		body       any
+		wantTitle  string
+		wantFields map[string]string
+	}{
+		{
+			name:      "queue add",
+			method:    http.MethodPost,
+			path:      "/doki/admin/incoming",
+			body:      map[string]string{"url": queuedURL},
+			wantTitle: "Admin: Queued incoming stream",
+			wantFields: map[string]string{
+				"Channel Key": "doki",
+				"URL":         queuedURL,
+				"Endpoint":    "POST /doki/admin/incoming",
+			},
+		},
+		{
+			name: "queue remove",
+			setup: func(t *testing.T, app *App) {
+				if err := app.Store.UpsertIncomingStream(context.Background(), "doki", queuedURL, time.Now().Unix()); err != nil {
+					t.Fatalf("seed incoming: %v", err)
+				}
+			},
+			method:    http.MethodDelete,
+			path:      "/doki/admin/incoming?url=" + url.QueryEscape(queuedURL),
+			wantTitle: "Admin: Removed queued stream",
+			wantFields: map[string]string{
+				"Channel Key": "doki",
+				"URL":         queuedURL,
+			},
+		},
+		{
+			name:       "restart request",
+			method:     http.MethodPost,
+			path:       "/doki/admin/restart",
+			wantTitle:  "Admin: Requested worker restart",
+			wantFields: map[string]string{"Channel Key": "doki"},
+		},
+		{
+			name:      "restart clear",
+			method:    http.MethodDelete,
+			path:      "/doki/admin/restart",
+			wantTitle: "Admin: Cleared restart request",
+			wantFields: map[string]string{
+				"Channel Key": "doki",
+				"Was Pending": "no",
+			},
+		},
+		{
+			name:      "stop current stream",
+			method:    http.MethodPost,
+			path:      "/doki/admin/stop",
+			wantTitle: "Admin: Stopped current stream",
+			wantFields: map[string]string{
+				"Channel Key":         "doki",
+				"Queued URLs Cleared": "0",
+				"Restart Requested":   "yes",
+			},
+		},
+		{
+			name: "delete stream",
+			setup: func(t *testing.T, app *App) {
+				seedExampleData(t, app, "doki")
+				if err := app.Store.SetStreamLive(context.Background(), "doki", "stream-1", false); err != nil {
+					t.Fatalf("deactivate: %v", err)
+				}
+			},
+			method:    http.MethodDelete,
+			path:      "/doki/admin/stream/stream-1",
+			wantTitle: "Admin: Deleted stream",
+			wantFields: map[string]string{
+				"Channel Key":   "doki",
+				"Stream ID":     "stream-1",
+				"Media Deleted": "no",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			app, mux := setupTestApp(t, []string{"doki"})
+			if tc.setup != nil {
+				tc.setup(t, app)
+			}
+			// Capture after setup so seeding never posts an audit itself.
+			payloads := captureAdminWebhook(t, app)
+
+			rec := adminReq(t, mux, tc.method, tc.path, "admin-doki", tc.body)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+
+			title, fields := waitAdminAudit(t, payloads)
+			if title != tc.wantTitle {
+				t.Errorf("title=%q want %q", title, tc.wantTitle)
+			}
+			for name, want := range tc.wantFields {
+				if got := fields[name]; got != want {
+					t.Errorf("field %q=%q want %q", name, got, want)
+				}
+			}
+			if fields["Source IP"] == "" {
+				t.Error("missing Source IP field")
+			}
+		})
+	}
+}
+
+func TestAdminReadsAndFailuresDoNotNotifyDiscord(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki")
+	payloads := captureAdminWebhook(t, app)
+
+	// Read-only endpoints: the admin page polls these constantly.
+	if rec := adminReq(t, mux, http.MethodGet, "/doki/admin/info", "admin-doki", nil); rec.Code != http.StatusOK {
+		t.Fatalf("info: status=%d", rec.Code)
+	}
+	if rec := adminReq(t, mux, http.MethodGet, "/doki/ui", "", nil); rec.Code != http.StatusOK {
+		t.Fatalf("ui: status=%d", rec.Code)
+	}
+
+	// Rejected and failed operations: nothing was done, so nothing is audited.
+	if rec := adminReq(t, mux, http.MethodPost, "/doki/admin/restart", "wrong-key", nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("bad key: status=%d want 403", rec.Code)
+	}
+	if rec := adminReq(t, mux, http.MethodDelete, "/doki/admin/stream/nope", "admin-doki", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown stream: status=%d want 404", rec.Code)
+	}
+	// stream-1 is still live, so this is refused with a 409.
+	if rec := adminReq(t, mux, http.MethodDelete, "/doki/admin/stream/stream-1", "admin-doki", nil); rec.Code != http.StatusConflict {
+		t.Fatalf("live stream: status=%d want 409", rec.Code)
+	}
+
+	expectNoAdminAudit(t, payloads)
 }

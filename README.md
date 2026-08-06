@@ -145,6 +145,7 @@ obvious home:
 
 Rules of thumb for extending it:
 - **New endpoint** → a handler in the matching `internal/server/handlers_*.go` file plus one line in `routes.go` (use `withChannel` / `withAdminChannel` for `/{channel}/...` routes).
+- **New admin mutation** → after the write succeeds, `app.bumpAdminChange` to wake the long polls and `app.notifyAdminAction` to record it in the Discord admin audit log (read-only admin endpoints deliberately do neither).
 - **New WebSocket event** → a constant + payload struct in `internal/ws/events.go`, then `Hub.Broadcast` at the emitting site.
 - **New table or query** → `internal/store` only; handlers never see SQL.
 - **New integration** (Slack, etc.) → a new package like `internal/discord`, depending on small interfaces the server implements (see `discord.StreamSink`), wired in `server.NewApp`.

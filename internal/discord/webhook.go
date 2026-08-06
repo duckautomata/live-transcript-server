@@ -31,11 +31,15 @@ type presentation struct {
 
 // Client sends operator notifications to a Discord webhook. All Notify*
 // methods are fire-and-forget: they post from a goroutine and only log
-// delivery failures. A zero WebhookURL disables every notification.
+// delivery failures. A zero WebhookURL disables every notification except the
+// admin audit, which follows its own (defaulted) AdminWebhookURL.
 type Client struct {
 	WebhookURL string
-	NotifyPing string
-	Version    string
+	// AdminWebhookURL is where admin-operation audit records go. It falls back
+	// to WebhookURL when not configured separately.
+	AdminWebhookURL string
+	NotifyPing      string
+	Version         string
 
 	transcriptBaseURL string
 	channels          map[string]presentation
@@ -70,8 +74,14 @@ func NewClient(cfg config.DiscordConfig, version string, channels []config.Chann
 		chans[cc.Name] = p
 	}
 
+	adminURL := cfg.AdminWebhookURL
+	if adminURL == "" {
+		adminURL = cfg.WebhookURL
+	}
+
 	return &Client{
 		WebhookURL:        cfg.WebhookURL,
+		AdminWebhookURL:   adminURL,
 		NotifyPing:        ping,
 		Version:           version,
 		transcriptBaseURL: cfg.TranscriptBaseURL,
@@ -80,9 +90,15 @@ func NewClient(cfg config.DiscordConfig, version string, channels []config.Chann
 	}
 }
 
-// send sends the actual payload to the discord webhook.
+// send sends the actual payload to the default discord webhook.
 func (d *Client) send(payload map[string]any) {
-	if d.WebhookURL == "" {
+	d.sendTo(d.WebhookURL, payload)
+}
+
+// sendTo posts payload to a specific webhook URL. An empty URL is a no-op, so
+// an unconfigured webhook silently disables the notifications that use it.
+func (d *Client) sendTo(webhookURL string, payload map[string]any) {
+	if webhookURL == "" {
 		return
 	}
 	body, err := json.Marshal(payload)
@@ -91,7 +107,7 @@ func (d *Client) send(payload map[string]any) {
 		return
 	}
 
-	req, err := http.NewRequest("POST", d.WebhookURL, bytes.NewBuffer(body))
+	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(body))
 	if err != nil {
 		slog.Error("failed to create discord request", "err", err)
 		return
@@ -273,6 +289,82 @@ func (d *Client) NotifyDiscordBotStartupError(err error) {
 		},
 	}
 	go d.send(payload)
+}
+
+// Discord embed limits. Names and values past these lengths make the API
+// reject the whole payload, so NotifyAdminAction truncates instead.
+const (
+	maxEmbedFields     = 25
+	maxFieldNameLength = 256
+	maxFieldValueLen   = 1024
+)
+
+// AdminField is one labelled detail of an admin operation (e.g. "Stream ID" /
+// "abc123"), rendered as an embed field. Order is preserved.
+type AdminField struct {
+	Name  string
+	Value string
+	// Inline packs the field beside its neighbours instead of on its own row.
+	Inline bool
+}
+
+// NotifyAdminAction records a completed admin operation on the admin webhook:
+// what was done (action), which channel it was done to (channelKey), and the
+// operation's specifics (fields). It is an audit trail, not an alert — it
+// never pings the operator.
+//
+// Callers must invoke it only after the operation has actually succeeded, and
+// must never pass a secret (admin key, membership key) as a field value.
+func (d *Client) NotifyAdminAction(channelKey, action string, fields ...AdminField) {
+	if d.AdminWebhookURL == "" {
+		return
+	}
+
+	embedFields := make([]map[string]any, 0, len(fields)+1)
+	add := func(f AdminField) {
+		if len(embedFields) >= maxEmbedFields {
+			return
+		}
+		value := f.Value
+		if value == "" {
+			value = "—" // Discord rejects an empty field value.
+		}
+		embedFields = append(embedFields, map[string]any{
+			"name":   truncate(f.Name, maxFieldNameLength),
+			"value":  truncate(value, maxFieldValueLen),
+			"inline": f.Inline,
+		})
+	}
+
+	add(AdminField{Name: "Channel Key", Value: channelKey, Inline: true})
+	for _, f := range fields {
+		add(f)
+	}
+
+	payload := map[string]any{
+		"embeds": []map[string]any{
+			{
+				"title":     fmt.Sprintf("Admin: %s", action),
+				"color":     5793266, // Blurple
+				"fields":    embedFields,
+				"timestamp": time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("Version: %s", d.Version),
+				},
+			},
+		},
+	}
+	go d.sendTo(d.AdminWebhookURL, payload)
+}
+
+// truncate shortens s to at most max characters, marking any cut with an
+// ellipsis so a clipped value never reads as the complete one.
+func truncate(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max-1]) + "…"
 }
 
 // Notify500Error alerts on a 500 response. Alerts within notify500Throttle of

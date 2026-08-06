@@ -57,6 +57,11 @@ channels:
 # Optional. If left empty, no notifications will be sent.
 discord:
   webhookUrl: ""
+  # Optional separate webhook that receives an audit record of every admin
+  # operation (queue add/remove, restart request/clear, stream delete, stop,
+  # membership key create/delete). Empty falls back to webhookUrl; admin
+  # audit posts are only disabled when both are empty.
+  adminWebhookUrl: ""
   # both user and role id are optional. If none are set, no ping will be sent.
   # Only one will be used. If both are set, the role id will be used.
   notifyUserId: ""

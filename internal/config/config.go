@@ -47,9 +47,14 @@ type DiscordBotConfig struct {
 }
 
 type DiscordConfig struct {
-	WebhookURL   string `yaml:"webhookUrl"`
-	NotifyUserID string `yaml:"notifyUserId"`
-	NotifyRoleID string `yaml:"notifyRoleId"`
+	WebhookURL string `yaml:"webhookUrl"`
+	// AdminWebhookURL receives the audit record of every admin operation. Set
+	// it to route the (chatty, low-urgency) admin log to its own channel;
+	// empty falls back to WebhookURL, and admin audit posts are disabled only
+	// when both are empty.
+	AdminWebhookURL string `yaml:"adminWebhookUrl"`
+	NotifyUserID    string `yaml:"notifyUserId"`
+	NotifyRoleID    string `yaml:"notifyRoleId"`
 	// TranscriptBaseURL is the base URL for transcript links in stream-start
 	// notifications, e.g. "https://www.duck-automata.com/live-transcript".
 	// If empty, a default is derived from the server version (dev vs prod).

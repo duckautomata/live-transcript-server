@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -141,6 +142,9 @@ func (app *App) postAdminIncomingHandler(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	app.bumpAdminChange(cs.Key)
+	app.notifyAdminAction(r, cs, "Queued incoming stream",
+		discord.AdminField{Name: "URL", Value: url},
+	)
 	slog.Info("admin queued incoming stream", "key", cs.Key, "func", "postAdminIncomingHandler", "url", url)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -166,6 +170,9 @@ func (app *App) deleteAdminIncomingHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	app.bumpAdminChange(cs.Key)
+	app.notifyAdminAction(r, cs, "Removed queued stream",
+		discord.AdminField{Name: "URL", Value: url},
+	)
 	slog.Info("admin removed incoming stream", "key", cs.Key, "func", "deleteAdminIncomingHandler", "url", url)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -180,6 +187,9 @@ func (app *App) postAdminRestartHandler(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	app.bumpAdminChange(cs.Key)
+	app.notifyAdminAction(r, cs, "Requested worker restart",
+		discord.AdminField{Name: "Requested At", Value: time.Unix(now, 0).UTC().Format(time.RFC1123), Inline: true},
+	)
 	slog.Info("admin requested worker restart", "key", cs.Key, "func", "postAdminRestartHandler", "requestedAt", now)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -198,6 +208,9 @@ func (app *App) deleteAdminRestartHandler(w http.ResponseWriter, r *http.Request
 	if rowsAffected > 0 {
 		app.bumpAdminChange(cs.Key)
 	}
+	app.notifyAdminAction(r, cs, "Cleared restart request",
+		discord.AdminField{Name: "Was Pending", Value: yesNo(rowsAffected > 0), Inline: true},
+	)
 	slog.Info("admin cleared restart request", "key", cs.Key, "func", "deleteAdminRestartHandler", "wasPending", rowsAffected > 0)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -242,6 +255,11 @@ func (app *App) deleteAdminStreamHandler(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	app.bumpAdminChange(cs.Key)
+	app.notifyAdminAction(r, cs, "Deleted stream",
+		discord.AdminField{Name: "Stream ID", Value: streamID, Inline: true},
+		discord.AdminField{Name: "Media Deleted", Value: yesNo(deleteMedia), Inline: true},
+		discord.AdminField{Name: "Stream Title", Value: stream.StreamTitle},
+	)
 	slog.Info("admin deleted stream", "key", cs.Key, "func", "deleteAdminStreamHandler", "streamID", streamID, "wasLive", stream.IsLive, "deleteMedia", deleteMedia)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -268,6 +286,10 @@ func (app *App) postAdminStopHandler(w http.ResponseWriter, r *http.Request, cs 
 		return
 	}
 	app.bumpAdminChange(cs.Key)
+	app.notifyAdminAction(r, cs, "Stopped current stream",
+		discord.AdminField{Name: "Queued URLs Cleared", Value: strconv.FormatInt(cleared, 10), Inline: true},
+		discord.AdminField{Name: "Restart Requested", Value: "yes", Inline: true},
+	)
 	slog.Info("admin stopped current stream", "key", cs.Key, "func", "postAdminStopHandler", "queueCleared", cleared, "restartAt", now)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -309,7 +331,11 @@ func (app *App) postAdminMembershipHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Deliberately do not log the key value.
+	// Deliberately do not log or notify the key value.
+	app.notifyAdminAction(r, cs, "Created membership key",
+		discord.AdminField{Name: "Archive Channel", Value: cs.MembersName, Inline: true},
+		discord.AdminField{Name: "Expires At", Value: key.ExpiresAt, Inline: true},
+	)
 	slog.Info("admin created membership key", "key", cs.Key, "membersName", cs.MembersName, "func", "postAdminMembershipHandler", "expiresAt", key.ExpiresAt)
 	writeJSON(w, key)
 }
@@ -330,6 +356,9 @@ func (app *App) deleteAdminMembershipHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	app.notifyAdminAction(r, cs, "Deleted all membership keys",
+		discord.AdminField{Name: "Archive Channel", Value: cs.MembersName, Inline: true},
+	)
 	slog.Info("admin deleted all membership keys", "key", cs.Key, "membersName", cs.MembersName, "func", "deleteAdminMembershipHandler")
 	w.WriteHeader(http.StatusNoContent)
 }

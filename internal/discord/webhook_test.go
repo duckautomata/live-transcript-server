@@ -187,3 +187,123 @@ func TestNotify500Error_Throttled(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 }
+
+// fieldsFrom extracts an embed's fields as an ordered name/value slice.
+func fieldsFrom(t *testing.T, embed map[string]any) [][2]string {
+	t.Helper()
+	raw, ok := embed["fields"].([]any)
+	if !ok {
+		t.Fatalf("embed fields = %#v, want array", embed["fields"])
+	}
+	out := make([][2]string, 0, len(raw))
+	for _, r := range raw {
+		f, ok := r.(map[string]any)
+		if !ok {
+			t.Fatalf("field = %#v, want object", r)
+		}
+		name, _ := f["name"].(string)
+		value, _ := f["value"].(string)
+		out = append(out, [2]string{name, value})
+	}
+	return out
+}
+
+func TestNotifyAdminAction_ReportsActionChannelAndDetails(t *testing.T) {
+	c, payloads := newTestClient(t, config.DiscordConfig{NotifyUserID: "u1"}, "test", nil)
+
+	c.NotifyAdminAction("doki", "Deleted stream",
+		AdminField{Name: "Stream ID", Value: "abc123", Inline: true},
+		AdminField{Name: "Media Deleted", Value: "no"},
+	)
+	payload := waitPayload(t, payloads)
+	embed := embedFrom(t, payload)
+
+	if got := embed["title"]; got != "Admin: Deleted stream" {
+		t.Errorf("title=%v want the action", got)
+	}
+	// An audit record is not an alert: it must never ping the operator.
+	if got, ok := payload["content"]; ok && got != "" {
+		t.Errorf("content=%v want no ping on an admin audit post", got)
+	}
+
+	fields := fieldsFrom(t, embed)
+	want := [][2]string{
+		{"Channel Key", "doki"},
+		{"Stream ID", "abc123"},
+		{"Media Deleted", "no"},
+	}
+	if len(fields) != len(want) {
+		t.Fatalf("fields=%v want %v", fields, want)
+	}
+	for i, w := range want {
+		if fields[i] != w {
+			t.Errorf("field[%d]=%v want %v", i, fields[i], w)
+		}
+	}
+}
+
+func TestNotifyAdminAction_UsesDedicatedAdminWebhook(t *testing.T) {
+	// Two webhooks: the admin audit must go only to the admin one.
+	main, mainPayloads := newTestClient(t, config.DiscordConfig{}, "test", nil)
+	admin, adminPayloads := newTestClient(t, config.DiscordConfig{}, "test", nil)
+
+	c := NewClient(config.DiscordConfig{
+		WebhookURL:      main.WebhookURL,
+		AdminWebhookURL: admin.WebhookURL,
+	}, "test", nil)
+
+	c.NotifyAdminAction("doki", "Requested worker restart")
+	embed := embedFrom(t, waitPayload(t, adminPayloads))
+	if got := embed["title"]; got != "Admin: Requested worker restart" {
+		t.Errorf("title=%v want the action", got)
+	}
+
+	select {
+	case p := <-mainPayloads:
+		t.Fatalf("admin audit leaked to the main webhook: %#v", p)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestNotifyAdminAction_DisabledWithoutAnyWebhook(t *testing.T) {
+	// No webhook configured at all: the call must be a silent no-op, not a
+	// panic or a POST to an empty URL.
+	c := NewClient(config.DiscordConfig{}, "test", nil)
+	if c.AdminWebhookURL != "" {
+		t.Fatalf("AdminWebhookURL=%q want empty", c.AdminWebhookURL)
+	}
+	c.NotifyAdminAction("doki", "Stopped current stream")
+}
+
+func TestNotifyAdminAction_TruncatesOverlongValues(t *testing.T) {
+	c, payloads := newTestClient(t, config.DiscordConfig{}, "test", nil)
+
+	c.NotifyAdminAction("doki", "Queued incoming stream",
+		AdminField{Name: "URL", Value: strings.Repeat("x", maxFieldValueLen+50)},
+	)
+	fields := fieldsFrom(t, embedFrom(t, waitPayload(t, payloads)))
+
+	if len(fields) != 2 {
+		t.Fatalf("fields=%v want channel key + url", fields)
+	}
+	url := fields[1][1]
+	if len([]rune(url)) != maxFieldValueLen {
+		t.Errorf("url length=%d want %d", len([]rune(url)), maxFieldValueLen)
+	}
+	if !strings.HasSuffix(url, "…") {
+		t.Errorf("url=%q want a truncation marker", url[len(url)-10:])
+	}
+}
+
+func TestNotifyAdminAction_EmptyValueIsPlaceheld(t *testing.T) {
+	// Discord rejects the whole payload on an empty field value.
+	c, payloads := newTestClient(t, config.DiscordConfig{}, "test", nil)
+
+	c.NotifyAdminAction("doki", "Created membership key", AdminField{Name: "Expires At", Value: ""})
+	fields := fieldsFrom(t, embedFrom(t, waitPayload(t, payloads)))
+	for _, f := range fields {
+		if f[1] == "" {
+			t.Errorf("field %q has an empty value", f[0])
+		}
+	}
+}

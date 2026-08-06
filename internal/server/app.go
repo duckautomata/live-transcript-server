@@ -11,9 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -210,6 +212,46 @@ func (app *App) bumpAdminChange(channelKey string) {
 // missing piece disables the feature.
 func (app *App) membershipEnabled(cs *ChannelState) bool {
 	return app.Archive.Configured() && cs.MembersName != ""
+}
+
+// notifyAdminAction posts an audit record of a completed admin operation to
+// Discord, tagged with the channel it acted on and the request that made it.
+//
+// Call it only on the success path — a handler that failed returns before
+// reaching it. Read-only admin endpoints (info, poll, membership list) do not
+// call it: the admin page polls them continuously and would flood the webhook.
+func (app *App) notifyAdminAction(r *http.Request, cs *ChannelState, action string, fields ...discord.AdminField) {
+	fields = append(fields,
+		discord.AdminField{Name: "Endpoint", Value: fmt.Sprintf("%s %s", r.Method, r.URL.Path)},
+		discord.AdminField{Name: "Source IP", Value: requestIP(r), Inline: true},
+	)
+	app.Discord.NotifyAdminAction(cs.Key, action, fields...)
+}
+
+// requestIP is the best-effort client address of r: the first X-Forwarded-For
+// hop when the server sits behind a proxy, otherwise the connection's remote
+// address. The header is client-supplied and therefore spoofable — it is fine
+// for an audit note, never for an access decision.
+func requestIP(r *http.Request) string {
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		first, _, _ := strings.Cut(fwd, ",")
+		if first = strings.TrimSpace(first); first != "" {
+			return first
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// yesNo renders a bool for a human-readable notification field.
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
 }
 
 // isClientGone reports whether err is a request-context cancellation —
