@@ -628,8 +628,11 @@ func TestAdminActionsNotifyDiscord(t *testing.T) {
 					t.Errorf("field %q=%q want %q", name, got, want)
 				}
 			}
-			if fields["Source IP"] == "" {
-				t.Error("missing Source IP field")
+			// Admin audits must never carry anything sensitive.
+			for _, name := range []string{"Source IP", "IP", "User Agent"} {
+				if got, ok := fields[name]; ok {
+					t.Errorf("field %q=%q leaked; admin audits must not hold sensitive info", name, got)
+				}
 			}
 		})
 	}
