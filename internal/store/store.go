@@ -79,6 +79,21 @@ func Open(path string, cfg config.DatabaseConfig) (*Store, error) {
 	params.Set("_foreign_keys", "on")
 	params.Set("_cache_size", strconv.Itoa(-cfg.CacheSizeKB)) // Negate to specify KB
 
+	// Every transaction this package opens is a write transaction, and
+	// InsertNextLine reads before it writes. A deferred BEGIN would take a read
+	// snapshot on that first SELECT and then fail the upgrade to a write lock
+	// with SQLITE_BUSY_SNAPSHOT ("database is locked") if another connection
+	// committed in between -- a case busy_timeout does not retry, because the
+	// snapshot is already stale. BEGIN IMMEDIATE takes the write lock up front,
+	// so contention waits out busy_timeout instead of erroring.
+	//
+	// This is per-connection, so it applies to every BeginTx in the package --
+	// the driver ignores sql.TxOptions, ReadOnly included. Reads run outside
+	// transactions (plain db.Query), so nothing is serialized today, but a
+	// future read-only BeginTx would silently take the write lock. Give reads
+	// their own pool without this parameter if that day comes.
+	params.Set("_txlock", "immediate")
+
 	// temp_store and mmap_size have no DSN parameter in mattn/go-sqlite3
 	// (unknown parameters are silently ignored), so apply them through a
 	// per-connection hook to get the same every-connection coverage.
