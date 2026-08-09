@@ -129,6 +129,28 @@ var (
 		[]string{"key"},
 	)
 
+	TotalTranscriptFetches = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "lt_total_transcript_fetches_per_key",
+		Help: "The total number of successful calls to the /transcript endpoint (past stream transcripts).",
+	},
+		[]string{"key"},
+	)
+	StreamTranscriptFetches = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_stream_transcript_fetches_per_key",
+		Help: "The number of successful calls to the /transcript endpoint in a given stream period.",
+	},
+		[]string{"key"},
+	)
+	TranscriptFetchLines = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "lt_transcript_fetch_lines",
+		Help: "The number of transcript lines returned by the /transcript endpoint.",
+		Buckets: []float64{
+			0, 10, 50, 100, 250, 500, 1000, 2500, 5000, 10000,
+		},
+	},
+		[]string{"key"},
+	)
+
 	TotalAudioClipped = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "lt_total_audio_clipped_per_key",
 		Help: "The total number of successful audio clips created.",

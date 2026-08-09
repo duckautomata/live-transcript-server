@@ -15,12 +15,15 @@ import (
 	"time"
 
 	"live-transcript-server/internal/config"
+	"live-transcript-server/internal/metrics"
 	"live-transcript-server/internal/model"
 	"live-transcript-server/internal/storage"
 	"live-transcript-server/internal/store"
 	"live-transcript-server/internal/ws"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestServer_ActivateDeactivate(t *testing.T) {
@@ -679,6 +682,89 @@ func TestServer_GetTranscriptEndpoint(t *testing.T) {
 	json.Unmarshal(rr.Body.Bytes(), &lines)
 	if len(lines) != 0 {
 		t.Errorf("expected empty list for invalid stream, got %v", lines)
+	}
+}
+
+func TestServer_GetTranscriptEndpointMetrics(t *testing.T) {
+	// The key is unique to this test so the per-key metrics are not shared
+	// with any other test in the package.
+	key := "test-transcript-metrics"
+	app, mux := setupTestApp(t, []string{key})
+	ctx := context.Background()
+
+	streamID := "stream1"
+	app.Store.UpsertStream(ctx, &model.Stream{ChannelID: key, StreamID: streamID, IsLive: false})
+	app.Store.ReplaceTranscript(ctx, key, streamID, []model.Line{
+		{ID: 0, Segments: json.RawMessage(`[{"text": "Line 0"}]`)},
+		{ID: 1, Segments: json.RawMessage(`[{"text": "Line 1"}]`)},
+	})
+
+	get := func(path string) int {
+		req, _ := http.NewRequest("GET", path, nil)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr.Code
+	}
+
+	// A rejected stream ID must not count as a fetch.
+	if code := get(fmt.Sprintf("/%s/transcript/../etc", key)); code == http.StatusOK {
+		t.Fatalf("expected invalid stream ID to be rejected, got %v", code)
+	}
+	if got := testutil.ToFloat64(metrics.TotalTranscriptFetches.WithLabelValues(key)); got != 0 {
+		t.Errorf("expected 0 total fetches after a rejected request, got %v", got)
+	}
+
+	if code := get(fmt.Sprintf("/%s/transcript/%s", key, streamID)); code != http.StatusOK {
+		t.Fatalf("expected status OK, got %v", code)
+	}
+	if got := testutil.ToFloat64(metrics.TotalTranscriptFetches.WithLabelValues(key)); got != 1 {
+		t.Errorf("expected 1 total fetch, got %v", got)
+	}
+	if got := testutil.ToFloat64(metrics.StreamTranscriptFetches.WithLabelValues(key)); got != 1 {
+		t.Errorf("expected 1 stream fetch, got %v", got)
+	}
+	if got := testutil.CollectAndCount(metrics.TranscriptFetchLines, "lt_transcript_fetch_lines"); got == 0 {
+		t.Error("expected lt_transcript_fetch_lines to be observed")
+	}
+
+	// A new stream resets the per-stream gauge but not the total counter.
+	app.activateStream(ctx, app.Channels[key], "stream2", "title", "0", "audio")
+	if got := testutil.ToFloat64(metrics.StreamTranscriptFetches.WithLabelValues(key)); got != 0 {
+		t.Errorf("expected stream fetches to reset on a new stream, got %v", got)
+	}
+	if got := testutil.ToFloat64(metrics.TotalTranscriptFetches.WithLabelValues(key)); got != 1 {
+		t.Errorf("expected total fetches to survive a new stream, got %v", got)
+	}
+}
+
+// TestServer_StreamMetricsResetOnNewStream guards the whole per-stream gauge
+// reset block in activateStream: every lt_stream_*_per_key gauge must go back
+// to 0 when a new stream starts, or it silently accumulates across streams.
+func TestServer_StreamMetricsResetOnNewStream(t *testing.T) {
+	key := "test-stream-metric-reset"
+	app, _ := setupTestApp(t, []string{key})
+	ctx := context.Background()
+
+	gauges := map[string]*prometheus.GaugeVec{
+		"audio_played":     metrics.StreamAudioPlayed,
+		"video_played":     metrics.StreamVideoPlayed,
+		"frame_downloads":  metrics.StreamFramesDownloads,
+		"audio_clipped":    metrics.StreamAudioClipped,
+		"video_clipped":    metrics.StreamVideoClipped,
+		"audio_trimmed":    metrics.StreamAudioTrimmed,
+		"video_trimmed":    metrics.StreamVideoTrimmed,
+		"transcript_fetch": metrics.StreamTranscriptFetches,
+	}
+	for _, g := range gauges {
+		g.WithLabelValues(key).Set(7)
+	}
+
+	app.activateStream(ctx, app.Channels[key], "stream1", "title", "0", "audio")
+
+	for name, g := range gauges {
+		if got := testutil.ToFloat64(g.WithLabelValues(key)); got != 0 {
+			t.Errorf("expected %s to reset to 0 on a new stream, got %v", name, got)
+		}
 	}
 }
 

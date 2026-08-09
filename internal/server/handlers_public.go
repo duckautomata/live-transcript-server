@@ -257,6 +257,10 @@ func (app *App) getTranscriptHandler(w http.ResponseWriter, r *http.Request, cs 
 	}
 	metrics.RequestProcessingDuration.WithLabelValues("getTranscriptHandler", "db_fetch", cs.Key).Observe(time.Since(dbFetchStart).Seconds())
 
+	metrics.TotalTranscriptFetches.WithLabelValues(cs.Key).Inc()
+	metrics.StreamTranscriptFetches.WithLabelValues(cs.Key).Inc()
+	metrics.TranscriptFetchLines.WithLabelValues(cs.Key).Observe(float64(len(lines)))
+
 	jsonEncodeStart := time.Now()
 	writeJSON(w, lines)
 	metrics.RequestProcessingDuration.WithLabelValues("getTranscriptHandler", "json_encode", cs.Key).Observe(time.Since(jsonEncodeStart).Seconds())

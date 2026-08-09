@@ -26,11 +26,13 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, streamID s
 	// If no stream exists, or the ID is different, it's a new stream
 	if currentStream == nil || currentStream.StreamID != streamID {
 		metrics.StreamAudioPlayed.WithLabelValues(cs.Key).Set(0)
+		metrics.StreamVideoPlayed.WithLabelValues(cs.Key).Set(0)
 		metrics.StreamFramesDownloads.WithLabelValues(cs.Key).Set(0)
 		metrics.StreamAudioClipped.WithLabelValues(cs.Key).Set(0)
 		metrics.StreamVideoClipped.WithLabelValues(cs.Key).Set(0)
 		metrics.StreamAudioTrimmed.WithLabelValues(cs.Key).Set(0)
 		metrics.StreamVideoTrimmed.WithLabelValues(cs.Key).Set(0)
+		metrics.StreamTranscriptFetches.WithLabelValues(cs.Key).Set(0)
 
 		// Remove the previous stream's activation metric, if there was one.
 		if currentStream != nil && currentStream.StreamID != "" {
