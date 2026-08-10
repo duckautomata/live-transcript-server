@@ -24,6 +24,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestServer_ActivateDeactivate(t *testing.T) {
@@ -735,6 +736,63 @@ func TestServer_GetTranscriptEndpointMetrics(t *testing.T) {
 	if got := testutil.ToFloat64(metrics.TotalTranscriptFetches.WithLabelValues(key)); got != 1 {
 		t.Errorf("expected total fetches to survive a new stream, got %v", got)
 	}
+}
+
+func TestServer_PastStreamFetchAgeMetric(t *testing.T) {
+	key := "test-past-stream-age"
+	app, mux := setupTestApp(t, []string{key})
+	ctx := context.Background()
+
+	twoDaysAgo := time.Now().Add(-48 * time.Hour).UnixMicro()
+	app.Store.UpsertStream(ctx, &model.Stream{ChannelID: key, StreamID: "past", IsLive: false, ActivatedTime: twoDaysAgo})
+	app.Store.UpsertStream(ctx, &model.Stream{ChannelID: key, StreamID: "live", IsLive: true, ActivatedTime: time.Now().UnixMicro()})
+	// A row written before activated_time existed defaults to 0; an age
+	// measured from the epoch would be meaningless.
+	app.Store.UpsertStream(ctx, &model.Stream{ChannelID: key, StreamID: "legacy", IsLive: false, ActivatedTime: 0})
+
+	get := func(streamID string) {
+		t.Helper()
+		req, _ := http.NewRequest("GET", fmt.Sprintf("/%s/transcript/%s", key, streamID), nil)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected status OK for %s, got %v", streamID, rr.Code)
+		}
+	}
+
+	// Only the past stream is a meaningful observation; the live stream, the
+	// legacy row, and a stream that does not exist are all skipped.
+	get("live")
+	get("legacy")
+	get("missing")
+	if got := testutil.CollectAndCount(metrics.PastStreamFetchAge, "lt_past_stream_fetch_age_seconds"); got != 0 {
+		t.Fatalf("expected no age observations for live/legacy/missing streams, got %v series", got)
+	}
+
+	get("past")
+	count, sum := histogramCountAndSum(t, metrics.PastStreamFetchAge.WithLabelValues(key))
+	if count != 1 {
+		t.Fatalf("expected 1 age observation, got %v", count)
+	}
+	// 48h, with enough slack to cover the test's own runtime.
+	if sum < 47*3600 || sum > 49*3600 {
+		t.Errorf("expected an age near 48h, got %v seconds", sum)
+	}
+}
+
+// histogramCountAndSum reads the observation count and total from a single
+// histogram series.
+func histogramCountAndSum(t *testing.T, o prometheus.Observer) (uint64, float64) {
+	t.Helper()
+	m, ok := o.(prometheus.Metric)
+	if !ok {
+		t.Fatalf("observer %T is not a prometheus.Metric", o)
+	}
+	var pb dto.Metric
+	if err := m.Write(&pb); err != nil {
+		t.Fatalf("failed to read histogram: %v", err)
+	}
+	return pb.GetHistogram().GetSampleCount(), pb.GetHistogram().GetSampleSum()
 }
 
 // TestServer_StreamMetricsResetOnNewStream guards the whole per-stream gauge

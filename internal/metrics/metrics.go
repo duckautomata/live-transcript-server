@@ -150,6 +150,22 @@ var (
 	},
 		[]string{"key"},
 	)
+	// PastStreamFetchAge is observed only for streams that are no longer live
+	// and that have a known activation time, so it measures how far back
+	// viewers reach rather than counting every /transcript call. Compare its
+	// count against lt_total_transcript_fetches_per_key to see what share of
+	// fetches were for past streams.
+	PastStreamFetchAge = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "lt_past_stream_fetch_age_seconds",
+		Help: "The age of a past stream, in seconds, when its transcript was fetched.",
+		Buckets: []float64{
+			3600, 21600, 43200, // 1h, 6h, 12h
+			86400, 172800, 604800, 1209600, // 1d, 2d, 7d, 14d
+			2592000, 7776000, 15552000, 31536000, // 30d, 90d, 180d, 365d
+		},
+	},
+		[]string{"key"},
+	)
 
 	TotalAudioClipped = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "lt_total_audio_clipped_per_key",

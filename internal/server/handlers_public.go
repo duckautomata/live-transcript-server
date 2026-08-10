@@ -260,10 +260,38 @@ func (app *App) getTranscriptHandler(w http.ResponseWriter, r *http.Request, cs 
 	metrics.TotalTranscriptFetches.WithLabelValues(cs.Key).Inc()
 	metrics.StreamTranscriptFetches.WithLabelValues(cs.Key).Inc()
 	metrics.TranscriptFetchLines.WithLabelValues(cs.Key).Observe(float64(len(lines)))
+	app.observePastStreamAge(r.Context(), cs, streamID)
 
 	jsonEncodeStart := time.Now()
 	writeJSON(w, lines)
 	metrics.RequestProcessingDuration.WithLabelValues("getTranscriptHandler", "json_encode", cs.Key).Observe(time.Since(jsonEncodeStart).Seconds())
+}
+
+// observePastStreamAge records how old a stream was when its transcript was
+// fetched, so the retention window can be judged against how far back viewers
+// actually reach. It is best-effort bookkeeping: nothing here may fail the
+// request the caller is already serving. Nothing is recorded for the live
+// stream, an unknown stream, or a row predating activated_time (default 0),
+// since none of those carry a meaningful age.
+func (app *App) observePastStreamAge(ctx context.Context, cs *ChannelState, streamID string) {
+	lookupStart := time.Now()
+	stream, err := app.Store.GetStreamByID(ctx, cs.Key, streamID)
+	if err != nil {
+		slog.Warn("failed to look up stream for age metric", "key", cs.Key, "func", "observePastStreamAge", "streamID", streamID, "err", err)
+		return
+	}
+	metrics.RequestProcessingDuration.WithLabelValues("getTranscriptHandler", "stream_lookup", cs.Key).Observe(time.Since(lookupStart).Seconds())
+
+	if stream == nil || stream.IsLive || stream.ActivatedTime <= 0 {
+		return
+	}
+
+	age := time.Since(time.UnixMicro(stream.ActivatedTime))
+	if age < 0 {
+		// Clock skew, or a row written by a host running ahead of this one.
+		return
+	}
+	metrics.PastStreamFetchAge.WithLabelValues(cs.Key).Observe(age.Seconds())
 }
 
 // postClipHandler merges a range of lines' raw media into a single clip,
