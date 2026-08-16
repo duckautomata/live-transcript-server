@@ -194,16 +194,34 @@ func TestVodBuildProducesOneFile(t *testing.T) {
 	if final.State != vodStateDone {
 		t.Fatalf("state=%q want %q (error=%q)", final.State, vodStateDone, final.Error)
 	}
-	if final.Path != "/download/stream-vod/vod/full.m4a" {
-		t.Errorf("path=%q want the local download route", final.Path)
-	}
 	if final.URL != "" {
 		t.Errorf("local storage should not report an absolute url, got %q", final.URL)
 	}
+	// The link names the file after the stream, and the object itself carries a
+	// random ID so it cannot be reached by guessing from the stream ID.
+	if !strings.HasPrefix(final.Path, "/download/stream-vod/vod/") {
+		t.Fatalf("path=%q want the local download route", final.Path)
+	}
+	if !strings.Contains(final.Path, "?name=VOD-Test-Stream") {
+		t.Errorf("path=%q does not carry the stream's name", final.Path)
+	}
+	if strings.Contains(final.Path, "/full.m4a") {
+		t.Errorf("path=%q uses a guessable file name", final.Path)
+	}
 
-	// The artifact holds every chunk, in line order, under the fixed VOD key.
-	vodPath := filepath.Join(app.TempDir, storage.VodKey("doki", "stream-vod", ".m4a"))
-	data, err := os.ReadFile(vodPath)
+	// The artifact holds every chunk, in line order.
+	vodDir := filepath.Join(app.TempDir, "doki", "stream-vod", "vod")
+	entries, err := os.ReadDir(vodDir)
+	if err != nil {
+		t.Fatalf("read vod dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("vod dir holds %d files, want exactly 1: %v", len(entries), entries)
+	}
+	if name := entries[0].Name(); !strings.HasSuffix(name, ".m4a") || len(name) < len("x.m4a")+8 {
+		t.Errorf("vod file %q does not look randomly named", name)
+	}
+	data, err := os.ReadFile(filepath.Join(vodDir, entries[0].Name()))
 	if err != nil {
 		t.Fatalf("read built vod: %v", err)
 	}
@@ -211,15 +229,103 @@ func TestVodBuildProducesOneFile(t *testing.T) {
 		t.Errorf("vod content=%q want %q", string(data), want)
 	}
 
-	// And it is downloadable through the public media route.
-	req := httptest.NewRequest(http.MethodGet, "/doki/download/stream-vod/vod/full.m4a", nil)
+	// And the link the admin page is handed actually serves it, as an
+	// attachment named after the stream.
+	req := httptest.NewRequest(http.MethodGet, "/doki"+final.Path, nil)
 	dl := httptest.NewRecorder()
 	mux.ServeHTTP(dl, req)
 	if dl.Code != http.StatusOK {
-		t.Errorf("download: status=%d want 200", dl.Code)
+		t.Fatalf("download: status=%d want 200", dl.Code)
+	}
+	if got := dl.Header().Get("Content-Disposition"); got != `attachment; filename="VOD-Test-Stream.m4a"` {
+		t.Errorf("Content-Disposition=%q", got)
 	}
 	if dl.Body.String() != "chunk0;chunk1;chunk2;" {
 		t.Errorf("download body=%q", dl.Body.String())
+	}
+}
+
+// The remote-storage link has to carry Cloudflare's download hint, otherwise a
+// multi-gigabyte VOD opens in a player tab instead of saving.
+func TestVodRemoteStorageLinkForcesDownload(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	app.Media = fakeProcessor{}
+	seedVodStream(t, app, "doki", "stream-vod", "audio", 2, 2)
+	app.Storage = &MockRemoteStorage{LocalStorage: app.Storage.(*storage.LocalStorage)}
+
+	adminReq(t, mux, http.MethodPost, "/doki/admin/vod/stream-vod", "admin-doki", nil)
+	final := waitVodState(t, mux, "doki", "stream-vod")
+	if final.State != vodStateDone {
+		t.Fatalf("state=%q want done (error=%q)", final.State, final.Error)
+	}
+	if final.Path != "" {
+		t.Errorf("remote storage should not report a local path, got %q", final.Path)
+	}
+	if !strings.HasPrefix(final.URL, "https://r2.example.com/doki/stream-vod/vod/") {
+		t.Fatalf("url=%q is not the remote object", final.URL)
+	}
+	if !strings.HasSuffix(final.URL, "?download=true&name=VOD-Test-Stream.m4a") {
+		t.Errorf("url=%q is missing the download hint and file name", final.URL)
+	}
+}
+
+// listErrStorage fails every listing, standing in for a storage backend that
+// is briefly unreachable.
+type listErrStorage struct {
+	*storage.LocalStorage
+}
+
+func (listErrStorage) List(ctx context.Context, prefix string) ([]string, error) {
+	return nil, fmt.Errorf("storage unreachable")
+}
+
+// With random names, "no VOD found" and "could not look" are the same answer
+// from a listing. Building on the second would upload a rival copy under a
+// different name, so an unreadable storage must stop the build instead.
+func TestVodBuildRefusedWhenStorageUnreadable(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	built := make(chan struct{}, 1)
+	app.Media = fakeProcessor{convert: func(in, out string) error {
+		built <- struct{}{}
+		return writePlaceholder(out)
+	}}
+	seedVodStream(t, app, "doki", "stream-vod", "audio", 2, 2)
+	app.Storage = listErrStorage{LocalStorage: app.Storage.(*storage.LocalStorage)}
+
+	rec := adminReq(t, mux, http.MethodPost, "/doki/admin/vod/stream-vod", "admin-doki", nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("post: status=%d want 502, body=%s", rec.Code, rec.Body.String())
+	}
+	rec = adminReq(t, mux, http.MethodGet, "/doki/admin/vod/stream-vod", "admin-doki", nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("get: status=%d want 502, body=%s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case <-built:
+		t.Error("a build ran even though storage could not be checked for an existing copy")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// A title that sanitizes away to nothing must still yield a named file.
+func TestVodDownloadNameFallsBackToStreamID(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	app.Media = fakeProcessor{}
+	seedVodStream(t, app, "doki", "stream-vod", "audio", 1, 1)
+	if err := app.Store.UpsertStream(context.Background(), &model.Stream{
+		ChannelID: "doki", StreamID: "stream-vod", StreamTitle: "歌枠", MediaType: "audio",
+	}); err != nil {
+		t.Fatalf("retitle stream: %v", err)
+	}
+
+	adminReq(t, mux, http.MethodPost, "/doki/admin/vod/stream-vod", "admin-doki", nil)
+	final := waitVodState(t, mux, "doki", "stream-vod")
+	if final.State != vodStateDone {
+		t.Fatalf("state=%q want done (error=%q)", final.State, final.Error)
+	}
+	if !strings.Contains(final.Path, "?name=stream-vod") {
+		t.Errorf("path=%q should fall back to the stream id for its file name", final.Path)
 	}
 }
 
@@ -365,7 +471,7 @@ func TestVodVideoStreamRendersMp4(t *testing.T) {
 	if final.State != vodStateDone {
 		t.Fatalf("state=%q want done (error=%q)", final.State, final.Error)
 	}
-	if final.Format != "mp4" || !strings.HasSuffix(final.Path, "full.mp4") {
+	if final.Format != "mp4" || !strings.Contains(final.Path, ".mp4?") {
 		t.Errorf("format=%q path=%q want an mp4", final.Format, final.Path)
 	}
 	select {

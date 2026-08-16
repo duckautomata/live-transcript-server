@@ -103,6 +103,33 @@ func (s *LocalStorage) IsLocal() bool {
 	return true
 }
 
+// List returns the keys of the files directly inside prefix's directory.
+// Subdirectories are skipped: callers want objects, and the layout never nests
+// past {channel}/{stream}/{kind}/.
+func (s *LocalStorage) List(ctx context.Context, prefix string) ([]string, error) {
+	fullPath, err := s.resolve(prefix)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to list %s: %w", prefix, err)
+	}
+
+	dir := ensureTrailingSlash(prefix)
+	var keys []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		keys = append(keys, dir+entry.Name())
+	}
+	return keys, nil
+}
+
 func (s *LocalStorage) StreamExists(ctx context.Context, key string) (bool, error) {
 	// Callers pass prefixes with a trailing slash (see StreamPrefix);
 	// filepath.Join in resolve normalizes it away, so a directory stat works

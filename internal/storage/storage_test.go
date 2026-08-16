@@ -91,6 +91,58 @@ func TestLocalStorageRoundTrip(t *testing.T) {
 	}
 }
 
+// TestLocalStorageList covers the lookup the VOD feature depends on: a render
+// is stored under a random name, so it can only be found by listing its folder.
+func TestLocalStorageList(t *testing.T) {
+	ctx := context.Background()
+	s := newLocal(t)
+
+	save := func(key string) {
+		t.Helper()
+		if _, err := s.Save(ctx, key, strings.NewReader("x"), 1); err != nil {
+			t.Fatalf("Save(%q) failed: %v", key, err)
+		}
+	}
+	vodKey := VodKey("chan", "stream1", "randomid", ".m4a")
+	save(vodKey)
+	// Neighbours that must not show up in the VOD listing.
+	save(RawKey("chan", "stream1", "file1"))
+	save(ClipKey("chan", "stream1", "clip1", ".mp4"))
+	save(VodKey("chan", "stream2", "otherid", ".m4a"))
+
+	keys, err := s.List(ctx, VodPrefix("chan", "stream1"))
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(keys) != 1 || keys[0] != vodKey {
+		t.Errorf("List = %v, want exactly [%s]", keys, vodKey)
+	}
+
+	// Listing the stream root must not descend into its folders: List reports
+	// objects, and every object here lives one level down.
+	keys, err = s.List(ctx, StreamPrefix("chan", "stream1"))
+	if err != nil {
+		t.Fatalf("List of stream root failed: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("List of stream root = %v, want no direct files", keys)
+	}
+
+	// A folder that was never created is empty, not an error — a stream with
+	// no VOD is the normal case, not a failure.
+	keys, err = s.List(ctx, VodPrefix("chan", "no-such-stream"))
+	if err != nil {
+		t.Fatalf("List of missing prefix failed: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("List of missing prefix = %v, want empty", keys)
+	}
+
+	if _, err := s.List(ctx, "../escape/"); err == nil {
+		t.Error("List escaped the base directory without error")
+	}
+}
+
 // TestLocalStoragePartialWriteInvisible ensures a failed Save leaves nothing
 // behind: no destination file and no temp file for a reader to observe.
 func TestLocalStoragePartialWriteInvisible(t *testing.T) {

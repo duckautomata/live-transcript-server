@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"live-transcript-server/internal/model"
 	"live-transcript-server/internal/storage"
 
+	"github.com/kennygrant/sanitize"
 	"github.com/lithammer/shortuuid/v4"
 )
 
@@ -238,8 +241,11 @@ func (app *App) resolveVodTarget(w http.ResponseWriter, r *http.Request, cs *Cha
 }
 
 // vodResponse builds the response body for a target, filling in the state from
-// the tracked job and from whether the artifact is present in storage.
-func (app *App) vodResponse(ctx context.Context, cs *ChannelState, target vodTarget) AdminVodResponse {
+// the tracked job and from whether the artifact is present in storage. It
+// errors only when storage could not be consulted: since the render's name is
+// random, "not found" and "could not look" are indistinguishable, and treating
+// the latter as absent would let a rebuild add a second copy.
+func (app *App) vodResponse(ctx context.Context, cs *ChannelState, target vodTarget) (AdminVodResponse, error) {
 	stream := target.stream
 	resp := AdminVodResponse{
 		StreamID:     stream.StreamID,
@@ -264,40 +270,70 @@ func (app *App) vodResponse(ctx context.Context, cs *ChannelState, target vodTar
 	if status.State == vodStateRunning {
 		resp.State = vodStateRunning
 		resp.Phase = status.Phase
-		return resp
+		return resp, nil
 	}
 
-	key := storage.VodKey(cs.Key, stream.StreamID, target.ext)
-	if app.vodArtifactExists(ctx, key) {
+	key, err := app.findVodArtifact(ctx, cs.Key, stream.StreamID, target.ext)
+	if err != nil {
+		return resp, err
+	}
+	if key != "" {
 		resp.State = vodStateDone
-		if app.Storage.IsLocal() {
-			// Local media is served by the public download route rather than
-			// straight from storage; the page prefixes its own channel base.
-			resp.Path = fmt.Sprintf("/download/%s/vod/full%s", stream.StreamID, target.ext)
-		} else {
-			resp.URL = app.Storage.GetURL(key)
-		}
-		return resp
+		resp.URL, resp.Path = app.vodDownloadLinks(key, stream, target.ext)
+		return resp, nil
 	}
 
 	if status.State == vodStateFailed {
 		resp.State = vodStateFailed
 		resp.Error = status.Failure
 	}
-	return resp
+	return resp, nil
 }
 
-// vodArtifactExists reports whether a finished VOD is in storage. It probes the
-// object itself rather than the folder, because a build that dies mid-upload
-// can leave the folder behind with nothing usable in it. A probe error is
-// treated as absent — the worst case is offering a rebuild that wasn't needed.
-func (app *App) vodArtifactExists(ctx context.Context, key string) bool {
-	reader, err := app.Storage.Get(ctx, key)
+// findVodArtifact returns the storage key of a stream's finished VOD, or "" if
+// there is none. The render's name carries a random ID so it cannot be guessed
+// from the stream ID, which means it has to be looked up rather than derived.
+// The folder holds one render, so the first key with the right extension is it
+// — leftover .tmp files from an interrupted local write are filtered out by
+// the extension check.
+func (app *App) findVodArtifact(ctx context.Context, channelKey, streamID, ext string) (string, error) {
+	keys, err := app.Storage.List(ctx, storage.VodPrefix(channelKey, streamID))
 	if err != nil {
-		return false
+		return "", fmt.Errorf("list vod folder: %w", err)
 	}
-	reader.Close()
-	return true
+	for _, key := range keys {
+		if strings.HasSuffix(key, ext) {
+			return key, nil
+		}
+	}
+	return "", nil
+}
+
+// vodDownloadLinks returns the link a browser should follow to save a finished
+// VOD: an absolute URL on remote storage, or a channel-relative path on the
+// public download route for local storage (the page prefixes its own base).
+// Exactly one of the two is non-empty.
+func (app *App) vodDownloadLinks(key string, stream *model.Stream, ext string) (url string, path string) {
+	name := vodDownloadName(stream)
+	if app.Storage.IsLocal() {
+		// The download handler appends the extension to ?name= itself.
+		return "", fmt.Sprintf("/download/%s/vod/%s?name=%s", stream.StreamID, filepath.Base(key), neturl.QueryEscape(name))
+	}
+	// Cloudflare turns ?download=true&name=… into a Content-Disposition
+	// attachment on the way out, so the browser saves the file under the
+	// stream's name instead of opening a multi-gigabyte player tab.
+	return fmt.Sprintf("%s?download=true&name=%s", app.Storage.GetURL(key), neturl.QueryEscape(name+ext)), ""
+}
+
+// vodDownloadName is the filename (without extension) a downloaded VOD is
+// saved under: the stream's title, reduced to filename-safe characters. Titles
+// that sanitize away to nothing — blank, or written entirely in a script
+// sanitize strips — fall back to the stream ID so the file is never unnamed.
+func vodDownloadName(stream *model.Stream) string {
+	if name := sanitize.BaseName(stream.StreamTitle); name != "" {
+		return name
+	}
+	return stream.StreamID
 }
 
 // getAdminVodHandler reports the state of a stream's full VOD: whether one
@@ -308,7 +344,14 @@ func (app *App) getAdminVodHandler(w http.ResponseWriter, r *http.Request, cs *C
 	if !ok {
 		return
 	}
-	writeJSON(w, app.vodResponse(r.Context(), cs, target))
+	resp, err := app.vodResponse(r.Context(), cs, target)
+	if err != nil {
+		http.Error(w, "Storage error", http.StatusBadGateway)
+		metrics.Http500Errors.Inc()
+		slog.Error("failed to read vod state", "key", cs.Key, "func", "getAdminVodHandler", "streamID", target.stream.StreamID, "err", err)
+		return
+	}
+	writeJSON(w, resp)
 }
 
 // postAdminVodHandler starts a full-VOD build, or joins the one already in
@@ -328,8 +371,17 @@ func (app *App) postAdminVodHandler(w http.ResponseWriter, r *http.Request, cs *
 	}
 
 	// Already built, or already building: hand back the current state. Checking
-	// storage first means a rebuild is never started for a VOD that exists.
-	switch resp := app.vodResponse(r.Context(), cs, target); resp.State {
+	// storage first means a rebuild is never started for a VOD that exists —
+	// and a storage lookup that fails stops the build rather than risking a
+	// second copy under a different random name.
+	resp, err := app.vodResponse(r.Context(), cs, target)
+	if err != nil {
+		http.Error(w, "Could not check whether a VOD already exists for this stream. Try again in a moment.", http.StatusBadGateway)
+		metrics.Http500Errors.Inc()
+		slog.Error("failed to read vod state before build", "key", cs.Key, "func", "postAdminVodHandler", "streamID", streamID, "err", err)
+		return
+	}
+	switch resp.State {
 	case vodStateDone:
 		writeJSON(w, resp)
 		return
@@ -372,9 +424,18 @@ func (app *App) postAdminVodHandler(w http.ResponseWriter, r *http.Request, cs *
 	}
 
 	// Re-derived rather than read off the job: a very fast build may already be
-	// done, and vodResponse is the one place that decides what to report.
+	// done, and vodResponse is the one place that decides what to report. The
+	// build is under way either way, so a lookup failure here only costs the
+	// caller its status — reported as running, which it is.
+	final, err := app.vodResponse(r.Context(), cs, target)
+	if err != nil {
+		slog.Warn("failed to read vod state after starting build", "key", cs.Key, "func", "postAdminVodHandler", "streamID", streamID, "err", err)
+		final = resp
+		final.State = vodStateRunning
+		final.Phase = vodPhaseMerging
+	}
 	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, app.vodResponse(r.Context(), cs, target))
+	writeJSON(w, final)
 }
 
 // buildVod merges every stored chunk of a stream, converts the result into the
@@ -431,7 +492,7 @@ func (app *App) buildVod(job *vodJob, cs *ChannelState, target vodTarget, fileID
 	job.setPhase(vodPhaseUploading)
 	// Detached from app.ctx: a shutdown mid-upload should finish writing the
 	// object rather than leave the build with nothing to show for its work.
-	if err := app.uploadFile(context.WithoutCancel(app.ctx), storage.VodKey(cs.Key, streamID, ext), tempOut); err != nil {
+	if err := app.uploadFile(context.WithoutCancel(app.ctx), storage.VodKey(cs.Key, streamID, shortuuid.New(), ext), tempOut); err != nil {
 		fail(fmt.Errorf("upload vod: %w", err))
 		return
 	}

@@ -170,6 +170,26 @@ func (s *R2Storage) IsLocal() bool {
 	return false
 }
 
+// List returns every object key under prefix.
+func (s *R2Storage) List(ctx context.Context, prefix string) ([]string, error) {
+	paginator := s3.NewListObjectsV2Paginator(s.Client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.Bucket),
+		Prefix: aws.String(ensureTrailingSlash(prefix)),
+	})
+
+	var keys []string
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list objects in R2: %w", err)
+		}
+		for _, obj := range page.Contents {
+			keys = append(keys, aws.ToString(obj.Key))
+		}
+	}
+	return keys, nil
+}
+
 func (s *R2Storage) StreamExists(ctx context.Context, key string) (bool, error) {
 	// Probe with a trailing slash so "chan/123" cannot match "chan/1234" —
 	// a false positive here can permanently skip pruning a stream.

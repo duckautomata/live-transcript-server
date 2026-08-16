@@ -665,7 +665,7 @@
         <li>Click <strong>Full VOD</strong> on a <span class="pill past">Past</span> stream's row. The button is disabled while a stream is <span class="pill live">Live</span>: the recording is still growing, so a VOD built now would stop partway through. Stop the stream first and wait for the Past pill.</li>
         <li>Confirm in the dialog. It tells you how many chunks will be stitched and warns you if any part of the stream is missing.</li>
         <li>The build runs on the server in the background — <strong>minutes</strong> for a long stream. The row shows what it's doing (merging chunks → encoding → uploading) and the button says <strong>Building…</strong>. You can leave the page open, or come back later and press the button again to pick the file up.</li>
-        <li>When it's done the button turns into <strong>Download VOD</strong>. Press it to save the file.</li>
+        <li>When it's done the button turns into <strong>Download VOD</strong>. Pressing it confirms that the file is ready, and saves it as soon as you accept.</li>
       </ol>
       <p><strong>Only one copy is ever built.</strong> If several admins press the button at once, they all join the same build instead of each starting their own, and a stream that already has a VOD hands the existing file straight back rather than rebuilding it.</p>
       <p class="guide-note">If the row says some lines have no media, those parts of the stream were never captured (a worker restart, a failed upload) and the VOD skips straight past them — everything else is still included. The finished file lives alongside the stream's other media, so deleting the stream with “Also delete media files” removes it too.</p>
@@ -1215,20 +1215,17 @@
     if (lastInfo) render(lastInfo);
   }
 
-  // Hand the finished file to the browser. Remote storage serves it straight
-  // from its public URL; local storage goes through the server's download
-  // route, which sets Content-Disposition so it saves instead of playing.
-  function downloadVod(st, title) {
-    if (st.url) {
-      window.open(st.url, '_blank', 'noopener');
-      return;
-    }
-    if (!st.path) {
+  // Hand the finished file to the browser. The server builds the whole link,
+  // filename and all: an absolute URL on remote storage, or a path on this
+  // server's download route locally. Both answer with a Content-Disposition
+  // attachment, so navigating saves the file instead of leaving the page.
+  function downloadVod(st) {
+    const href = st.url || (st.path ? `${apiBase}${st.path}` : '');
+    if (!href) {
       toast('The VOD is ready but the server returned no download link', 'error');
       return;
     }
-    const name = `${title || st.streamId} - full`;
-    window.location.href = `${apiBase}${st.path}?name=${encodeURIComponent(name)}`;
+    window.location.href = href;
   }
 
   async function pollVod(streamID) {
@@ -1279,17 +1276,23 @@
       pollVod(streamID);
       return;
     }
-    if (st.state === 'done') {
-      if (st.missingLines > 0) {
-        toast(`Heads up: ${st.missingLines} of ${st.totalLines} lines have no media, so parts are missing from this VOD`, 'error');
-      }
-      downloadVod(st, title);
-      return;
-    }
-
     const warning = st.missingLines > 0
       ? `\n\nWarning: ${st.missingLines} of ${st.totalLines} transcript lines have no media stored. Those parts of the stream are missing and the VOD will jump straight past them.`
       : '';
+
+    // Already built — nothing to rebuild, so this asks about the download
+    // itself rather than about the work.
+    if (st.state === 'done') {
+      const ready = await confirmAction({
+        title: 'Download the full VOD?',
+        message: `The full VOD for "${title || streamID}" is already built and ready as a single ${st.format} file. Confirming starts the download straight away.${warning}`,
+        okLabel: 'Download',
+        danger: false,
+      });
+      if (ready.ok) downloadVod(st);
+      return;
+    }
+
     const retry = st.state === 'failed' ? `\n\nThe last attempt failed: ${st.error || 'unknown error'}` : '';
     const result = await confirmAction({
       title: 'Build the full VOD?',
@@ -1305,7 +1308,7 @@
       rerenderStreams();
       if (started.state === 'done') {
         toast('That VOD already existed — starting the download', 'success');
-        downloadVod(started, title);
+        downloadVod(started);
         return;
       }
       toast('VOD build started — this can take a few minutes', 'success');
