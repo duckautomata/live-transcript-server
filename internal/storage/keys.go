@@ -28,6 +28,13 @@ func ClipKey(channel, stream, id, ext string) string {
 	return fmt.Sprintf("%s/%s/clips/%s%s", channel, stream, id, ext)
 }
 
+// VodKey returns the key for a stream's full-VOD render. ext includes the
+// leading dot (e.g. ".mp4"). The name is fixed per stream and format so that
+// rebuilding a VOD replaces the one object instead of piling up copies.
+func VodKey(channel, stream, ext string) string {
+	return fmt.Sprintf("%s/%s/vod/full%s", channel, stream, ext)
+}
+
 // StreamPrefix returns the object-listing prefix covering everything under a
 // stream. The trailing slash matters: without it, prefix "chan/123" also
 // matches sibling streams like "chan/1234" (prefix aliasing), so existence

@@ -182,7 +182,11 @@ func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request, cs *Chan
 	requestedStreamID := r.PathValue("streamID")
 	mediaType := r.PathValue("type")
 
-	validMediaTypes := []string{"audio", "clips", "frame"}
+	// "vod" is the full-stream render built from the admin page. It is served
+	// here rather than behind the admin key because a browser cannot attach
+	// the key to a plain download navigation — the same reasoning that has
+	// remote storage handing these files out from a public bucket URL.
+	validMediaTypes := []string{"audio", "clips", "frame", "vod"}
 	if !slices.Contains(validMediaTypes, mediaType) {
 		http.Error(w, "Invalid media type", http.StatusBadRequest)
 		metrics.Http400Errors.Inc()

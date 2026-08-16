@@ -54,6 +54,8 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /{channel}/admin/restart", app.withAdminChannel(app.deleteAdminRestartHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/stream/{streamID}", app.withAdminChannel(app.deleteAdminStreamHandler))
 	mux.HandleFunc("POST /{channel}/admin/stop", app.withAdminChannel(app.postAdminStopHandler))
+	mux.HandleFunc("GET /{channel}/admin/vod/{streamID}", app.withAdminChannel(app.getAdminVodHandler))
+	mux.HandleFunc("POST /{channel}/admin/vod/{streamID}", app.withAdminChannel(app.postAdminVodHandler))
 	mux.HandleFunc("GET /{channel}/admin/membership", app.withAdminChannel(app.getAdminMembershipHandler))
 	mux.HandleFunc("POST /{channel}/admin/membership", app.withAdminChannel(app.postAdminMembershipHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/membership", app.withAdminChannel(app.deleteAdminMembershipHandler))

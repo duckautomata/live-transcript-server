@@ -198,7 +198,24 @@ func (s *Store) GetFileIDsInRange(ctx context.Context, channelID string, streamI
 		return nil, err
 	}
 	defer rows.Close()
+	return scanFileIDs(rows)
+}
 
+// GetAllMediaFileIDs returns the file IDs of every line of a stream that has
+// media stored, ordered by line ID. Same selection as GetFileIDsInRange
+// without the bounds — a full-VOD render covers the whole transcript.
+func (s *Store) GetAllMediaFileIDs(ctx context.Context, channelID string, streamID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT file_id FROM transcripts WHERE channel_id = ? AND stream_id = ? AND media_available = 1 ORDER BY line_id ASC", channelID, streamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanFileIDs(rows)
+}
+
+// scanFileIDs collects a single-column file_id result set, dropping lines whose
+// file ID is NULL or empty: those carry no media even if the row claims it.
+func scanFileIDs(rows *sql.Rows) ([]string, error) {
 	var fileIDs []string
 	for rows.Next() {
 		var fileID sql.NullString
@@ -213,6 +230,22 @@ func (s *Store) GetFileIDsInRange(ctx context.Context, channelID string, streamI
 		return nil, err
 	}
 	return fileIDs, nil
+}
+
+// CountTranscriptMedia returns how many lines a stream's transcript holds and
+// how many of those have media stored. The gap between the two is what a
+// full-VOD render cannot include. withMedia counts exactly the lines
+// GetAllMediaFileIDs returns.
+func (s *Store) CountTranscriptMedia(ctx context.Context, channelID string, streamID string) (total int, withMedia int, err error) {
+	err = s.db.QueryRowContext(ctx, `
+	SELECT COUNT(*),
+	       COALESCE(SUM(CASE WHEN media_available = 1 AND file_id IS NOT NULL AND file_id != '' THEN 1 ELSE 0 END), 0)
+	FROM transcripts WHERE channel_id = ? AND stream_id = ?
+	`, channelID, streamID).Scan(&total, &withMedia)
+	if err != nil {
+		return 0, 0, err
+	}
+	return total, withMedia, nil
 }
 
 // CleanupOrphanedTranscripts deletes transcript lines that do not have a corresponding stream in the streams table.

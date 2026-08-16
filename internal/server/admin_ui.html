@@ -377,7 +377,9 @@
     padding: 24px;
   }
   .modal h3 { margin: 0 0 8px; font-size: 16px; }
-  .modal p { color: var(--text-muted); margin: 0 0 20px; }
+  /* pre-line so a confirm message can separate its warning into its own
+     paragraph with a plain "\n\n" (the text is set via textContent). */
+  .modal p { color: var(--text-muted); margin: 0 0 20px; white-space: pre-line; }
   .modal input[type="password"], .modal input[type="text"], .modal input[type="url"] {
     width: 100%;
     background: var(--bg);
@@ -600,7 +602,7 @@
         <dt>Server</dt>
         <dd>The version and build time of the transcript server itself (this backend, not the worker).</dd>
         <dt>Streams</dt>
-        <dd>Every stream stored for this channel. <span class="pill live">Live</span> means the worker is transcribing it right now; <span class="pill past">Past</span> means it has ended. Each row shows the title, the stream ID, when it started, and what kind of media was captured.</dd>
+        <dd>Every stream stored for this channel. <span class="pill live">Live</span> means the worker is transcribing it right now; <span class="pill past">Past</span> means it has ended. Each row shows the title, the stream ID, when it started, and what kind of media was captured. <strong>Full VOD</strong> builds (or downloads) the whole stream as one file — see the “Download the full VOD” card below.</dd>
         <dt>Incoming queue</dt>
         <dd>Stream URLs waiting for the worker. The worker takes a URL out of the queue when it picks it up; <strong>Remove</strong> takes one out by hand before that happens. The form at the bottom queues a new URL.</dd>
         <dt>Worker controls</dt>
@@ -652,6 +654,21 @@
         <li>Confirm — the stream's entire storage folder is permanently removed.</li>
       </ol>
       <p class="guide-note">Left unticked (the default), only the stream record and transcript are deleted; every media file stays in storage.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Download the full VOD</h2></div>
+    <div class="guide-body">
+      <p>Every stream is captured as thousands of small chunks. <strong>Full VOD</strong> stitches all of a stream's chunks back into one file — <code>.mp4</code> for video streams, <code>.m4a</code> for audio-only ones.</p>
+      <ol>
+        <li>Click <strong>Full VOD</strong> on a <span class="pill past">Past</span> stream's row. The button is disabled while a stream is <span class="pill live">Live</span>: the recording is still growing, so a VOD built now would stop partway through. Stop the stream first and wait for the Past pill.</li>
+        <li>Confirm in the dialog. It tells you how many chunks will be stitched and warns you if any part of the stream is missing.</li>
+        <li>The build runs on the server in the background — <strong>minutes</strong> for a long stream. The row shows what it's doing (merging chunks → encoding → uploading) and the button says <strong>Building…</strong>. You can leave the page open, or come back later and press the button again to pick the file up.</li>
+        <li>When it's done the button turns into <strong>Download VOD</strong>. Press it to save the file.</li>
+      </ol>
+      <p><strong>Only one copy is ever built.</strong> If several admins press the button at once, they all join the same build instead of each starting their own, and a stream that already has a VOD hands the existing file straight back rather than rebuilding it.</p>
+      <p class="guide-note">If the row says some lines have no media, those parts of the stream were never captured (a worker restart, a failed upload) and the VOD skips straight past them — everything else is still included. The finished file lives alongside the stream's other media, so deleting the stream with “Also delete media files” removes it too.</p>
     </div>
   </div>
 
@@ -918,6 +935,9 @@
     membershipCountEl.textContent = '0 keys';
     membershipBodyEl.innerHTML = '<div class="empty">Login to view</div>';
     membershipLoaded = false;
+    // Drop cached VOD state too — it belongs to the session that was just
+    // logged out. Any in-flight poll stops on its next 403.
+    for (const id of Object.keys(vodStatus)) delete vodStatus[id];
     showTab('worker');
     hasLoadedOnce = false;
   }
@@ -1057,9 +1077,11 @@
                 <span class="stream-id">${escapeHtml(s.streamId)}</span>
                 · started ${startedAgo}
                 · ${escapeHtml(s.mediaType || 'none')}
+                ${vodMeta(s)}
               </div>
             </div>
             <div class="row-actions">
+              ${vodButton(s)}
               ${deleteBtn}
             </div>
           </div>
@@ -1067,6 +1089,9 @@
       }).join('');
       streamsBodyEl.querySelectorAll('button[data-stream-id]').forEach(btn => {
         btn.addEventListener('click', () => onDeleteStream(btn.dataset.streamId, btn.dataset.streamTitle));
+      });
+      streamsBodyEl.querySelectorAll('button[data-vod-id]').forEach(btn => {
+        btn.addEventListener('click', () => onVod(btn.dataset.vodId, btn.dataset.vodTitle));
       });
     }
 
@@ -1139,6 +1164,156 @@
       set('warn', 'Online', 'connected, but listening on no Discord channels — announcements will never match');
     } else {
       set('online', 'Online', `last heartbeat ${timeAgo(bot.lastHeartbeatAck)}`);
+    }
+  }
+
+  // ---------- Full VOD ----------
+  // Build state is kept per stream on the client: /info says nothing about
+  // VODs (checking every stream on every poll would mean a storage probe per
+  // stream), so a row only learns its state once the button is pressed or a
+  // build this page started is still running.
+  const vodStatus = {};   // streamId -> last AdminVodResponse seen
+  const vodPolling = {};  // streamId -> true while this page is polling it
+  const VOD_POLL_MS = 4000;
+
+  function vodButton(s) {
+    if (s.isLive) {
+      return `<button class="small" disabled title="A VOD can only be built once the stream has ended.">Full VOD</button>`;
+    }
+    if ((s.mediaType || 'none') === 'none') {
+      return `<button class="small" disabled title="No media was stored for this stream, so there is no VOD to build.">Full VOD</button>`;
+    }
+    const st = vodStatus[s.streamId];
+    const attrs = `data-vod-id="${escapeHtml(s.streamId)}" data-vod-title="${escapeHtml(s.streamTitle || '')}"`;
+    if (st && st.state === 'running') {
+      return `<button class="small" disabled title="A full VOD is being built. This can take a while on a long stream.">Building…</button>`;
+    }
+    if (st && st.state === 'done') {
+      return `<button class="primary small" ${attrs}>Download VOD</button>`;
+    }
+    if (st && st.state === 'failed') {
+      return `<button class="small" ${attrs} title="${escapeHtml(st.error || 'The last build failed.')}">Retry VOD</button>`;
+    }
+    return `<button class="small" ${attrs}>Full VOD</button>`;
+  }
+
+  // The extra row-meta note under a stream: what its VOD is doing, and whether
+  // parts of the stream are missing from it.
+  function vodMeta(s) {
+    const st = vodStatus[s.streamId];
+    if (!st) return '';
+    let note = '';
+    if (st.state === 'running') note = `building VOD · ${escapeHtml(st.phase || 'working')}`;
+    else if (st.state === 'done') note = `VOD ready (${escapeHtml(st.format || '')})`;
+    else if (st.state === 'failed') note = 'VOD build failed';
+    if (!note) return '';
+    if (st.missingLines > 0) note += ` · ${st.missingLines} of ${st.totalLines} lines have no media`;
+    return ` · ${note}`;
+  }
+
+  function rerenderStreams() {
+    if (lastInfo) render(lastInfo);
+  }
+
+  // Hand the finished file to the browser. Remote storage serves it straight
+  // from its public URL; local storage goes through the server's download
+  // route, which sets Content-Disposition so it saves instead of playing.
+  function downloadVod(st, title) {
+    if (st.url) {
+      window.open(st.url, '_blank', 'noopener');
+      return;
+    }
+    if (!st.path) {
+      toast('The VOD is ready but the server returned no download link', 'error');
+      return;
+    }
+    const name = `${title || st.streamId} - full`;
+    window.location.href = `${apiBase}${st.path}?name=${encodeURIComponent(name)}`;
+  }
+
+  async function pollVod(streamID) {
+    if (vodPolling[streamID]) return;
+    vodPolling[streamID] = true;
+    try {
+      for (;;) {
+        await sleep(VOD_POLL_MS);
+        let st;
+        try {
+          st = await api('GET', `/vod/${encodeURIComponent(streamID)}`);
+        } catch (e) {
+          if (e.message === 'forbidden' || e.message === 'not-authenticated') return;
+          continue; // transient: keep watching rather than dropping the build
+        }
+        vodStatus[streamID] = st;
+        rerenderStreams();
+        if (st.state === 'running') continue;
+        if (st.state === 'done') {
+          toast('Full VOD is ready to download', 'success');
+        } else if (st.state === 'failed') {
+          toast(`VOD build failed: ${st.error || 'unknown error'}`, 'error');
+        }
+        return;
+      }
+    } finally {
+      vodPolling[streamID] = false;
+    }
+  }
+
+  async function onVod(streamID, title) {
+    // Ask the server first: another admin (or an earlier visit) may have
+    // already built this VOD, and only the server knows.
+    let st;
+    try {
+      st = await api('GET', `/vod/${encodeURIComponent(streamID)}`);
+    } catch (e) {
+      if (e.message !== 'forbidden' && e.message !== 'not-authenticated') {
+        toast(e.message || 'Could not check the VOD state', 'error');
+      }
+      return;
+    }
+    vodStatus[streamID] = st;
+    rerenderStreams();
+
+    if (st.state === 'running') {
+      toast('A build is already running for this stream — it will finish once', 'success');
+      pollVod(streamID);
+      return;
+    }
+    if (st.state === 'done') {
+      if (st.missingLines > 0) {
+        toast(`Heads up: ${st.missingLines} of ${st.totalLines} lines have no media, so parts are missing from this VOD`, 'error');
+      }
+      downloadVod(st, title);
+      return;
+    }
+
+    const warning = st.missingLines > 0
+      ? `\n\nWarning: ${st.missingLines} of ${st.totalLines} transcript lines have no media stored. Those parts of the stream are missing and the VOD will jump straight past them.`
+      : '';
+    const retry = st.state === 'failed' ? `\n\nThe last attempt failed: ${st.error || 'unknown error'}` : '';
+    const result = await confirmAction({
+      title: 'Build the full VOD?',
+      message: `This stitches all ${st.mediaLines} stored chunks of "${title || streamID}" into a single ${st.format} file. It takes a while — minutes for a long stream — and runs in the background, so you can leave this page open and check back. Only one copy is ever built: if someone else starts it too, you both end up with the same file.${warning}${retry}`,
+      okLabel: 'Build VOD',
+      danger: false,
+    });
+    if (!result.ok) return;
+
+    try {
+      const started = await api('POST', `/vod/${encodeURIComponent(streamID)}`);
+      vodStatus[streamID] = started;
+      rerenderStreams();
+      if (started.state === 'done') {
+        toast('That VOD already existed — starting the download', 'success');
+        downloadVod(started, title);
+        return;
+      }
+      toast('VOD build started — this can take a few minutes', 'success');
+      pollVod(streamID);
+    } catch (e) {
+      if (e.message !== 'forbidden' && e.message !== 'not-authenticated') {
+        toast(e.message || 'Could not start the VOD build', 'error');
+      }
     }
   }
 

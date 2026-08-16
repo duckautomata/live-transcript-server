@@ -11,13 +11,17 @@ import (
 	"live-transcript-server/internal/storage"
 )
 
-// mergeConcurrency bounds the number of parallel chunk downloads.
+// mergeConcurrency bounds both the number of parallel chunk downloads and how
+// many downloaded chunks may sit on disk ahead of the writer.
 const mergeConcurrency = 32
 
 // MergeRawAudio merges raw audio files from storage into a single raw file.
-// It downloads the files to a temp directory in parallel, concatenates them
-// in fileIDs order, and returns the path to the merged file (which lives in
-// tempDir; the caller owns its cleanup).
+// Chunks are downloaded in parallel into a temp directory but appended in
+// fileIDs order and deleted as soon as they are appended, so the scratch space
+// a merge needs stays bounded by mergeConcurrency chunks no matter how many
+// files it is given — a full-stream merge would otherwise materialize every
+// chunk of the stream at once. Returns the path to the merged file (which
+// lives in tempDir; the caller owns its cleanup).
 func MergeRawAudio(ctx context.Context, st storage.Storage, tempDir, channelKey, streamID string, fileIDs []string, outputName string) (string, error) {
 	if len(fileIDs) == 0 {
 		return "", fmt.Errorf("no files to merge")
@@ -46,98 +50,116 @@ func MergeRawAudio(ctx context.Context, st storage.Storage, tempDir, channelKey,
 	}
 	defer os.RemoveAll(downloadDir)
 
-	results := make([]string, len(fileIDs))
-
-	// The first failure is recorded exactly once and cancels dlCtx so
-	// in-flight downloads stop; later failures are dropped.
+	// Cancelling dlCtx stops pending and in-flight downloads. Every return path
+	// below goes through abort() or the deferred cancel, so no download outlives
+	// the call — which is what makes the deferred RemoveAll safe.
 	dlCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var firstErr error
-	var failOnce sync.Once
-	fail := func(err error) {
-		failOnce.Do(func() {
-			firstErr = err
-			cancel()
-		})
+
+	type chunk struct {
+		path string
+		err  error
+	}
+	// One buffered slot per chunk: a downloader always hands its result off
+	// without blocking, so it can never leak waiting on a reader that gave up.
+	results := make([]chan chunk, len(fileIDs))
+	for i := range results {
+		results[i] = make(chan chunk, 1)
 	}
 
-	sem := make(chan struct{}, mergeConcurrency)
+	// A slot is taken before a chunk is downloaded and released only once the
+	// writer has appended and deleted it. That, not the download count, is what
+	// caps how much disk a merge occupies.
+	slots := make(chan struct{}, mergeConcurrency)
+
 	var wg sync.WaitGroup
-
-	for i, fileID := range fileIDs {
-		wg.Add(1)
-		go func(i int, fileID string) {
-			defer wg.Done()
-
-			// Acquire semaphore
+	// The producer holds a count for itself the whole time it runs, so the
+	// counter can never hit zero between two of its own Adds.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i, fileID := range fileIDs {
 			select {
-			case sem <- struct{}{}:
+			case slots <- struct{}{}:
 			case <-dlCtx.Done():
 				return
 			}
-			defer func() { <-sem }()
+			wg.Add(1)
+			go func(i int, fileID string) {
+				defer wg.Done()
+				path, err := downloadChunk(dlCtx, st, downloadDir, channelKey, streamID, fileID, i)
+				results[i] <- chunk{path: path, err: err}
+			}(i, fileID)
+		}
+	}()
 
-			// Abort if a previous download already failed
-			if dlCtx.Err() != nil {
-				return
-			}
-
-			key := storage.RawKey(channelKey, streamID, fileID)
-			tempPath := filepath.Join(downloadDir, fmt.Sprintf("%d_%s.raw", i, fileID))
-
-			// Download file from storage
-			reader, err := st.Get(dlCtx, key)
-			if err != nil {
-				fail(fmt.Errorf("failed to get raw file %s: %w", key, err))
-				return
-			}
-			defer reader.Close()
-
-			f, err := os.Create(tempPath)
-			if err != nil {
-				fail(fmt.Errorf("failed to create temp file %s: %w", tempPath, err))
-				return
-			}
-			defer f.Close()
-
-			if _, err := io.Copy(f, reader); err != nil {
-				fail(fmt.Errorf("failed to write temp file %s: %w", tempPath, err))
-				return
-			}
-
-			// Distinct indices make the slice writes race-free.
-			results[i] = tempPath
-		}(i, fileID)
-	}
-
-	wg.Wait()
-
-	if firstErr != nil {
-		return "", firstErr
-	}
-	// A cancelled caller context makes goroutines return without recording
-	// an error; surface the cancellation rather than a missing-path error.
-	if err := ctx.Err(); err != nil {
+	// abort stops the outstanding downloads and waits for them before handing
+	// err back, so the deferred cleanups never race a live goroutine.
+	abort := func(err error) (string, error) {
+		cancel()
+		wg.Wait()
 		return "", err
 	}
 
-	// Concatenate files in order
-	for _, path := range results {
-		if path == "" {
-			return "", fmt.Errorf("unexpected missing file path in merge results")
+	for i := range fileIDs {
+		// Checked before the receive: a caller that cancelled mid-merge should
+		// get the cancellation, not whichever chunk happened to already be in
+		// its slot (local storage reads ignore context entirely).
+		if err := ctx.Err(); err != nil {
+			return abort(err)
 		}
 
-		f, err := os.Open(path)
+		var res chunk
+		select {
+		case res = <-results[i]:
+		case <-ctx.Done():
+			return abort(ctx.Err())
+		}
+		if res.err != nil {
+			return abort(res.err)
+		}
+
+		f, err := os.Open(res.path)
 		if err != nil {
-			return "", fmt.Errorf("failed to open chunk %s for merging: %v", path, err)
+			return abort(fmt.Errorf("failed to open chunk %s for merging: %v", res.path, err))
 		}
-		if _, err := io.Copy(mergedFile, f); err != nil {
-			f.Close()
-			return "", fmt.Errorf("failed to append chunk %s to merged file: %v", path, err)
-		}
+		_, copyErr := io.Copy(mergedFile, f)
 		f.Close()
+		if copyErr != nil {
+			return abort(fmt.Errorf("failed to append chunk %s to merged file: %v", res.path, copyErr))
+		}
+
+		os.Remove(res.path)
+		<-slots
 	}
 
+	wg.Wait()
 	success = true
 	return mergedFilePath, nil
+}
+
+// downloadChunk copies one raw chunk out of storage into downloadDir and
+// returns its path. The index prefix keeps names unique even when the same
+// file ID appears twice in a merge.
+func downloadChunk(ctx context.Context, st storage.Storage, downloadDir, channelKey, streamID, fileID string, i int) (string, error) {
+	key := storage.RawKey(channelKey, streamID, fileID)
+	reader, err := st.Get(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("failed to get raw file %s: %w", key, err)
+	}
+	defer reader.Close()
+
+	tempPath := filepath.Join(downloadDir, fmt.Sprintf("%d_%s.raw", i, fileID))
+	f, err := os.Create(tempPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file %s: %w", tempPath, err)
+	}
+	if _, err := io.Copy(f, reader); err != nil {
+		f.Close()
+		return "", fmt.Errorf("failed to write temp file %s: %w", tempPath, err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("failed to close temp file %s: %w", tempPath, err)
+	}
+	return tempPath, nil
 }

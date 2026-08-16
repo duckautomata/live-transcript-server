@@ -62,6 +62,9 @@ type App struct {
 	MaxConn     int
 	MaxClipSize int
 	TempDir     string
+	// Vods tracks in-flight full-VOD builds so concurrent admin requests for
+	// the same stream collapse into a single build. See vod.go.
+	Vods *vodRegistry
 
 	IncomingStreamTTL time.Duration
 	Version           string
@@ -95,6 +98,7 @@ func NewApp(cfg config.Config, st *store.Store, tempDir, version, buildTime stri
 		},
 		Notifier:          notify.New(),
 		Channels:          make(map[string]*ChannelState),
+		Vods:              newVodRegistry(),
 		MaxConn:           10_000, // through testing, assuming a steady flow of connections, 10k connections will use 200 millicores
 		MaxClipSize:       40,
 		TempDir:           tempDir,

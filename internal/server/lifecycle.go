@@ -249,6 +249,9 @@ func (app *App) removeStream(ctx context.Context, cs *ChannelState, stream *mode
 	if err := app.Store.DeleteStreamCascade(ctx, cs.Key, stream.StreamID); err != nil {
 		return fmt.Errorf("delete stream: %w", err)
 	}
+	// The stream is gone, so its VOD build record is meaningless. Dropping it
+	// keeps the registry from accumulating entries forever.
+	app.Vods.forget(cs.Key, stream.StreamID)
 	if stream.StreamTitle != "" {
 		metrics.ActivatedStreams.DeleteLabelValues(cs.Key, stream.StreamID, stream.StreamTitle)
 	}
