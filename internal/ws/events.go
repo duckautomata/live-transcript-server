@@ -22,6 +22,7 @@ const (
 	EventPong          EventType = "pong"
 	EventPastStreams   EventType = "pastStreams"
 	EventDeletedStream EventType = "deletedStream"
+	EventUpdatedStream EventType = "updatedStream"
 )
 
 // Message represents a message sent over the WebSocket connection.
@@ -82,6 +83,22 @@ type EventPingPongData struct {
 // EventPastStreamsData represents the data sent to notify the client of past streams.
 type EventPastStreamsData struct {
 	Streams []model.Stream `json:"streams"`
+}
+
+// EventUpdatedStreamData notifies clients that a stream's details were edited
+// (by an admin via the admin UI). It carries the stream's complete state after
+// the edit, so a client can replace whatever it holds for StreamID rather than
+// work out what changed. Clients should apply it to whichever they hold the
+// stream in — the current stream or the past-stream list.
+//
+// IsLive is included to complete the record, but an edit never changes it:
+// live/ended transitions stay the worker's, and keep arriving as EventStatus.
+type EventUpdatedStreamData struct {
+	StreamID    string `json:"streamId"`
+	StreamTitle string `json:"streamTitle"`
+	StartTime   string `json:"startTime"`
+	MediaType   string `json:"mediaType"`
+	IsLive      bool   `json:"isLive"`
 }
 
 // EventDeletedStreamData notifies clients that a stream has been removed

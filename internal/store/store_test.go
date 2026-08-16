@@ -379,6 +379,120 @@ func TestStore_SetMediaAvailable(t *testing.T) {
 	}
 }
 
+func TestStore_UpdateStream(t *testing.T) {
+	s := newTestStore(t)
+
+	ctx := context.Background()
+	channelID := "test-update-stream"
+	streamID := "s1"
+	newStart := "1699999000"
+
+	// Missing stream reports ErrNotFound rather than silently doing nothing.
+	if err := s.UpdateStream(ctx, channelID, streamID, StreamUpdate{StartTime: &newStart}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing stream, got %v", err)
+	}
+
+	original := &model.Stream{
+		ChannelID:     channelID,
+		StreamID:      streamID,
+		StreamTitle:   "A Stream",
+		StartTime:     "1700000000",
+		IsLive:        true,
+		MediaType:     "video",
+		ActivatedTime: 1234567890,
+	}
+	if err := s.UpsertStream(ctx, original); err != nil {
+		t.Fatalf("UpsertStream failed: %v", err)
+	}
+
+	// An empty update is rejected instead of issuing a no-column UPDATE.
+	if err := s.UpdateStream(ctx, channelID, streamID, StreamUpdate{}); !errors.Is(err, ErrNoUpdate) {
+		t.Fatalf("expected ErrNoUpdate for an empty update, got %v", err)
+	}
+
+	// A single-field update leaves every other column alone — activated_time
+	// especially, since it is what orders the stream lists.
+	if err := s.UpdateStream(ctx, channelID, streamID, StreamUpdate{StartTime: &newStart}); err != nil {
+		t.Fatalf("UpdateStream failed: %v", err)
+	}
+	got, err := s.GetStreamByID(ctx, channelID, streamID)
+	if err != nil {
+		t.Fatalf("GetStreamByID failed: %v", err)
+	}
+	if got.StartTime != newStart {
+		t.Errorf("StartTime = %q, want %q", got.StartTime, newStart)
+	}
+	if got.StreamTitle != original.StreamTitle || got.MediaType != original.MediaType ||
+		got.IsLive != original.IsLive || got.ActivatedTime != original.ActivatedTime {
+		t.Errorf("update touched other columns: got %+v, want %+v", got, original)
+	}
+
+	// Every field at once, including clearing the title.
+	title, mediaType := "", "none"
+	if err := s.UpdateStream(ctx, channelID, streamID, StreamUpdate{
+		StreamTitle: &title, MediaType: &mediaType,
+	}); err != nil {
+		t.Fatalf("UpdateStream (all fields) failed: %v", err)
+	}
+	got, _ = s.GetStreamByID(ctx, channelID, streamID)
+	if got.StreamTitle != "" || got.MediaType != "none" {
+		t.Errorf("multi-field update did not apply: %+v", got)
+	}
+	// is_live is not editable through this path, and nothing it was not given
+	// may move either.
+	if !got.IsLive || got.ActivatedTime != original.ActivatedTime || got.StartTime != newStart {
+		t.Errorf("multi-field update touched fields it was not given: %+v", got)
+	}
+
+	// A stream in another channel with the same ID is untouched.
+	other := *original
+	other.ChannelID = "other-channel"
+	if err := s.UpsertStream(ctx, &other); err != nil {
+		t.Fatalf("UpsertStream (other channel) failed: %v", err)
+	}
+	older := "1600000000"
+	if err := s.UpdateStream(ctx, channelID, streamID, StreamUpdate{StartTime: &older}); err != nil {
+		t.Fatalf("UpdateStream failed: %v", err)
+	}
+	got, err = s.GetStreamByID(ctx, "other-channel", streamID)
+	if err != nil {
+		t.Fatalf("GetStreamByID (other channel) failed: %v", err)
+	}
+	if got.StartTime != original.StartTime {
+		t.Errorf("other channel's stream was edited: StartTime = %q", got.StartTime)
+	}
+}
+
+// An edit must never touch another stream in the channel — in particular it
+// cannot start or end one, which stays the worker's business.
+func TestStore_UpdateStreamLeavesOtherStreamsAlone(t *testing.T) {
+	s := newTestStore(t)
+
+	ctx := context.Background()
+	channelID := "test-others-alone"
+	for _, id := range []string{"live-one", "target"} {
+		if err := s.UpsertStream(ctx, &model.Stream{
+			ChannelID: channelID, StreamID: id, StreamTitle: "T " + id, StartTime: "1700000000",
+			IsLive: id == "live-one", MediaType: "audio", ActivatedTime: 1,
+		}); err != nil {
+			t.Fatalf("UpsertStream(%s) failed: %v", id, err)
+		}
+	}
+
+	title := "Renamed"
+	if err := s.UpdateStream(ctx, channelID, "target", StreamUpdate{StreamTitle: &title}); err != nil {
+		t.Fatalf("UpdateStream failed: %v", err)
+	}
+
+	other, err := s.GetStreamByID(ctx, channelID, "live-one")
+	if err != nil {
+		t.Fatalf("GetStreamByID failed: %v", err)
+	}
+	if !other.IsLive || other.StreamTitle != "T live-one" {
+		t.Errorf("editing one stream changed another: %+v", other)
+	}
+}
+
 // TestStore_MemoryDBSharedAcrossQueries guards against the pooled-connection
 // pitfall where each pool connection gets its own empty :memory: database.
 // Concurrent queries would then hit connections without the schema or data.

@@ -201,6 +201,43 @@ func (app *App) deleteStreamStorageAsync(channelKey, streamID string) {
 	}()
 }
 
+// broadcastPastStreams sends the channel's current past-stream list to every
+// connected client. The list carries each stream's metadata, so this is also
+// how an edit to a past stream's details reaches viewers. Best-effort: a read
+// failure is logged and skipped rather than failing the caller's operation.
+func (app *App) broadcastPastStreams(ctx context.Context, cs *ChannelState) {
+	// One stream is held out of the list as the channel's current one. Normally
+	// that is the most recently activated stream, which is what clients are
+	// sent on connect — but an admin can mark an older stream live, and then
+	// holding out the newest one would leave the live stream filtered out by
+	// is_live and the list empty. So the live stream wins when they differ.
+	streams, err := app.Store.GetAllStreams(ctx, cs.Key) // ordered by activated_time, newest first
+	if err != nil {
+		slog.Error("failed to get streams for past-stream broadcast", "key", cs.Key, "err", err)
+		return
+	}
+	excludeID := ""
+	if len(streams) > 0 {
+		excludeID = streams[0].StreamID
+	}
+	for _, stream := range streams {
+		if stream.IsLive {
+			excludeID = stream.StreamID
+			break
+		}
+	}
+
+	pastStreams, err := app.Store.GetPastStreams(ctx, cs.Key, excludeID)
+	if err != nil {
+		slog.Error("failed to get past streams for broadcast", "key", cs.Key, "err", err)
+		return
+	}
+	cs.Hub.Broadcast(ws.Message{
+		Event: ws.EventPastStreams,
+		Data:  ws.EventPastStreamsData{Streams: pastStreams},
+	})
+}
+
 // deactivateStream deactivates a stream and notifies all clients.
 // Returns true if the stream was deactivated and a message was sent, false otherwise.
 func (app *App) deactivateStream(ctx context.Context, cs *ChannelState, streamID string) bool {

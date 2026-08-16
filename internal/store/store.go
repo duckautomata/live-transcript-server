@@ -26,6 +26,9 @@ var ErrNotFound = errors.New("not found")
 // ID is not exactly one past the last stored line.
 var ErrOutOfSync = errors.New("out of sync")
 
+// ErrNoUpdate is returned by UpdateStream when the update carries no fields.
+var ErrNoUpdate = errors.New("no fields to update")
+
 // Store wraps the SQLite database handle.
 type Store struct {
 	db *sql.DB

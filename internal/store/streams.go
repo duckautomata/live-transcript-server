@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 
 	"live-transcript-server/internal/model"
 )
@@ -121,6 +123,60 @@ func (s *Store) UpsertStream(ctx context.Context, st *model.Stream) error {
 		media_type = excluded.media_type;
 	`, st.ChannelID, st.StreamID, st.StreamTitle, st.StartTime, st.IsLive, st.MediaType, st.ActivatedTime)
 	return err
+}
+
+// StreamUpdate is a partial edit of a stream's details: a nil field is left as
+// it was. Deliberately absent are the identity columns (channel_id, stream_id)
+// which key the stream's media and transcript, activated_time which orders the
+// stream lists and drives retention, and is_live which is the worker's to set.
+type StreamUpdate struct {
+	StreamTitle *string
+	StartTime   *string
+	MediaType   *string
+}
+
+// IsEmpty reports whether the update would change nothing.
+func (u StreamUpdate) IsEmpty() bool {
+	return u.StreamTitle == nil && u.StartTime == nil && u.MediaType == nil
+}
+
+// UpdateStream applies a partial edit to a stream's details. Returns an error
+// wrapping ErrNotFound when the stream does not exist, and ErrNoUpdate when
+// the update carries no fields.
+func (s *Store) UpdateStream(ctx context.Context, channelID string, streamID string, update StreamUpdate) error {
+	if update.IsEmpty() {
+		return ErrNoUpdate
+	}
+
+	// Column names are literals from this function; only values are bound.
+	var sets []string
+	var args []any
+	if update.StreamTitle != nil {
+		sets = append(sets, "stream_title = ?")
+		args = append(args, *update.StreamTitle)
+	}
+	if update.StartTime != nil {
+		sets = append(sets, "start_time = ?")
+		args = append(args, *update.StartTime)
+	}
+	if update.MediaType != nil {
+		sets = append(sets, "media_type = ?")
+		args = append(args, *update.MediaType)
+	}
+	args = append(args, channelID, streamID)
+
+	result, err := s.db.ExecContext(ctx, "UPDATE streams SET "+strings.Join(sets, ", ")+" WHERE channel_id = ? AND stream_id = ?", args...)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("stream %s/%s: %w", channelID, streamID, ErrNotFound)
+	}
+	return nil
 }
 
 // SetStreamLive updates the is_live status of a specific stream.

@@ -9,12 +9,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"live-transcript-server/internal/config"
 	"live-transcript-server/internal/discord"
+	"live-transcript-server/internal/model"
 	"live-transcript-server/internal/store"
 	"live-transcript-server/internal/ws"
 
@@ -332,6 +334,352 @@ func TestAdminDeleteStreamBroadcastsEvent(t *testing.T) {
 	}
 	if data["wasLive"] == true {
 		t.Error("wasLive=true; we deactivated before delete")
+	}
+}
+
+// streamRow reads a stream straight from the database.
+func streamRow(t *testing.T, app *App, channel, streamID string) *model.Stream {
+	t.Helper()
+	stream, err := app.Store.GetStreamByID(context.Background(), channel, streamID)
+	if err != nil {
+		t.Fatalf("get stream: %v", err)
+	}
+	if stream == nil {
+		t.Fatalf("stream %s/%s not found", channel, streamID)
+	}
+	return stream
+}
+
+// dialAndDrain connects a websocket client and consumes the messages sent on
+// connect, leaving the connection ready to observe broadcasts. connectMessages
+// is always 1 (the sync message) plus 1 more when the channel has past streams
+// to send — a read timeout permanently breaks a gorilla connection, so this is
+// counted rather than drained until quiet.
+func dialAndDrain(t *testing.T, mux *http.ServeMux, channel string, connectMessages int) (*websocket.Conn, func()) {
+	t.Helper()
+	server := httptest.NewServer(mux)
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/" + channel + "/websocket"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		server.Close()
+		t.Fatalf("dial websocket: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for range connectMessages {
+		var msg ws.Message
+		if err := conn.ReadJSON(&msg); err != nil {
+			conn.Close()
+			server.Close()
+			t.Fatalf("read connect messages: %v", err)
+		}
+	}
+	return conn, func() { conn.Close(); server.Close() }
+}
+
+// nextEvent reads broadcasts until one matches want, or fails on timeout.
+func nextEvent(t *testing.T, conn *websocket.Conn, want ws.EventType) map[string]any {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		var msg ws.Message
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("no %q event received: %v", want, err)
+		}
+		if msg.Event != want {
+			continue
+		}
+		data, ok := msg.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("%q data type=%T want map", want, msg.Data)
+		}
+		return data
+	}
+}
+
+func TestAdminEditStreamDetails(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki") // live, "Test Stream Title", audio
+	corrected := time.Now().Add(-3 * time.Hour).Unix()
+
+	rec := adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-1", "admin-doki", map[string]any{
+		"streamTitle": "  Corrected Title  ",
+		"startTime":   corrected,
+		"mediaType":   "video",
+	})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want 204, body=%s", rec.Code, rec.Body.String())
+	}
+
+	got := streamRow(t, app, "doki", "stream-1")
+	if got.StreamTitle != "Corrected Title" { // trimmed
+		t.Errorf("streamTitle=%q", got.StreamTitle)
+	}
+	if got.StartTime != strconv.FormatInt(corrected, 10) {
+		t.Errorf("startTime=%q want %d", got.StartTime, corrected)
+	}
+	if got.MediaType != "video" {
+		t.Errorf("mediaType=%q want video", got.MediaType)
+	}
+	if !got.IsLive {
+		t.Error("the edit changed isLive; only the worker may start or end a stream")
+	}
+}
+
+// isLive is not editable: a request naming it is a request with no editable
+// fields, and the stream's live flag is left exactly as the worker set it.
+func TestAdminEditStreamCannotChangeIsLive(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki") // live
+
+	rec := adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-1", "admin-doki",
+		map[string]any{"isLive": false})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("isLive-only edit: status=%d want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if !streamRow(t, app, "doki", "stream-1").IsLive {
+		t.Fatal("stream was ended by an edit")
+	}
+
+	// Alongside a real field, isLive is simply ignored.
+	rec = adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-1", "admin-doki",
+		map[string]any{"streamTitle": "Still Live", "isLive": false})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want 204, body=%s", rec.Code, rec.Body.String())
+	}
+	got := streamRow(t, app, "doki", "stream-1")
+	if got.StreamTitle != "Still Live" {
+		t.Errorf("streamTitle=%q", got.StreamTitle)
+	}
+	if !got.IsLive {
+		t.Error("stream was ended by an edit that also carried isLive")
+	}
+}
+
+// Only the fields present in the request may change.
+func TestAdminEditStreamPartialUpdate(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki")
+	before := streamRow(t, app, "doki", "stream-1")
+
+	rec := adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-1", "admin-doki",
+		map[string]any{"streamTitle": "Only The Title"})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want 204, body=%s", rec.Code, rec.Body.String())
+	}
+
+	after := streamRow(t, app, "doki", "stream-1")
+	if after.StreamTitle != "Only The Title" {
+		t.Errorf("streamTitle=%q", after.StreamTitle)
+	}
+	if after.StartTime != before.StartTime || after.IsLive != before.IsLive ||
+		after.MediaType != before.MediaType || after.ActivatedTime != before.ActivatedTime {
+		t.Errorf("a title-only edit changed other fields:\n before=%+v\n after =%+v", before, after)
+	}
+}
+
+func TestAdminEditStreamRejectsBadValues(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki")
+	before := *streamRow(t, app, "doki", "stream-1")
+
+	cases := []struct {
+		name string
+		body any
+	}{
+		{"zero start", map[string]any{"startTime": 0}},
+		{"negative start", map[string]any{"startTime": -5}},
+		{"before 2000", map[string]any{"startTime": 946684799}},
+		{"far future", map[string]any{"startTime": time.Now().Add(48 * time.Hour).Unix()}},
+		// The classic slip: milliseconds where seconds are expected.
+		{"milliseconds", map[string]any{"startTime": time.Now().UnixMilli()}},
+		{"start not a number", map[string]any{"startTime": "yesterday"}},
+		{"unknown media type", map[string]any{"mediaType": "hologram"}},
+		{"empty media type", map[string]any{"mediaType": ""}},
+		{"title too long", map[string]any{"streamTitle": strings.Repeat("x", maxStreamTitleLength+1)}},
+		{"no fields", map[string]any{}},
+		{"only non-editable fields", map[string]any{"channelId": "other", "activatedTime": 1, "isLive": false}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-1", "admin-doki", tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status=%d want 400, body=%s", rec.Code, rec.Body.String())
+			}
+			if got := *streamRow(t, app, "doki", "stream-1"); got != before {
+				t.Errorf("stream changed despite a rejected request: %+v", got)
+			}
+		})
+	}
+}
+
+// Identity and bookkeeping columns are not editable: stream_id keys the media
+// and transcript, and activated_time orders the lists and drives retention.
+func TestAdminEditStreamIgnoresNonEditableFields(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki")
+	before := *streamRow(t, app, "doki", "stream-1")
+
+	rec := adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-1", "admin-doki", map[string]any{
+		"streamTitle":   "New Title",
+		"streamId":      "hijacked",
+		"channelId":     "mint",
+		"activatedTime": 1,
+		"isLive":        false,
+	})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want 204, body=%s", rec.Code, rec.Body.String())
+	}
+
+	after := streamRow(t, app, "doki", "stream-1")
+	if after.StreamTitle != "New Title" {
+		t.Errorf("streamTitle=%q", after.StreamTitle)
+	}
+	if after.StreamID != before.StreamID || after.ChannelID != before.ChannelID ||
+		after.ActivatedTime != before.ActivatedTime || after.IsLive != before.IsLive {
+		t.Errorf("identity, ordering, or live columns changed: %+v", after)
+	}
+}
+
+func TestAdminEditStreamUnknownStreamAndAuth(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki")
+	body := map[string]any{"streamTitle": "Should Not Apply"}
+
+	rec := adminReq(t, mux, http.MethodPost, "/doki/admin/stream/nope", "admin-doki", body)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown stream: status=%d want 404", rec.Code)
+	}
+	rec = adminReq(t, mux, http.MethodPost, "/doki/admin/stream/bad..id", "admin-doki", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("invalid stream id: status=%d want 400", rec.Code)
+	}
+	rec = adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-1", "", body)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("no admin key: status=%d want 403", rec.Code)
+	}
+	rec = adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-1", "admin-mint", body)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-channel key: status=%d want 403", rec.Code)
+	}
+	if got := streamRow(t, app, "doki", "stream-1"); got.StreamTitle == "Should Not Apply" {
+		t.Error("stream was edited by a request that should have failed")
+	}
+}
+
+// The whole point of the edit: connected clients are told to update.
+func TestAdminEditStreamBroadcastsUpdate(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki") // live
+	conn, cleanup := dialAndDrain(t, mux, "doki", 1)
+	defer cleanup()
+
+	corrected := time.Now().Add(-2 * time.Hour).Unix()
+	rec := adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-1", "admin-doki", map[string]any{
+		"streamTitle": "Renamed Live Stream",
+		"startTime":   corrected,
+		"mediaType":   "video",
+	})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want 204, body=%s", rec.Code, rec.Body.String())
+	}
+
+	data := nextEvent(t, conn, ws.EventUpdatedStream)
+	if data["streamId"] != "stream-1" {
+		t.Errorf("streamId=%v", data["streamId"])
+	}
+	if data["streamTitle"] != "Renamed Live Stream" {
+		t.Errorf("streamTitle=%v", data["streamTitle"])
+	}
+	if data["startTime"] != strconv.FormatInt(corrected, 10) {
+		t.Errorf("startTime=%v want %d", data["startTime"], corrected)
+	}
+	if data["mediaType"] != "video" {
+		t.Errorf("mediaType=%v", data["mediaType"])
+	}
+	// The stream is live and the edit left that alone.
+	if data["isLive"] != true {
+		t.Errorf("isLive=%v want true", data["isLive"])
+	}
+}
+
+// The past-stream broadcast holds one stream out as the channel's current one.
+// When the live stream is not the most recently activated — a state the worker
+// can leave behind by resyncing an older stream — holding out the newest one
+// would leave viewers with an empty list instead of the streams that ended.
+func TestAdminEditStreamPastStreamsPrefersLiveStream(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki") // stream-1, live, activated_time 0
+	ctx := context.Background()
+	// stream-2 is newer but ended, so the live stream is not the newest.
+	if err := app.Store.UpsertStream(ctx, &model.Stream{
+		ChannelID: "doki", StreamID: "stream-2", StreamTitle: "Newer But Ended", StartTime: "1700000000",
+		IsLive: false, MediaType: "audio", ActivatedTime: time.Now().UnixMicro(),
+	}); err != nil {
+		t.Fatalf("seed second stream: %v", err)
+	}
+	conn, cleanup := dialAndDrain(t, mux, "doki", 1)
+	defer cleanup()
+
+	rec := adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-2", "admin-doki",
+		map[string]any{"streamTitle": "Renamed"})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want 204, body=%s", rec.Code, rec.Body.String())
+	}
+
+	data := nextEvent(t, conn, ws.EventPastStreams)
+	streams, _ := data["streams"].([]any)
+	var ids []string
+	for _, s := range streams {
+		row, _ := s.(map[string]any)
+		id, _ := row["streamId"].(string)
+		ids = append(ids, id)
+	}
+	if len(ids) != 1 || ids[0] != "stream-2" {
+		t.Errorf("past streams = %v, want exactly [stream-2] (the live stream is held out, not the newest)", ids)
+	}
+}
+
+// Viewers hold the old details, so the past-stream list is refreshed too.
+func TestAdminEditStreamBroadcastsPastStreams(t *testing.T) {
+	app, mux := setupTestApp(t, []string{"doki"})
+	seedExampleData(t, app, "doki")
+	ctx := context.Background()
+	if err := app.Store.SetStreamLive(ctx, "doki", "stream-1", false); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	// A second, newer stream: GetPastStreams excludes the most recent one, so
+	// stream-1 only appears in the broadcast when it is not the latest.
+	if err := app.Store.UpsertStream(ctx, &model.Stream{
+		ChannelID: "doki", StreamID: "stream-2", StreamTitle: "Newer", StartTime: "1700000000",
+		MediaType: "audio", ActivatedTime: time.Now().UnixMicro(),
+	}); err != nil {
+		t.Fatalf("seed second stream: %v", err)
+	}
+	conn, cleanup := dialAndDrain(t, mux, "doki", 2)
+	defer cleanup()
+
+	corrected := time.Now().Add(-5 * time.Hour).Unix()
+	rec := adminReq(t, mux, http.MethodPost, "/doki/admin/stream/stream-1", "admin-doki",
+		map[string]any{"startTime": corrected})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d want 204, body=%s", rec.Code, rec.Body.String())
+	}
+
+	data := nextEvent(t, conn, ws.EventPastStreams)
+	streams, _ := data["streams"].([]any)
+	var found bool
+	for _, s := range streams {
+		row, _ := s.(map[string]any)
+		if row["streamId"] != "stream-1" {
+			continue
+		}
+		found = true
+		if row["startTime"] != strconv.FormatInt(corrected, 10) {
+			t.Errorf("broadcast startTime=%v want %d", row["startTime"], corrected)
+		}
+	}
+	if !found {
+		t.Errorf("edited stream missing from the broadcast: %v", streams)
 	}
 }
 

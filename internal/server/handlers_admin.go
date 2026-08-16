@@ -1,10 +1,14 @@
 package server
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +16,8 @@ import (
 	"live-transcript-server/internal/discord"
 	"live-transcript-server/internal/metrics"
 	"live-transcript-server/internal/model"
+	"live-transcript-server/internal/store"
+	"live-transcript-server/internal/ws"
 )
 
 //go:embed admin_ui.html
@@ -262,6 +268,229 @@ func (app *App) deleteAdminStreamHandler(w http.ResponseWriter, r *http.Request,
 	)
 	slog.Info("admin deleted stream", "key", cs.Key, "func", "deleteAdminStreamHandler", "streamID", streamID, "wasLive", stream.IsLive, "deleteMedia", deleteMedia)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// startTimeFloor rejects timestamps from before 2000-01-01. A start time below
+// it is not a stream that began in 1970 — it is a bad unit or a typo.
+const startTimeFloor = 946684800
+
+// startTimeFutureGrace is how far ahead of the server's clock a corrected start
+// time may sit. It leaves room for clock skew while still catching the common
+// mistake of pasting milliseconds, which lands tens of thousands of years out.
+const startTimeFutureGrace = 24 * time.Hour
+
+// maxStreamTitleLength bounds an edited title. Titles become Prometheus label
+// values and Discord embed fields, so an unbounded one is a problem well
+// before it is a useful title.
+const maxStreamTitleLength = 300
+
+// editableMediaTypes are the media types the rest of the server understands:
+// "video" enables mp4 clipping and mp4 VOD renders, "audio" is audio-only, and
+// "none" means no media was captured at all. Anything else would leave the
+// stream in a state no code path handles.
+var editableMediaTypes = []string{"audio", "video", "none"}
+
+// postAdminStreamHandler edits a stream's details. Every field it accepts is
+// optional and only the ones present are changed, so a caller correcting one
+// detail cannot clobber another.
+//
+// Any stream can be edited at any time, live included: the details are often
+// wrong precisely while a stream is running. Edits to a live stream can still
+// be overwritten by the worker's next full resync, which the admin UI says
+// plainly rather than refusing the edit.
+//
+// Whether a stream is live is not editable here. It is the worker's to set,
+// and an admin lever for it would have to answer what happens to the stream
+// that was live, to the worker still pushing lines, and to the clients holding
+// either — more conditions than a one-field edit can carry honestly.
+func (app *App) postAdminStreamHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
+	streamID := r.PathValue("streamID")
+	if !isValidID(streamID) {
+		http.Error(w, "invalid stream id", http.StatusBadRequest)
+		metrics.Http400Errors.Inc()
+		return
+	}
+
+	// Pointers so that "field absent" is distinguishable from "field set to
+	// empty" — the difference between leaving a title alone and clearing it.
+	var body struct {
+		StreamTitle *string `json:"streamTitle"`
+		StartTime   *int64  `json:"startTime"`
+		MediaType   *string `json:"mediaType"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		metrics.Http400Errors.Inc()
+		return
+	}
+
+	var update store.StreamUpdate
+
+	if body.StreamTitle != nil {
+		title := strings.TrimSpace(*body.StreamTitle)
+		if len(title) > maxStreamTitleLength {
+			http.Error(w, fmt.Sprintf("streamTitle must be at most %d characters.", maxStreamTitleLength), http.StatusBadRequest)
+			metrics.Http400Errors.Inc()
+			return
+		}
+		update.StreamTitle = &title
+	}
+
+	if body.StartTime != nil {
+		latest := time.Now().Add(startTimeFutureGrace).Unix()
+		if *body.StartTime < startTimeFloor || *body.StartTime > latest {
+			http.Error(w, "startTime must be a unix timestamp in seconds, no earlier than 2000-01-01 and no more than a day in the future.", http.StatusBadRequest)
+			metrics.Http400Errors.Inc()
+			slog.Warn("rejected out-of-range start time", "key", cs.Key, "func", "postAdminStreamHandler", "streamID", streamID, "startTime", *body.StartTime)
+			return
+		}
+		startTime := strconv.FormatInt(*body.StartTime, 10)
+		update.StartTime = &startTime
+	}
+
+	if body.MediaType != nil {
+		if !slices.Contains(editableMediaTypes, *body.MediaType) {
+			http.Error(w, "mediaType must be one of: audio, video, none.", http.StatusBadRequest)
+			metrics.Http400Errors.Inc()
+			return
+		}
+		update.MediaType = body.MediaType
+	}
+
+	if update.IsEmpty() {
+		http.Error(w, "No fields to update. Send at least one of streamTitle, startTime, mediaType.", http.StatusBadRequest)
+		metrics.Http400Errors.Inc()
+		return
+	}
+
+	before, err := app.Store.GetStreamByID(r.Context(), cs.Key, streamID)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		metrics.Http500Errors.Inc()
+		slog.Error("failed to look up stream", "key", cs.Key, "func", "postAdminStreamHandler", "streamID", streamID, "err", err)
+		return
+	}
+	if before == nil {
+		http.Error(w, "stream not found", http.StatusNotFound)
+		return
+	}
+
+	err = app.Store.UpdateStream(r.Context(), cs.Key, streamID, update)
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "stream not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		metrics.Http500Errors.Inc()
+		slog.Error("failed to update stream", "key", cs.Key, "func", "postAdminStreamHandler", "streamID", streamID, "err", err)
+		return
+	}
+
+	// Re-read rather than assume: the row is the truth about what the edit did.
+	after, err := app.Store.GetStreamByID(r.Context(), cs.Key, streamID)
+	if err != nil || after == nil {
+		// The edit itself succeeded, so this is only a reporting problem.
+		slog.Error("failed to re-read stream after update", "key", cs.Key, "func", "postAdminStreamHandler", "streamID", streamID, "err", err)
+		after = before
+	}
+
+	app.announceStreamEdit(r.Context(), cs, before, after)
+
+	app.bumpAdminChange(cs.Key)
+	changes := describeStreamChanges(before, after)
+	fields := []discord.AdminField{
+		{Name: "Stream ID", Value: streamID, Inline: true},
+		{Name: "Stream Title", Value: after.StreamTitle, Inline: true},
+	}
+	for _, change := range changes {
+		fields = append(fields, discord.AdminField{Name: change.Field, Value: fmt.Sprintf("%s → %s", change.From, change.To)})
+	}
+	app.notifyAdminAction(r, cs, "Edited stream details", fields...)
+	slog.Info("admin edited stream details", "key", cs.Key, "func", "postAdminStreamHandler", "streamID", streamID, "changes", changes)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// announceStreamEdit tells connected clients about an edit: an updatedStream
+// event carrying the stream's full new state, then a refreshed past-stream
+// list, which is what an already-connected viewer's list of ended streams is
+// built from.
+func (app *App) announceStreamEdit(ctx context.Context, cs *ChannelState, before, after *model.Stream) {
+	cs.Hub.Broadcast(ws.Message{
+		Event: ws.EventUpdatedStream,
+		Data: ws.EventUpdatedStreamData{
+			StreamID:    after.StreamID,
+			StreamTitle: after.StreamTitle,
+			StartTime:   after.StartTime,
+			MediaType:   after.MediaType,
+			IsLive:      after.IsLive,
+		},
+	})
+
+	app.syncActivationMetric(cs.Key, before, after)
+	app.broadcastPastStreams(ctx, cs)
+}
+
+// syncActivationMetric keeps the activation gauge in step with an edit. The
+// series exists only while a stream is live, is labeled with its title, and
+// carries the start time as its value — so a retitle has to move it rather
+// than leave a second series behind under the old name, and a corrected start
+// time has to be written through.
+func (app *App) syncActivationMetric(channelKey string, before, after *model.Stream) {
+	if !after.IsLive {
+		return
+	}
+	if before.StreamTitle != after.StreamTitle {
+		metrics.ActivatedStreams.DeleteLabelValues(channelKey, before.StreamID, before.StreamTitle)
+	}
+	startTime, err := strconv.ParseInt(after.StartTime, 10, 64)
+	if err != nil {
+		return
+	}
+	metrics.ActivatedStreams.WithLabelValues(channelKey, after.StreamID, after.StreamTitle).Set(float64(startTime))
+}
+
+// streamChange is one field an edit altered, rendered for the audit trail.
+type streamChange struct {
+	Field string
+	From  string
+	To    string
+}
+
+// describeStreamChanges lists what actually changed, so the audit record shows
+// the edit rather than the fields the request happened to mention.
+func describeStreamChanges(before, after *model.Stream) []streamChange {
+	var changes []streamChange
+	if before.StreamTitle != after.StreamTitle {
+		changes = append(changes, streamChange{"Title", quoteOrEmpty(before.StreamTitle), quoteOrEmpty(after.StreamTitle)})
+	}
+	if before.StartTime != after.StartTime {
+		changes = append(changes, streamChange{"Start Time", formatStartTime(before.StartTime), formatStartTime(after.StartTime)})
+	}
+	if before.MediaType != after.MediaType {
+		changes = append(changes, streamChange{"Media Type", before.MediaType, after.MediaType})
+	}
+	return changes
+}
+
+func quoteOrEmpty(s string) string {
+	if s == "" {
+		return "(empty)"
+	}
+	return `"` + s + `"`
+}
+
+// formatStartTime renders a stored start time for a human-readable audit
+// field, falling back to the raw value if it is not a unix timestamp.
+func formatStartTime(startTime string) string {
+	seconds, err := strconv.ParseInt(startTime, 10, 64)
+	if err != nil {
+		if startTime == "" {
+			return "(unset)"
+		}
+		return startTime
+	}
+	return time.Unix(seconds, 0).UTC().Format(time.RFC1123)
 }
 
 // postAdminStopHandler is the compound "stop current stream" action: it

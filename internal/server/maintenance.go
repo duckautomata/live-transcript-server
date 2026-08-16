@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"live-transcript-server/internal/storage"
-	"live-transcript-server/internal/ws"
 )
 
 // workerActiveWindow is how recently a worker must have been seen to be
@@ -154,19 +153,7 @@ func (app *App) pruneExpiredStreams() {
 
 		if updatesMade {
 			// Broadcast the refreshed list of past streams.
-			currentStream, _ := app.Store.GetRecentStream(ctx, cs.Key)
-			streamID := ""
-			if currentStream != nil {
-				streamID = currentStream.StreamID
-			}
-
-			finalPastStreams, err := app.Store.GetPastStreams(ctx, cs.Key, streamID)
-			if err == nil {
-				cs.Hub.Broadcast(ws.Message{
-					Event: ws.EventPastStreams,
-					Data:  ws.EventPastStreamsData{Streams: finalPastStreams},
-				})
-			}
+			app.broadcastPastStreams(ctx, cs)
 		}
 	}
 }

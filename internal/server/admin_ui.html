@@ -380,6 +380,20 @@
   /* pre-line so a confirm message can separate its warning into its own
      paragraph with a plain "\n\n" (the text is set via textContent). */
   .modal p { color: var(--text-muted); margin: 0 0 20px; white-space: pre-line; }
+  .modal .field-label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+  .modal .field-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: -8px 0 16px;
+  }
+  .modal .field-hint.warn { color: var(--warning); }
+  .modal select,
+  .modal input[type="datetime-local"],
   .modal input[type="password"], .modal input[type="text"], .modal input[type="url"] {
     width: 100%;
     background: var(--bg);
@@ -602,7 +616,7 @@
         <dt>Server</dt>
         <dd>The version and build time of the transcript server itself (this backend, not the worker).</dd>
         <dt>Streams</dt>
-        <dd>Every stream stored for this channel. <span class="pill live">Live</span> means the worker is transcribing it right now; <span class="pill past">Past</span> means it has ended. Each row shows the title, the stream ID, when it started, and what kind of media was captured. <strong>Full VOD</strong> builds (or downloads) the whole stream as one file — see the “Download the full VOD” card below.</dd>
+        <dd>Every stream stored for this channel. <span class="pill live">Live</span> means the worker is transcribing it right now; <span class="pill past">Past</span> means it has ended. Each row shows the title, the stream ID, when it started, and what kind of media was captured. <strong>Edit</strong> corrects any of those details, and <strong>Full VOD</strong> builds (or downloads) the whole stream as one file — see the cards below.</dd>
         <dt>Incoming queue</dt>
         <dd>Stream URLs waiting for the worker. The worker takes a URL out of the queue when it picks it up; <strong>Remove</strong> takes one out by hand before that happens. The form at the bottom queues a new URL.</dd>
         <dt>Worker controls</dt>
@@ -654,6 +668,23 @@
         <li>Confirm — the stream's entire storage folder is permanently removed.</li>
       </ol>
       <p class="guide-note">Left unticked (the default), only the stream record and transcript are deleted; every media file stays in storage.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Edit a stream's details</h2></div>
+    <div class="guide-body">
+      <p><strong>Edit</strong> on a stream's row corrects what the server recorded about it. Details come through wrong often enough to need it — a bad title or start time from the platform, a worker that fell back to its own clock, or a stream left marked live because its worker died before saying so.</p>
+      <dl class="guide-dl">
+        <dt>Title</dt>
+        <dd>What viewers see, and what appears in stream notifications. Leave it empty to show “(untitled)”.</dd>
+        <dt>Start time</dt>
+        <dd>Everything a viewer sees is timed against this. Enter it in <strong>your own local time</strong> — the server is told the exact moment, so admins in other time zones make the same correction.</dd>
+        <dt>Media type</dt>
+        <dd><strong>video</strong> allows mp4 clips and mp4 VOD renders, <strong>audio</strong> is audio-only, and <strong>none</strong> means no media was captured. Setting this wrong is what makes clipping refuse a stream that does have video.</dd>
+      </dl>
+      <p>Any stream can be edited at any time, live or ended. Only the fields you actually change are sent, and the moment you save, every connected viewer is told to update — no reload, no waiting for a reconnect. The change is logged to the admin audit webhook with the old and new value of each field.</p>
+      <p class="guide-note">Three things are deliberately not editable here. The <strong>stream ID</strong> is what the stream's media and transcript are filed under; its <strong>position in this list</strong> comes from when it was first activated; and whether it is <span class="pill live">Live</span> belongs to the worker — use <strong>Stop current stream</strong> under Worker controls to end a capture. Editing a live stream is allowed, but the worker may overwrite what you set the next time it resyncs, so it's worth redoing once the stream has ended.</p>
     </div>
   </div>
 
@@ -733,6 +764,35 @@
   </div>
 </div>
 
+<!-- Edit stream modal. Its own modal rather than the shared confirm one
+     because it edits values instead of asking a yes/no. -->
+<div class="modal-backdrop" id="edit-stream-modal">
+  <div class="modal">
+    <h3>Edit stream</h3>
+    <p id="edit-stream-message">Correct this stream's details.</p>
+    <form id="edit-stream-form">
+      <label class="field-label" for="edit-stream-title">Title</label>
+      <input type="text" id="edit-stream-title" maxlength="300" placeholder="(untitled)" />
+
+      <label class="field-label" for="edit-stream-starttime">Start time (your local time)</label>
+      <input type="datetime-local" id="edit-stream-starttime" step="1" required />
+
+      <label class="field-label" for="edit-stream-mediatype">Media type</label>
+      <select id="edit-stream-mediatype">
+        <option value="audio">audio</option>
+        <option value="video">video</option>
+        <option value="none">none</option>
+      </select>
+
+      <div class="field-hint" id="edit-stream-warning"></div>
+      <div class="actions">
+        <button type="button" id="edit-stream-cancel">Cancel</button>
+        <button type="submit" class="primary">Save changes</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- Confirm modal -->
 <div class="modal-backdrop" id="confirm-modal">
   <div class="modal">
@@ -805,6 +865,14 @@
   const authForm = $('auth-form');
   const authInput = $('auth-input');
   const authSaveCheckbox = $('auth-save-checkbox');
+  const editStreamModal = $('edit-stream-modal');
+  const editStreamForm = $('edit-stream-form');
+  const editStreamMessageEl = $('edit-stream-message');
+  const editStreamTitleInput = $('edit-stream-title');
+  const editStreamStartInput = $('edit-stream-starttime');
+  const editStreamMediaSelect = $('edit-stream-mediatype');
+  const editStreamWarnEl = $('edit-stream-warning');
+  const editStreamCancelBtn = $('edit-stream-cancel');
   const confirmModal = $('confirm-modal');
   const confirmTitleEl = $('confirm-title');
   const confirmMessageEl = $('confirm-message');
@@ -1081,6 +1149,7 @@
               </div>
             </div>
             <div class="row-actions">
+              <button class="ghost small" data-edit-id="${escapeHtml(s.streamId)}" title="Correct this stream's title, start time, or media type.">Edit</button>
               ${vodButton(s)}
               ${deleteBtn}
             </div>
@@ -1092,6 +1161,12 @@
       });
       streamsBodyEl.querySelectorAll('button[data-vod-id]').forEach(btn => {
         btn.addEventListener('click', () => onVod(btn.dataset.vodId, btn.dataset.vodTitle));
+      });
+      // The modal edits the whole row, so it is handed the stream object from
+      // the last /info rather than a fan of data- attributes.
+      streamsBodyEl.querySelectorAll('button[data-edit-id]').forEach(btn => {
+        const stream = streams.find(s => s.streamId === btn.dataset.editId);
+        btn.addEventListener('click', () => { if (stream) showEditStreamModal(stream); });
       });
     }
 
@@ -1166,6 +1241,96 @@
       set('online', 'Online', `last heartbeat ${timeAgo(bot.lastHeartbeatAck)}`);
     }
   }
+
+  // ---------- Edit stream ----------
+  // Stored start times are unix seconds; the picker works in the admin's local
+  // time zone, so every value crossing this boundary is converted explicitly
+  // rather than relying on Date's string parsing.
+  let editStreamTarget = null;
+
+  function toLocalInputValue(unix) {
+    const d = new Date(unix * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function formatAbsolute(unix) {
+    return new Date(unix * 1000).toLocaleString();
+  }
+
+  function showEditStreamModal(stream) {
+    const startTime = parseInt(stream.startTime, 10);
+    const validStart = Number.isFinite(startTime) && startTime > 0;
+    const mediaType = ['audio', 'video', 'none'].includes(stream.mediaType) ? stream.mediaType : 'none';
+    // Remember what we started from, so only genuinely changed fields are sent
+    // and a concurrent edit to another field isn't clobbered.
+    editStreamTarget = {
+      streamID: stream.streamId,
+      title: stream.streamTitle || '',
+      startTime: validStart ? startTime : null,
+      mediaType,
+    };
+
+    editStreamMessageEl.textContent = validStart
+      ? `"${stream.streamTitle || stream.streamId}" currently starts at ${formatAbsolute(startTime)}. Everything viewers see is timed against this.`
+      : `"${stream.streamTitle || stream.streamId}" has no usable start time recorded. Set when it actually began.`;
+    // A live stream's details are part of what the worker pushes on its next
+    // full resync, so an edit made now may not survive it.
+    editStreamWarnEl.textContent = stream.isLive
+      ? 'This stream is live — the worker may overwrite these details the next time it resyncs.'
+      : '';
+    editStreamWarnEl.classList.toggle('warn', !!stream.isLive);
+
+    editStreamTitleInput.value = editStreamTarget.title;
+    editStreamStartInput.value = toLocalInputValue(validStart ? startTime : Math.floor(Date.now() / 1000));
+    editStreamMediaSelect.value = mediaType;
+
+    editStreamModal.classList.add('show');
+    setTimeout(() => editStreamTitleInput.focus(), 50);
+  }
+
+  function hideEditStreamModal() {
+    editStreamModal.classList.remove('show');
+    editStreamTarget = null;
+  }
+
+  editStreamCancelBtn.addEventListener('click', hideEditStreamModal);
+  editStreamModal.addEventListener('click', (e) => { if (e.target === editStreamModal) hideEditStreamModal(); });
+
+  editStreamForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!editStreamTarget) return;
+    const before = editStreamTarget;
+
+    // datetime-local has no zone, so this parses in the admin's own time zone —
+    // which is what they typed.
+    const seconds = Math.floor(new Date(editStreamStartInput.value).getTime() / 1000);
+    if (!Number.isFinite(seconds)) {
+      toast('Enter a valid date and time', 'error');
+      return;
+    }
+
+    // Send only what actually changed: the server leaves absent fields alone.
+    const body = {};
+    const title = editStreamTitleInput.value.trim();
+    if (title !== before.title) body.streamTitle = title;
+    if (seconds !== before.startTime) body.startTime = seconds;
+    if (editStreamMediaSelect.value !== before.mediaType) body.mediaType = editStreamMediaSelect.value;
+
+    const changed = Object.keys(body);
+    if (changed.length === 0) {
+      hideEditStreamModal();
+      toast('Nothing changed');
+      return;
+    }
+
+    withButton(editStreamForm.querySelector('button[type="submit"]'), async () => {
+      await api('POST', `/stream/${encodeURIComponent(before.streamID)}`, body);
+      hideEditStreamModal();
+      toast(`Stream updated (${changed.join(', ')})`, 'success');
+      await refresh();
+    });
+  });
 
   // ---------- Full VOD ----------
   // Build state is kept per stream on the client: /info says nothing about
