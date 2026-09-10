@@ -390,3 +390,35 @@ func TestAbandonedUpcomingFramesAreNotRetired(t *testing.T) {
 		t.Fatal("an ended entry must still be retired, or discovery churns it forever")
 	}
 }
+
+// A scheduled stream and a surprise go-live both arrive as the same mechanism,
+// but only the first is expected to be fast. The watchlist is the only thing
+// that knows which happened, and it must be read BEFORE the observation that
+// flips the state.
+func TestSawUpcomingSeparatesScheduledFromSurprise(t *testing.T) {
+	w := newWatchlist()
+
+	// A scheduled stream: seen as a waiting room first.
+	w.Seed("scheduled", "doki", base, false)
+	w.Observe("scheduled", StateUpcoming, base.Add(10*time.Minute), base)
+	if !w.SawUpcoming("scheduled") {
+		t.Error("a frame observed upcoming must report as scheduled")
+	}
+	// The flag survives the transition to live — the flip itself is when the
+	// value is read.
+	w.Observe("scheduled", StateLive, time.Time{}, base.Add(10*time.Minute))
+	if !w.SawUpcoming("scheduled") {
+		t.Error("going live must not clear the scheduled flag")
+	}
+
+	// A surprise go-live: discovery finds it already live.
+	w.Seed("surprise", "doki", base, true)
+	w.Observe("surprise", StateLive, time.Time{}, base)
+	if w.SawUpcoming("surprise") {
+		t.Error("an id first seen live was never scheduled")
+	}
+
+	if w.SawUpcoming("never-seen") {
+		t.Error("an unknown id must not report as scheduled")
+	}
+}

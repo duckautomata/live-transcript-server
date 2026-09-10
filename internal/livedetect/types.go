@@ -89,6 +89,11 @@ type Broadcast struct {
 	// the platform reported none, in which case the delay is unknowable and
 	// the notification says so rather than inventing a number.
 	StartedAt time.Time
+	// SawScheduled reports that this broadcast was watched as a scheduled
+	// frame before it started, so the measured delay reflects the poll ladder
+	// rather than how long discovery took to notice it. Only YouTube can be
+	// scheduled; Twitch broadcasts are always false.
+	SawScheduled bool
 }
 
 // Sink receives observations. *server.App implements it.

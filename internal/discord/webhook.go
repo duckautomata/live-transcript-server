@@ -424,7 +424,12 @@ func (d *Client) Notify500Error(err error, contextMsg string) {
 // Posts to the detection webhook, which falls back to the admin webhook and
 // then the main one - detection is high-volume during a soak and does not ping.
 // Nil-receiver-safe so a detector built without a Discord client still runs.
-func (d *Client) NotifyStreamDetected(b model.DetectedBroadcast) {
+// sawScheduled reports whether the broadcast was watched as a scheduled frame
+// before it started. It is deliberately a parameter rather than a field on
+// DetectedBroadcast: the ledger does not persist it (the schema has no
+// ALTER TABLE path), and a struct field that is only ever populated on the
+// notification path would read as durable when it is not.
+func (d *Client) NotifyStreamDetected(b model.DetectedBroadcast, sawScheduled bool) {
 	if d == nil || d.detectWebhookURL() == "" {
 		return
 	}
@@ -459,6 +464,17 @@ func (d *Client) NotifyStreamDetected(b model.DetectedBroadcast) {
 			map[string]any{"name": "Detected", "value": fmt.Sprintf("<t:%d:T>", b.DetectedAt), "inline": true},
 			map[string]any{"name": "Delay", "value": "unknown", "inline": true},
 		)
+	}
+
+	// Without this the operator cannot read the delay: a scheduled stream and a
+	// surprise go-live both arrive as "youtube-state-poll", and only the first
+	// is expected to be fast.
+	if b.Platform == "youtube" {
+		lead := "no — discovery found it already live, so this delay is the discovery gap"
+		if sawScheduled {
+			lead = "yes — watched as a scheduled frame, so this delay is the poll interval"
+		}
+		fields = append(fields, map[string]any{"name": "Seen before it started", "value": lead, "inline": false})
 	}
 
 	fields = append(fields, map[string]any{

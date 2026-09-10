@@ -71,6 +71,11 @@ type watchEntry struct {
 	SawLive bool
 	// EndReported latches the single end report per entry.
 	EndReported bool
+	// SawUpcoming records that we watched this entry as a scheduled frame
+	// before it went live. It is what separates "the ladder did its job" from
+	// "discovery only found this after it started" in the reported delay —
+	// two very different numbers that otherwise look identical.
+	SawUpcoming bool
 	// NextDue is when this entry should next be polled. It is stamped on EVERY
 	// exit path, including errors and quota refusals - an entry left permanently
 	// overdue would make the scheduler compute a zero wait and spin.
@@ -328,6 +333,9 @@ func (w *watchlist) Observe(videoID string, state State, scheduled time.Time, no
 		if state == StateLive {
 			e.SawLive = true
 		}
+		if state == StateUpcoming {
+			e.SawUpcoming = true
+		}
 		if state == StateEnded && e.State != StateEnded {
 			e.EndedAt = now
 		}
@@ -462,6 +470,18 @@ func (w *watchlist) Size() int {
 		}
 	}
 	return n
+}
+
+// SawUpcoming reports whether an id was observed as a scheduled frame before
+// going live. False means discovery first saw it already live — the case where
+// the reported delay measures the discovery gap rather than the poll ladder.
+func (w *watchlist) SawUpcoming(videoID string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if e, ok := w.entries[videoID]; ok {
+		return e.SawUpcoming
+	}
+	return false
 }
 
 // Known reports whether an id is already tracked, so discovery can tell a new

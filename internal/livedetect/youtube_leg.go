@@ -148,6 +148,9 @@ func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Ti
 	}
 
 	state := v.State()
+	// Read before Observe: this poll is the one that flips upcoming -> live,
+	// and asking afterwards would always report the new state.
+	sawScheduled := d.watch.SawUpcoming(v.ID)
 	endWorthy := d.watch.Observe(v.ID, state, v.ScheduledStartTime(), now)
 
 	if channelKey == "" {
@@ -159,12 +162,13 @@ func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Ti
 		// Livestreams and premieres are indistinguishable here and both are in
 		// scope, so there is deliberately no discriminator between them.
 		d.observe(ctx, Broadcast{
-			Platform:   PlatformYouTube,
-			ChannelKey: channelKey,
-			ID:         v.ID,
-			URL:        YouTubeWatchURL(v.ID),
-			Title:      v.Title(),
-			StartedAt:  v.StartedAt(),
+			Platform:     PlatformYouTube,
+			ChannelKey:   channelKey,
+			ID:           v.ID,
+			URL:          YouTubeWatchURL(v.ID),
+			Title:        v.Title(),
+			StartedAt:    v.StartedAt(),
+			SawScheduled: sawScheduled,
 		}, MechanismYouTubeState)
 
 	case StateEnded:

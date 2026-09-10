@@ -81,10 +81,11 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 		"startedAt", det.StartedAt,
 		"detectedAt", det.DetectedAt,
 		"delaySeconds", det.DetectedAt-det.StartedAt,
+		"sawScheduled", b.SawScheduled,
 		"url", b.URL,
 	)
 
-	app.Discord.NotifyStreamDetected(det)
+	app.Discord.NotifyStreamDetected(det, b.SawScheduled)
 	// Wake the admin page so a detection shows up while the operator is
 	// watching a soak, rather than on the next slow refresh. Detections are
 	// once-per-broadcast, so this costs one extra long-poll recheck per

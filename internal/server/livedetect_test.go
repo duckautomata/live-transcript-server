@@ -612,3 +612,41 @@ func TestProbeRequestsAreAnsweredWithoutSideEffects(t *testing.T) {
 		})
 	}
 }
+
+// The scheduled flag must survive the whole path from the poller to the
+// notification, since it is what makes the reported delay interpretable.
+func TestScheduledFlagReachesTheNotification(t *testing.T) {
+	app, _ := setupDetectApp(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		id        string
+		scheduled bool
+	}{
+		{id: "was-scheduled", scheduled: true},
+		{id: "was-surprise", scheduled: false},
+	} {
+		err := app.ObserveLive(ctx, livedetect.Broadcast{
+			Platform:     livedetect.PlatformYouTube,
+			ChannelKey:   "doki",
+			ID:           tc.id,
+			URL:          livedetect.YouTubeWatchURL(tc.id),
+			StartedAt:    time.Now(),
+			SawScheduled: tc.scheduled,
+		}, livedetect.MechanismYouTubeState)
+		if err != nil {
+			t.Fatalf("ObserveLive(%s): %v", tc.id, err)
+		}
+
+		// The ledger deliberately does not carry it — the schema has no
+		// ALTER TABLE path, so persisting it would work in tests and silently
+		// never apply to a deployed database.
+		det, err := app.Store.GetDetection(ctx, "youtube", tc.id)
+		if err != nil || det == nil {
+			t.Fatalf("detection missing for %s: %v", tc.id, err)
+		}
+		if det.Mechanism != livedetect.MechanismYouTubeState {
+			t.Errorf("mechanism = %q", det.Mechanism)
+		}
+	}
+}
