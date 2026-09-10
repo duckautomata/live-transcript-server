@@ -44,12 +44,31 @@ channels:
   # displayName is the human-readable name used in Discord notifications
   # (defaults to name). twitchLogin is the Twitch login used to build stream
   # links for Twitch streams (defaults to lowercase displayName).
+  # Live detection is opted into PER CHANNEL by which identifiers are present:
+  #   twitchLogin only      -> watched on Twitch only
+  #   youtubeChannelId only -> watched on YouTube only
+  #   both                  -> watched on both
+  #   neither               -> not watched at all
+  # So a YouTube-only talent simply leaves twitchLogin empty, and vice versa.
+  #
+  # Both are format-checked at startup, because every way of getting one wrong
+  # fails silently: Helix answers an unknown login with an empty list and the
+  # YouTube API answers an unknown channel with no items, so a typo reads as
+  # "this channel never goes live" forever. A malformed value disables that
+  # one channel's leg and is reported in the log; it never stops the server.
+  # The startup log line prints the resulting mapping, e.g.
+  #   watching="doki=twitch+youtube mint=youtube"
+  #
+  # youtubeChannelId is the "UC..." channel ID (UC + 22 characters). It cannot
+  # be derived from any other field: find it in the page source of
+  # https://www.youtube.com/@handle as <link rel="canonical">.
   - name: key1
     numPastStreams: 5
     adminKey: ""
     membersName: ""
     displayName: ""
     twitchLogin: ""
+    youtubeChannelId: ""
   - name: key2
     numPastStreams: 0
     adminKey: ""
@@ -62,6 +81,10 @@ discord:
   # membership key create/delete). Empty falls back to webhookUrl; admin
   # audit posts are only disabled when both are empty.
   adminWebhookUrl: ""
+  # Optional separate webhook for live-detection observations. A soak posts one
+  # message per detected broadcast, so its own channel keeps the alert feed
+  # readable. Empty falls back to adminWebhookUrl, then webhookUrl.
+  detectWebhookUrl: ""
   # both user and role id are optional. If none are set, no ping will be sent.
   # Only one will be used. If both are set, the role id will be used.
   notifyUserId: ""
@@ -89,3 +112,91 @@ discord:
     # How long an unconsumed URL stays in the queue before the cleanup loop
     # removes it. 0 falls back to 1440 (24h).
     streamTtlMinutes: 1440
+
+# Server-side live detection. OBSERVER ONLY in this build: it detects streams
+# going live and posts a Discord notification recording when the stream started,
+# when we detected it, the delay between them, and which mechanism won. It never
+# queues work for the worker and never touches the streams table.
+#
+# Latency comes from the PUSH paths; the polling paths are the safety net under
+# them. Push is edge-triggered (one dropped delivery and a stream is never seen)
+# while polling is level-triggered and self-healing, so both run together and
+# whichever sees a broadcast first claims it.
+liveDetect:
+  enabled: false
+
+  # This server's externally reachable base URL, no trailing slash, e.g.
+  # "https://api.example.com". REQUIRED for eventSub and webSub: both register
+  # an absolute callback with a third party, so it cannot be derived from an
+  # inbound request. The two callback paths are public and unauthenticated by
+  # necessity (Twitch and Google cannot send an API key); each verifies an HMAC
+  # over the raw body instead:
+  #   POST     /livedetect/twitch/eventsub
+  #   GET,POST /livedetect/youtube/websub
+  #
+  # Behind Cloudflare, check that Twitch's sender is not being challenged:
+  # its user agent is Go-http-client/1.1 and Browser Integrity Check is on by
+  # default. A blocked callback fails SILENTLY , Twitch reports
+  # webhook_callback_verification_failed and nothing reaches the application
+  # log. Detection then falls back to the (slower) polling legs.
+  publicBaseUrl: ""
+
+  # Alert when a polling leg has had no successful cycle for this long.
+  staleAlertMinutes: 15
+
+  twitch:
+    enabled: false
+    # https://dev.twitch.tv/console/apps , a client-credentials app token.
+    clientId: ""
+    clientSecret: ""
+
+    # EventSub webhook: the only seconds-latency Twitch path (stream.online
+    # fires 1-3s after go-live). Polling cannot match it because Helix caches
+    # its responses per edge server.
+    eventSub: false
+    # Signs EventSub callbacks. Twitch requires 10-100 ASCII characters and
+    # never returns it on a read, so CHANGING IT invalidates every existing
+    # subscription and forces them all to be recreated.
+    #   openssl rand -hex 32
+    eventSubSecret: ""
+
+    # Helix polling cadence, the safety net beneath EventSub. Values below 60
+    # are clamped: Twitch caches per edge server, so polling faster returns
+    # inconsistent results , including a phantom stream-id change that reads as
+    # a restart , without detecting anything sooner.
+    pollSeconds: 60
+
+  youtube:
+    enabled: false
+    # A Google Cloud API key with the YouTube Data API v3 enabled. Restrict it
+    # to this server's egress IP. Only API-key-authenticated endpoints are used:
+    # unauthenticated youtube.com surfaces are unreliable from a datacenter IP
+    # and would save only a few hundred quota units out of 10,000.
+    apiKey: ""
+
+    # WebSub (PubSubHubbub) push discovery. The payload carries NO live-state
+    # field, so it never detects anything by itself , it hands the state poller
+    # a video id seconds after a frame appears, which is what turns a scheduled
+    # stream or premiere going live into a seconds-latency detection instead of
+    # one gated on the next discovery pass.
+    webSub: false
+    # Base secret for per-topic HMAC keys.
+    #   openssl rand -hex 32
+    webSubSecret: ""
+
+    # How often each channel's uploads playlist is scanned for video ids we have
+    # not seen. This is the latency floor for an UNSCHEDULED surprise go-live
+    # only , every premiere and any stream with a waiting room is already on the
+    # watchlist and is caught within seconds by the state poller.
+    discoverySeconds: 120
+
+    # Daily quota ceiling, under the API's 10,000/day project allocation, leaving
+    # headroom for retries and restarts. The state poller costs 1 unit per call
+    # regardless of how many videos it checks, which is what makes a 3-second
+    # poll interval affordable.
+    dailyUnitBudget: 8000
+
+    # Low-rate search.list cross-check that alarms when YouTube says a channel is
+    # live and the ledger disagrees. Draws on search.list's OWN bucket (100 calls
+    # per day, project-wide), separate from the units above.
+    searchAudit: false

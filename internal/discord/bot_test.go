@@ -32,7 +32,7 @@ func TestParsePingcordMessage(t *testing.T) {
 			wantOK:  true,
 		},
 		{
-			// Embed text is intentionally ignored — only Content is parsed.
+			// Embed text is intentionally ignored , only Content is parsed.
 			name: "embed-only message is ignored",
 			msg: &discordgo.Message{
 				Embeds: []*discordgo.MessageEmbed{
@@ -45,7 +45,7 @@ func TestParsePingcordMessage(t *testing.T) {
 			wantOK: false,
 		},
 		{
-			// Channel name must come from Content, not from an embed —
+			// Channel name must come from Content, not from an embed ,
 			// even when the Content URL doesn't itself reveal the streamer.
 			name: "embed channel name does not feed the match",
 			msg: &discordgo.Message{

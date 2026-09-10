@@ -1,6 +1,6 @@
 // Package metrics declares every Prometheus metric for the server. It must be
 // the ONLY package in the module that registers metrics on the default
-// registry — promauto panics on duplicate registration, so keeping all
+// registry , promauto panics on duplicate registration, so keeping all
 // registration here makes that constraint structural. Metric names are part of
 // the operational interface (dashboards, alerts) and must not change casually.
 package metrics
@@ -223,4 +223,46 @@ var (
 	},
 		[]string{"key", "stream_id", "stream_title"},
 	)
+
+	// Live detection (shadow mode). LiveDetectDetections incrementing more
+	// than once for a single broadcast is the alarm bell for a dedupe failure:
+	// the ledger claim is supposed to make it exactly one per broadcast.
+	LiveDetectPolls = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "lt_livedetect_polls_total",
+		Help: "Live-detection poll cycles by mechanism and outcome (ok/error/skipped).",
+	},
+		[]string{"mechanism", "result"},
+	)
+	LiveDetectDetections = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "lt_livedetect_detections_total",
+		Help: "Broadcasts first detected, by channel, platform and the mechanism that won the claim.",
+	},
+		[]string{"key", "platform", "mechanism"},
+	)
+	LiveDetectDelaySeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "lt_livedetect_delay_seconds",
+		Help: "Seconds between the platform-reported stream start and our detection of it.",
+		Buckets: []float64{
+			1, 2, 5, 10, 15, 30, 45,
+			60, 120, 300, 600,
+		},
+	},
+		[]string{"platform", "mechanism"},
+	)
+	LiveDetectWebhooks = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "lt_livedetect_webhooks_total",
+		Help: "Inbound detection webhook requests by source and outcome (accepted/bad-signature/replay/duplicate/malformed).",
+	},
+		[]string{"source", "result"},
+	)
+	LiveDetectLastSuccess = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_livedetect_last_success_timestamp_seconds",
+		Help: "Unix time of the last successful poll per mechanism; a stale value means that leg is down.",
+	},
+		[]string{"mechanism"},
+	)
+	LiveDetectQuotaUnits = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "lt_livedetect_youtube_quota_units_total",
+		Help: "YouTube Data API quota units spent by live detection.",
+	})
 )

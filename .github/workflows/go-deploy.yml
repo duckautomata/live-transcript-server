@@ -27,7 +27,7 @@ on:
 jobs:
 
   # ─────────────────────────────────────────────
-  # JOB 1 — Tests
+  # JOB 1 , Tests
   # ─────────────────────────────────────────────
   test:
     runs-on: ubuntu-latest
@@ -62,7 +62,7 @@ jobs:
           fail-on-error: true
 
   # ─────────────────────────────────────────────
-  # JOB 2 — Docker build & push
+  # JOB 2 , Docker build & push
   # ─────────────────────────────────────────────
   build-push:
     runs-on: ubuntu-latest
@@ -127,7 +127,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ─────────────────────────────────────────────
-  # JOB 3 — Tag + GitHub Release
+  # JOB 3 , Tag + GitHub Release
   # ─────────────────────────────────────────────
   release:
     runs-on: ubuntu-latest

@@ -235,5 +235,44 @@ func createSchema(db *sql.DB) error {
 		return fmt.Errorf("error creating worker_restart_requests table: %w", err)
 	}
 
+	// detected_broadcasts is live detection's write-once ledger. Detection
+	// mechanisms produce a LEVEL signal ("this channel is live right now") and
+	// re-observe the same broadcast on every poll; this table is what turns
+	// that into exactly one notification per broadcast. The insert is
+	// INSERT OR IGNORE and its RowsAffected IS the answer to "am I the first
+	// to see this", so the race between the push and poll paths resolves
+	// itself with no locking.
+	//
+	// Keyed on the platform's per-broadcast id, never the URL: every Twitch
+	// broadcast for a login shares one URL forever, so a URL-keyed ledger
+	// would report a channel's first stream and then stay silent.
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS detected_broadcasts (
+		platform TEXT NOT NULL,
+		broadcast_id TEXT NOT NULL,
+		channel_key TEXT NOT NULL,
+		url TEXT NOT NULL,
+		title TEXT NOT NULL DEFAULT '',
+		started_at INTEGER NOT NULL DEFAULT 0,
+		detected_at INTEGER NOT NULL,
+		mechanism TEXT NOT NULL DEFAULT '',
+		ended_at INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (platform, broadcast_id)
+	);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating detected_broadcasts table: %w", err)
+	}
+
+	// Supports the per-channel "what is live right now" lookup the state
+	// poller runs every cycle, and the detected_at pruning sweep.
+	_, err = db.Exec(`
+	CREATE INDEX IF NOT EXISTS idx_detected_broadcasts_channel
+		ON detected_broadcasts (channel_key, detected_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating detected_broadcasts index: %w", err)
+	}
+
 	return nil
 }

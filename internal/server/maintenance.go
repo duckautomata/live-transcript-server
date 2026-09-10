@@ -9,7 +9,7 @@ import (
 )
 
 // workerActiveWindow is how recently a worker must have been seen to be
-// considered active — shared by the public /status endpoint, the admin info
+// considered active , shared by the public /status endpoint, the admin info
 // endpoint, and the offline-alert sweep.
 const workerActiveWindow = 5 * time.Minute
 
@@ -26,6 +26,7 @@ func (app *App) StartMaintenanceLoop() {
 	}
 	app.runPeriodic(2*time.Hour, false, app.checkWorkerStatus)
 	app.runPeriodic(15*time.Minute, true, app.cleanupIncomingStreams)
+	app.runPeriodic(12*time.Hour, false, app.cleanupDetections)
 }
 
 // runPeriodic runs fn every interval until the app context is canceled. When

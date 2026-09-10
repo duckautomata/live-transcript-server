@@ -19,7 +19,7 @@ const mergeConcurrency = 32
 // Chunks are downloaded in parallel into a temp directory but appended in
 // fileIDs order and deleted as soon as they are appended, so the scratch space
 // a merge needs stays bounded by mergeConcurrency chunks no matter how many
-// files it is given — a full-stream merge would otherwise materialize every
+// files it is given , a full-stream merge would otherwise materialize every
 // chunk of the stream at once. Returns the path to the merged file (which
 // lives in tempDir; the caller owns its cleanup).
 func MergeRawAudio(ctx context.Context, st storage.Storage, tempDir, channelKey, streamID string, fileIDs []string, outputName string) (string, error) {
@@ -52,7 +52,7 @@ func MergeRawAudio(ctx context.Context, st storage.Storage, tempDir, channelKey,
 
 	// Cancelling dlCtx stops pending and in-flight downloads. Every return path
 	// below goes through abort() or the deferred cancel, so no download outlives
-	// the call — which is what makes the deferred RemoveAll safe.
+	// the call , which is what makes the deferred RemoveAll safe.
 	dlCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 

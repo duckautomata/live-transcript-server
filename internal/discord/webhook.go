@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"live-transcript-server/internal/config"
+	"live-transcript-server/internal/model"
 )
 
 // notify500Throttle is the minimum gap between 500-error webhook alerts. An
@@ -38,8 +39,11 @@ type Client struct {
 	// AdminWebhookURL is where admin-operation audit records go. It falls back
 	// to WebhookURL when not configured separately.
 	AdminWebhookURL string
-	NotifyPing      string
-	Version         string
+	// DetectWebhookURL is where live-detection observations go. Empty falls
+	// back to AdminWebhookURL; see detectWebhookURL.
+	DetectWebhookURL string
+	NotifyPing       string
+	Version          string
 
 	transcriptBaseURL string
 	channels          map[string]presentation
@@ -82,6 +86,7 @@ func NewClient(cfg config.DiscordConfig, version string, channels []config.Chann
 	return &Client{
 		WebhookURL:        cfg.WebhookURL,
 		AdminWebhookURL:   adminURL,
+		DetectWebhookURL:  cfg.DetectWebhookURL,
 		NotifyPing:        ping,
 		Version:           version,
 		transcriptBaseURL: cfg.TranscriptBaseURL,
@@ -310,7 +315,7 @@ type AdminField struct {
 
 // NotifyAdminAction records a completed admin operation on the admin webhook:
 // what was done (action), which channel it was done to (channelKey), and the
-// operation's specifics (fields). It is an audit trail, not an alert — it
+// operation's specifics (fields). It is an audit trail, not an alert , it
 // never pings the operator.
 //
 // Callers must invoke it only after the operation has actually succeeded, and
@@ -327,7 +332,7 @@ func (d *Client) NotifyAdminAction(channelKey, action string, fields ...AdminFie
 		}
 		value := f.Value
 		if value == "" {
-			value = "—" // Discord rejects an empty field value.
+			value = "," // Discord rejects an empty field value.
 		}
 		embedFields = append(embedFields, map[string]any{
 			"name":   truncate(f.Name, maxFieldNameLength),
@@ -399,4 +404,214 @@ func (d *Client) Notify500Error(err error, contextMsg string) {
 		},
 	}
 	go d.send(payload)
+}
+
+// NotifyStreamDetected reports that live detection observed a broadcast go
+// live. This is the entire output of shadow mode: detection runs, measures
+// itself, and tells the operator , it never queues anything for the worker.
+//
+// The numbers are the point. StartedAt is what the platform says; DetectedAt
+// is when we saw it; the delay between them is what decides whether this
+// approach is trustworthy enough to drive the worker. Mechanism names which
+// detection path won the race, so a soak shows not just whether detection
+// works but which half of it is carrying the result.
+//
+// Read the delay with the mechanism in mind: a push path (EventSub, WebSub)
+// measures close to true end-to-end latency, while a polling path also carries
+// the platform API's own cache lag, which can be tens of seconds and is not
+// something this server can shorten.
+//
+// Posts to the detection webhook, which falls back to the admin webhook and
+// then the main one , detection is high-volume during a soak and does not ping.
+// Nil-receiver-safe so a detector built without a Discord client still runs.
+func (d *Client) NotifyStreamDetected(b model.DetectedBroadcast) {
+	if d == nil || d.detectWebhookURL() == "" {
+		return
+	}
+
+	fullName := b.ChannelKey
+	if p, ok := d.channels[b.ChannelKey]; ok {
+		fullName = p.displayName
+	}
+
+	title := b.Title
+	if title == "" {
+		title = "(no title reported)"
+	}
+
+	fields := []map[string]any{
+		{"name": "Channel", "value": fmt.Sprintf("%s (`%s`)", fullName, b.ChannelKey), "inline": true},
+		{"name": "Platform", "value": b.Platform, "inline": true},
+		{"name": "Mechanism", "value": b.Mechanism, "inline": true},
+	}
+
+	// A platform that reported no start time makes the delay unknowable. Say
+	// so rather than rendering a delay measured against the epoch.
+	if b.StartedAt > 0 {
+		fields = append(fields,
+			map[string]any{"name": "Stream Started", "value": fmt.Sprintf("<t:%d:T> (<t:%d:R>)", b.StartedAt, b.StartedAt), "inline": true},
+			map[string]any{"name": "Detected", "value": fmt.Sprintf("<t:%d:T> (<t:%d:R>)", b.DetectedAt, b.DetectedAt), "inline": true},
+			map[string]any{"name": "Delay", "value": formatDetectionDelay(b.DetectedAt - b.StartedAt), "inline": true},
+		)
+	} else {
+		fields = append(fields,
+			map[string]any{"name": "Stream Started", "value": "not reported by platform", "inline": true},
+			map[string]any{"name": "Detected", "value": fmt.Sprintf("<t:%d:T>", b.DetectedAt), "inline": true},
+			map[string]any{"name": "Delay", "value": "unknown", "inline": true},
+		)
+	}
+
+	fields = append(fields, map[string]any{
+		"name": "Broadcast ID", "value": fmt.Sprintf("`%s`", b.BroadcastID), "inline": false,
+	})
+
+	embed := map[string]any{
+		"title":       fmt.Sprintf("Live Detected: %s", fullName),
+		"description": fmt.Sprintf("**%s**\n[%s](%s)", truncate(title, 240), b.URL, b.URL),
+		"url":         b.URL,
+		"color":       3447003, // Blue , informational, distinct from the green stream-start announce.
+		"fields":      fields,
+		"timestamp":   time.Unix(b.DetectedAt, 0).UTC().Format(time.RFC3339),
+		"footer": map[string]string{
+			"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
+		},
+	}
+
+	go d.sendTo(d.detectWebhookURL(), map[string]any{"embeds": []map[string]any{embed}})
+}
+
+// formatDetectionDelay renders a detection delay for the notification.
+// Negative values are possible and are not an error: a platform's reported
+// start time can be a second or two ahead of the clock we compare it against,
+// and a push notification can arrive before the API admits the stream exists.
+func formatDetectionDelay(seconds int64) string {
+	if seconds < 0 {
+		return fmt.Sprintf("%s (detected before reported start)", (time.Duration(-seconds) * time.Second).String())
+	}
+	return (time.Duration(seconds) * time.Second).String()
+}
+
+// detectWebhookURL resolves where detection notifications go: the dedicated
+// detection webhook if configured, otherwise the admin webhook (which itself
+// falls back to the main one). A soak produces a lot of these, so being able
+// to route them to their own channel is worth the knob.
+func (d *Client) detectWebhookURL() string {
+	if d.DetectWebhookURL != "" {
+		return d.DetectWebhookURL
+	}
+	return d.AdminWebhookURL
+}
+
+// NotifyLiveDetectDown alerts that a live-detection leg has stopped working.
+//
+// Fired once on the healthy->down transition, never per cycle: every notifier
+// here is an unbounded `go d.send(...)`, so alerting on every failed poll
+// during a long outage would spawn thousands of goroutines, hit Discord's rate
+// limit, and bury the one message that mattered.
+//
+// Routed to the detection webhook rather than the main one, and without a
+// ping: during a shadow-mode soak a detector leg failing is information, not
+// an emergency , nothing downstream depends on it yet.
+func (d *Client) NotifyLiveDetectDown(mechanism string, err error, failures int) {
+	if d == nil || d.detectWebhookURL() == "" {
+		return
+	}
+	detail := fmt.Sprintf("Detection leg **%s** is failing.\n**Error:** %v", mechanism, err)
+	if failures > 0 {
+		detail += fmt.Sprintf("\nConsecutive failures: %d", failures)
+	}
+	go d.sendTo(d.detectWebhookURL(), map[string]any{
+		"embeds": []map[string]any{
+			{
+				"title":       "Live Detection Leg Down",
+				"description": detail,
+				"color":       15158332, // Red
+				"timestamp":   time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
+				},
+			},
+		},
+	})
+}
+
+// NotifyLiveDetectRecovered announces that a detection leg is working again,
+// sent once after a prior down alert so the operator knows the outage closed.
+func (d *Client) NotifyLiveDetectRecovered(mechanism string) {
+	if d == nil || d.detectWebhookURL() == "" {
+		return
+	}
+	go d.sendTo(d.detectWebhookURL(), map[string]any{
+		"embeds": []map[string]any{
+			{
+				"title":       "Live Detection Leg Recovered",
+				"description": fmt.Sprintf("Detection leg **%s** is producing results again.", mechanism),
+				"color":       3066993, // Green
+				"timestamp":   time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
+				},
+			},
+		},
+	})
+}
+
+// NotifyLiveDetectRevoked reports that Twitch dropped an EventSub
+// subscription. The reconciler recreates it, but the operator needs to hear
+// about it: a revocation for notification_failures_exceeded means deliveries
+// were being rejected, which usually points at something in front of the
+// server (a Cloudflare challenge on Twitch's Go-http-client user agent) rather
+// than at the server itself.
+func (d *Client) NotifyLiveDetectRevoked(subType, status, broadcasterID string) {
+	if d == nil || d.detectWebhookURL() == "" {
+		return
+	}
+	go d.sendTo(d.detectWebhookURL(), map[string]any{
+		"embeds": []map[string]any{
+			{
+				"title": "Twitch EventSub Subscription Revoked",
+				"description": fmt.Sprintf(
+					"Twitch revoked a **%s** subscription.\n**Reason:** %s\n**Broadcaster:** %s\n\nThe reconciler will try to recreate it. A `notification_failures_exceeded` reason means Twitch could not deliver to the callback.",
+					subType, status, broadcasterID),
+				"color":     16744448, // Orange
+				"timestamp": time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
+				},
+			},
+		},
+	})
+}
+
+// NotifyLiveDetectAuditMiss reports that the independent cross-check found a
+// live broadcast detection had not seen.
+//
+// This is the alarm for the one failure that is otherwise invisible: if
+// discovery never surfaces a channel's in-progress broadcast, every leg looks
+// healthy and the only symptom is an absence of notifications , which is
+// indistinguishable from a channel that simply did not stream that day.
+func (d *Client) NotifyLiveDetectAuditMiss(channelKey, videoID string) {
+	if d == nil || d.detectWebhookURL() == "" {
+		return
+	}
+	fullName := channelKey
+	if p, ok := d.channels[channelKey]; ok {
+		fullName = p.displayName
+	}
+	go d.sendTo(d.detectWebhookURL(), map[string]any{
+		"content": d.NotifyPing,
+		"embeds": []map[string]any{
+			{
+				"title": "Live Detection Missed a Stream",
+				"description": fmt.Sprintf(
+					"The search cross-check found **%s** live on a broadcast detection had not seen.\n[%s](%s)\n\nDiscovery is not surfacing this channel's broadcasts; the delay reported for it (if any) is not trustworthy.",
+					fullName, videoID, "https://www.youtube.com/watch?v="+videoID),
+				"color":     15158332, // Red
+				"timestamp": time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
+				},
+			},
+		},
+	})
 }

@@ -128,7 +128,7 @@ func TestLocalStorageList(t *testing.T) {
 		t.Errorf("List of stream root = %v, want no direct files", keys)
 	}
 
-	// A folder that was never created is empty, not an error — a stream with
+	// A folder that was never created is empty, not an error , a stream with
 	// no VOD is the normal case, not a failure.
 	keys, err = s.List(ctx, VodPrefix("chan", "no-such-stream"))
 	if err != nil {
@@ -158,7 +158,7 @@ func TestLocalStoragePartialWriteInvisible(t *testing.T) {
 		t.Errorf("destination file exists after failed Save (stat err: %v)", err)
 	}
 
-	// The destination directory must be empty — no orphaned temp files.
+	// The destination directory must be empty , no orphaned temp files.
 	entries, err := os.ReadDir(filepath.Join(s.BaseDir, "chan", "stream1", "raw"))
 	if err != nil {
 		t.Fatalf("failed to read destination dir: %v", err)

@@ -208,7 +208,7 @@ func (app *App) deleteStreamStorageAsync(channelKey, streamID string) {
 func (app *App) broadcastPastStreams(ctx context.Context, cs *ChannelState) {
 	// One stream is held out of the list as the channel's current one. Normally
 	// that is the most recently activated stream, which is what clients are
-	// sent on connect — but an admin can mark an older stream live, and then
+	// sent on connect , but an admin can mark an older stream live, and then
 	// holding out the newest one would leave the live stream filtered out by
 	// is_live and the list empty. So the live stream wins when they differ.
 	streams, err := app.Store.GetAllStreams(ctx, cs.Key) // ordered by activated_time, newest first
