@@ -133,7 +133,11 @@ func (d *Detector) youtubeStateOnce() {
 		// leg still reports healthy. Counting it is the only way this becomes
 		// visible short of the search audit.
 		metrics.LiveDetectPolls.WithLabelValues(MechanismYouTubeState, "unreturned").Add(float64(len(missing)))
-		d.watch.Defer(missing, now.Add(ytIntervalCool))
+		if dropped := d.watch.MarkMissing(missing, now); len(dropped) > 0 {
+			slog.Info("dropping videos the API has stopped returning",
+				"func", "Detector.youtubeStateOnce", "ids", dropped,
+				"after_consecutive_misses", ytMaxConsecutiveMisses)
+		}
 		slog.Debug("youtube did not return watched ids", "func", "Detector.youtubeStateOnce", "ids", missing)
 	}
 }
@@ -397,7 +401,7 @@ func clampHubRetry(d time.Duration) time.Duration {
 // The hub's Retry-After is a FLOOR, not the whole answer. Google's hub repeats
 // the same static "2 minutes" however long it has been unwell, so obeying it
 // literally means retrying every two minutes forever against a service that is
-// explicitly overloaded — compliant, but not useful to either side. So the
+// explicitly overloaded - compliant, but not useful to either side. So the
 // first delay starts from the hub's suggestion, and then doubles on each
 // consecutive failure, never dropping below whatever the hub last asked for.
 func nextWebSubBackoff(current, hubRetryAfter time.Duration) time.Duration {

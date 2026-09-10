@@ -247,7 +247,7 @@ var (
 			60, 120, 300, 600,
 		},
 	},
-		[]string{"platform", "mechanism"},
+		[]string{"platform", "mechanism", "scheduled"},
 	)
 	LiveDetectWebhooks = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "lt_livedetect_webhooks_total",
@@ -265,4 +265,49 @@ var (
 		Name: "lt_livedetect_youtube_quota_units_total",
 		Help: "YouTube Data API quota units spent by live detection.",
 	})
+	// LiveDetectQuotaSpentToday tracks spend against the CURRENT quota day.
+	// The counter above is process-lifetime and cannot answer "am I about to
+	// run out today", because the API's day resets at midnight Pacific and a
+	// counter never resets at all.
+	LiveDetectQuotaSpentToday = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_livedetect_youtube_quota_spent_today",
+		Help: "YouTube quota consumed so far in the current quota day, by bucket (units/search).",
+	},
+		[]string{"bucket"},
+	)
+	LiveDetectQuotaBudget = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_livedetect_youtube_quota_budget",
+		Help: "Self-imposed daily ceiling per YouTube quota bucket.",
+	},
+		[]string{"bucket"},
+	)
+	// LiveDetectQuotaBlocked is 1 while a bucket's circuit breaker is tripped.
+	// The two buckets are independent, so search exhaustion must be visibly
+	// distinct from unit exhaustion.
+	LiveDetectQuotaBlocked = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_livedetect_youtube_quota_blocked",
+		Help: "1 when a YouTube quota bucket is exhausted and polling is paused until the daily reset.",
+	},
+		[]string{"bucket"},
+	)
+	// LiveDetectWatchlistSize is the single best indicator of the churn bug
+	// class: it should collapse to a handful within minutes of startup, and a
+	// value that stays high means ordinary uploads are being recycled.
+	LiveDetectWatchlistSize = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "lt_livedetect_watchlist_size",
+		Help: "YouTube video ids currently being polled for live state.",
+	})
+	LiveDetectLiveBroadcasts = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "lt_livedetect_live_broadcasts",
+		Help: "Broadcasts the ledger currently believes are live.",
+	})
+	// LiveDetectEventSubSubs distinguishes enabled subscriptions from wanted
+	// ones. Delivery failing silently is EventSub's characteristic fault, and a
+	// wanted-but-not-enabled subscription is the only advance warning.
+	LiveDetectEventSubSubs = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "lt_livedetect_eventsub_subscriptions",
+		Help: "Twitch EventSub subscriptions by state (wanted/enabled).",
+	},
+		[]string{"state"},
+	)
 )

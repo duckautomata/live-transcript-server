@@ -68,7 +68,11 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 
 	metrics.LiveDetectDetections.WithLabelValues(b.ChannelKey, b.Platform, mechanism).Inc()
 	if det.StartedAt > 0 {
-		metrics.LiveDetectDelaySeconds.WithLabelValues(b.Platform, mechanism).
+		// Split by whether we watched it before it started. A scheduled stream
+		// and a surprise go-live have completely different expected delays,
+		// and averaging them together hides both.
+		metrics.LiveDetectDelaySeconds.
+			WithLabelValues(b.Platform, mechanism, scheduledLabel(b)).
 			Observe(float64(det.DetectedAt - det.StartedAt))
 	}
 
@@ -92,6 +96,19 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 	// stream - unlike the per-poll churn bumpAdminChange deliberately avoids.
 	app.bumpAdminChange(b.ChannelKey)
 	return nil
+}
+
+// scheduledLabel renders the scheduled/surprise split for metrics. Only
+// YouTube broadcasts can be scheduled in advance, so Twitch reports neither
+// rather than a misleading "surprise".
+func scheduledLabel(b livedetect.Broadcast) string {
+	if b.Platform != livedetect.PlatformYouTube {
+		return "n/a"
+	}
+	if b.SawScheduled {
+		return "scheduled"
+	}
+	return "surprise"
 }
 
 // ObserveEnded implements livedetect.Sink. It stamps a broadcast as finished

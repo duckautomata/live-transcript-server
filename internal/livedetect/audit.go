@@ -49,6 +49,7 @@ func (d *Detector) runSearchAudit() {
 
 func (d *Detector) searchAuditOnce() {
 	now := time.Now()
+	checked, misses := 0, 0
 
 	channels := make([]string, 0, len(d.ytTargets))
 	for id := range d.ytTargets {
@@ -79,6 +80,7 @@ func (d *Detector) searchAuditOnce() {
 			continue
 		}
 		d.recordSuccess(MechanismYouTubeAudit)
+		checked++
 
 		key := d.ytTargets[channelID]
 		for _, videoID := range ids {
@@ -89,6 +91,7 @@ func (d *Detector) searchAuditOnce() {
 			}
 			slog.Error("search audit found a live broadcast detection had not seen",
 				"func", "Detector.searchAuditOnce", "key", key, "videoId", videoID, "channelId", channelID)
+			misses++
 			d.alerts.NotifyLiveDetectAuditMiss(key, videoID)
 
 			// Seed it so the state poller confirms and reports it, then keep
@@ -96,4 +99,11 @@ func (d *Detector) searchAuditOnce() {
 			d.watch.Seed(videoID, key, now, true)
 		}
 	}
+
+	// Logged even when it finds nothing. A silent safety net is one you cannot
+	// tell apart from a safety net that never ran, and this leg only speaks up
+	// every three hours - so the quiet case is the one worth confirming.
+	slog.Info("search audit complete", "func", "Detector.searchAuditOnce",
+		"channels_checked", checked, "missed_broadcasts", misses,
+		"search_calls_remaining_today", d.gov.Snapshot(now).SearchBudget-d.gov.Snapshot(now).SearchSpent)
 }

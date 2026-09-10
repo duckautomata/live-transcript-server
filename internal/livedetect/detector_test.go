@@ -997,7 +997,7 @@ func TestWebSubRetriesOnlyTheFailedChannels(t *testing.T) {
 }
 
 // Shutdown cancels whatever call is in flight. That is an expected consequence
-// of stopping, not a fault — reporting it produces a burst of ERROR lines and
+// of stopping, not a fault - reporting it produces a burst of ERROR lines and
 // can fire a Discord alert about a server that is merely exiting.
 func TestShutdownCancellationIsNotAFailure(t *testing.T) {
 	d := newTestDetector(t, &recordingSink{})
@@ -1080,5 +1080,51 @@ func TestWebSubPassAbortsWhenTheHubRefusesEverything(t *testing.T) {
 	}
 	if retryAfter != 2*time.Minute {
 		t.Errorf("retryAfter = %v, want the hub's 2m", retryAfter)
+	}
+}
+
+// A safety net you cannot see is indistinguishable from one that never ran.
+// The audit only speaks every three hours, so the quiet case is exactly the one
+// that has to be confirmable.
+func TestSearchAuditReportsEvenWhenItFindsNothing(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		// No live broadcasts: the normal, quiet case.
+		w.Write([]byte(`{"items":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	d, err := New(config.LiveDetectConfig{
+		Enabled: true,
+		YouTube: config.LiveDetectYouTubeConfig{
+			Enabled: true, ApiKey: "k", SearchAudit: true,
+		},
+	}, testChannels(), &recordingSink{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.youtube.BaseURL = srv.URL
+
+	d.searchAuditOnce()
+
+	if calls != 1 {
+		t.Fatalf("made %d search calls, want 1 per configured channel", calls)
+	}
+	// It must draw on the separate search bucket, never the unit budget.
+	snap := d.gov.Snapshot(time.Now())
+	if snap.SearchSpent != 1 {
+		t.Errorf("searchSpent = %d, want 1", snap.SearchSpent)
+	}
+	if snap.UnitsSpent != 0 {
+		t.Errorf("unitsSpent = %d; the audit must not touch the shared unit budget", snap.UnitsSpent)
+	}
+	// And a clean pass marks the leg healthy rather than leaving it "idle".
+	d.mu.Lock()
+	lastSuccess := d.health[MechanismYouTubeAudit].lastSuccess
+	d.mu.Unlock()
+	if lastSuccess.IsZero() {
+		t.Error("a successful audit must record leg health")
 	}
 }

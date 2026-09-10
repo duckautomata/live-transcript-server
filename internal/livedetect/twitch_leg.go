@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"live-transcript-server/internal/metrics"
 )
 
 // twitchAbsencesBeforeEnd is how many consecutive polls must omit a
@@ -480,6 +482,8 @@ func (d *Detector) reconcileEventSub() {
 	// the server challenging its Go-http-client user agent. Latched so it
 	// alerts once per outage rather than every reconcile.
 	missing := len(want) - len(have) - created
+	metrics.LiveDetectEventSubSubs.WithLabelValues("wanted").Set(float64(len(want)))
+	metrics.LiveDetectEventSubSubs.WithLabelValues("enabled").Set(float64(len(have) + created))
 	d.noteEventSubGap(missing > 0 || failed > 0, missing, failed)
 
 	if created > 0 {

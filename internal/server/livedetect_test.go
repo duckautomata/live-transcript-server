@@ -638,7 +638,7 @@ func TestScheduledFlagReachesTheNotification(t *testing.T) {
 			t.Fatalf("ObserveLive(%s): %v", tc.id, err)
 		}
 
-		// The ledger deliberately does not carry it — the schema has no
+		// The ledger deliberately does not carry it - the schema has no
 		// ALTER TABLE path, so persisting it would work in tests and silently
 		// never apply to a deployed database.
 		det, err := app.Store.GetDetection(ctx, "youtube", tc.id)

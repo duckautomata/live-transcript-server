@@ -470,9 +470,9 @@ func (d *Client) NotifyStreamDetected(b model.DetectedBroadcast, sawScheduled bo
 	// surprise go-live both arrive as "youtube-state-poll", and only the first
 	// is expected to be fast.
 	if b.Platform == "youtube" {
-		lead := "no — discovery found it already live, so this delay is the discovery gap"
+		lead := "no - discovery found it already live, so this delay is the discovery gap"
 		if sawScheduled {
-			lead = "yes — watched as a scheduled frame, so this delay is the poll interval"
+			lead = "yes - watched as a scheduled frame, so this delay is the poll interval"
 		}
 		fields = append(fields, map[string]any{"name": "Seen before it started", "value": lead, "inline": false})
 	}

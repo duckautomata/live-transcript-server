@@ -44,6 +44,15 @@ const (
 	// the sweep and the next discovery pass simply resume churning the same
 	// ids off and back onto the watchlist.
 	ytRetiredMemory = 24 * time.Hour
+	// ytMaxConsecutiveMisses is how many polls may omit an id before it is
+	// dropped. Five at the 60-second miss cadence is five minutes - far longer
+	// than any transient API hiccup, and short enough that a deleted video
+	// costs a handful of units rather than a day of them.
+	ytMaxConsecutiveMisses = 5
+	// ytAbandonedAfterSchedule drops a frame still sitting "upcoming" this long
+	// past its own announced start. Creators leave dead waiting rooms up, and
+	// one costs a poll every five minutes until the 24-hour sweep otherwise.
+	ytAbandonedAfterSchedule = 12 * time.Hour
 	// ytRetiredMax bounds the negative cache. A channel uploads a handful of
 	// times a day, so this is generous; the cap exists only so an unexpected
 	// flood cannot grow the map without limit.
@@ -73,13 +82,17 @@ type watchEntry struct {
 	EndReported bool
 	// SawUpcoming records that we watched this entry as a scheduled frame
 	// before it went live. It is what separates "the ladder did its job" from
-	// "discovery only found this after it started" in the reported delay —
+	// "discovery only found this after it started" in the reported delay -
 	// two very different numbers that otherwise look identical.
 	SawUpcoming bool
 	// NextDue is when this entry should next be polled. It is stamped on EVERY
 	// exit path, including errors and quota refusals - an entry left permanently
 	// overdue would make the scheduler compute a zero wait and spin.
 	NextDue time.Time
+	// Misses counts consecutive polls in which videos.list did not return this
+	// id at all. A deleted or privated video is gone for good, and retrying it
+	// every minute until the 24-hour sweep wastes up to 1,440 quota units.
+	Misses int
 	// Retired entries are dropped on the next sweep.
 	Retired bool
 }
@@ -133,13 +146,15 @@ func (e *watchEntry) interval(now time.Time) time.Duration {
 	case d < 15*time.Minute:
 		return ytIntervalHot
 	case d < time.Hour:
-		return ytIntervalWarm
+		return ytIntervalApproach
 	case d < 3*time.Hour:
-		return ytIntervalNear
-	case d < 6*time.Hour:
-		return ytIntervalSoon
-	default:
 		return ytIntervalCool
+	default:
+		// Hours past its scheduled time and still not started. The operator's
+		// "seconds, not minutes" requirement is about streams that start when
+		// they said they would; this tail exists only so an abandoned or
+		// long-delayed frame is still noticed, not so it is noticed fast.
+		return ytIntervalCold
 	}
 }
 
@@ -272,26 +287,48 @@ func (w *watchlist) ChannelBoosted(channelKey string, now time.Time) bool {
 	return now.Before(w.channelBoost[channelKey])
 }
 
-// Due returns the ids that should be polled now, capped at videosListBatchSize.
-// Entries are returned most-overdue first so a backlog drains fairly rather
-// than starving whatever sorts last.
+// Due returns the ids to poll now, capped at videosListBatchSize.
+//
+// It returns nothing until at least one entry is genuinely due - but once one
+// is, it FILLS THE CALL with every other entry too, most-overdue first.
+//
+// That is the whole cost model. videos.list charges one unit per CALL for up
+// to fifty ids, so an entry that rides along on a call we were making anyway is
+// free. Returning only the strictly-due entries silently threw that away: with
+// three entries on staggered schedules we paid three units per cycle instead of
+// one, and the waste grew linearly with the number of scheduled frames - the
+// exact thing batching was supposed to prevent.
+//
+// Polling an entry earlier than its ladder interval asks is harmless: the
+// interval is a bound on staleness, not a quota. Everything simply stays
+// fresher, and entries polled together drift back into a single batch, which
+// keeps the saving.
 func (w *watchlist) Due(now time.Time) []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	type due struct {
+	type candidate struct {
 		id   string
 		over time.Duration
 	}
-	var list []due
+	var list []candidate
+	anyDue := false
 	for id, e := range w.entries {
 		if e.Retired {
 			continue
 		}
-		if !now.Before(e.NextDue) {
-			list = append(list, due{id: id, over: now.Sub(e.NextDue)})
+		over := now.Sub(e.NextDue)
+		if over >= 0 {
+			anyDue = true
 		}
+		list = append(list, candidate{id: id, over: over})
 	}
+	if !anyDue {
+		return nil
+	}
+
+	// Most overdue first, so a backlog past the fifty-id cap drains fairly
+	// rather than starving whatever sorts last.
 	sort.Slice(list, func(i, j int) bool { return list[i].over > list[j].over })
 
 	out := make([]string, 0, min(len(list), videosListBatchSize))
@@ -299,6 +336,34 @@ func (w *watchlist) Due(now time.Time) []string {
 		out = append(out, list[i].id)
 	}
 	return out
+}
+
+// MarkMissing records that videos.list did not return these ids, backing them
+// off and eventually dropping them.
+//
+// They are NOT added to the retired cache: a video that reappears (an
+// unlisted-then-public flip, a lifted region block) should be rediscoverable on
+// the next discovery pass, and the negative cache would blind us to it for a
+// day. A genuinely deleted video is off the uploads playlist too, so it simply
+// never comes back.
+func (w *watchlist) MarkMissing(ids []string, now time.Time) (dropped []string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for _, id := range ids {
+		e, ok := w.entries[id]
+		if !ok {
+			continue
+		}
+		e.Misses++
+		if e.Misses >= ytMaxConsecutiveMisses {
+			delete(w.entries, id)
+			dropped = append(dropped, id)
+			continue
+		}
+		e.NextDue = now.Add(ytIntervalCool)
+	}
+	return dropped
 }
 
 // Defer pushes back the next poll for a set of ids. Used on every non-success
@@ -329,6 +394,7 @@ func (w *watchlist) Observe(videoID string, state State, scheduled time.Time, no
 	if !ok {
 		return false
 	}
+	e.Misses = 0
 	if state != StateUnknown {
 		if state == StateLive {
 			e.SawLive = true
@@ -397,6 +463,14 @@ func (w *watchlist) Sweep(now time.Time) []string {
 			// Only an ENDED entry is worth remembering. It is a finished
 			// broadcast or an ordinary upload that will sit on the playlist
 			// forever, and re-seeding it is pure churn.
+			retire = append(retire, id)
+		// Still "upcoming" long past the time it announced: the creator moved
+		// on and left the waiting room up. Judged against the schedule rather
+		// than first sighting, so a frame created days early is not dropped
+		// while it is still legitimately pending.
+		case e.State == StateUpcoming && !e.Scheduled.IsZero() &&
+			now.Sub(e.Scheduled) > ytAbandonedAfterSchedule:
+			dropped = append(dropped, id)
 			retire = append(retire, id)
 		case e.State == StateUpcoming && now.Sub(e.FirstSeen) > ytUpcomingMaxAge:
 			dropped = append(dropped, id)
@@ -473,7 +547,7 @@ func (w *watchlist) Size() int {
 }
 
 // SawUpcoming reports whether an id was observed as a scheduled frame before
-// going live. False means discovery first saw it already live — the case where
+// going live. False means discovery first saw it already live - the case where
 // the reported delay measures the discovery gap rather than the poll ladder.
 func (w *watchlist) SawUpcoming(videoID string) bool {
 	w.mu.Lock()

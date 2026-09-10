@@ -323,6 +323,7 @@ func (d *Detector) Start() error {
 			"twitch_eventsub", d.cfg.Twitch.EventSub,
 			"youtube", d.cfg.YouTube.Enabled,
 			"youtube_websub", d.cfg.YouTube.WebSub,
+			"youtube_search_audit", d.cfg.YouTube.SearchAudit,
 			"watching", d.watchSummary(),
 		)
 	})
@@ -656,6 +657,10 @@ func (d *Detector) staleAlertMinutes() int {
 // the failure mode where a loop is alive but producing nothing.
 func (d *Detector) runHealthWatch() {
 	for {
+		// Published before the first sleep so a dashboard is populated at
+		// startup rather than five minutes into it.
+		d.publishGauges()
+
 		if !d.sleep(5 * time.Minute) {
 			return
 		}
@@ -687,6 +692,36 @@ func (d *Detector) runHealthWatch() {
 			d.alerts.NotifyLiveDetectDown(q.mechanism, fmt.Errorf("no successful cycle for %s", q.after), 0)
 		}
 	}
+}
+
+// publishGauges refreshes the point-in-time metrics that cannot be derived
+// from counters: current quota standing, watchlist size, and how many
+// broadcasts are believed live.
+func (d *Detector) publishGauges() {
+	if d.cfg.YouTube.Enabled {
+		snap := d.gov.Snapshot(time.Now())
+		metrics.LiveDetectQuotaSpentToday.WithLabelValues("units").Set(float64(snap.UnitsSpent))
+		metrics.LiveDetectQuotaSpentToday.WithLabelValues("search").Set(float64(snap.SearchSpent))
+		metrics.LiveDetectQuotaBudget.WithLabelValues("units").Set(float64(snap.UnitBudget))
+		metrics.LiveDetectQuotaBudget.WithLabelValues("search").Set(float64(snap.SearchBudget))
+		metrics.LiveDetectQuotaBlocked.WithLabelValues("units").Set(boolGauge(snap.UnitsBlocked))
+		metrics.LiveDetectQuotaBlocked.WithLabelValues("search").Set(boolGauge(snap.SearchBlocked))
+		metrics.LiveDetectWatchlistSize.Set(float64(d.watch.Size()))
+	}
+
+	ctx, cancel := d.pollCtx(10 * time.Second)
+	defer cancel()
+	if active, err := d.sink.ActiveBroadcasts(ctx); err == nil {
+		metrics.LiveDetectLiveBroadcasts.Set(float64(len(active)))
+	}
+}
+
+// boolGauge renders a boolean as the 0/1 a Prometheus gauge expects.
+func boolGauge(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // observe hands a confirmed live broadcast to the sink, which dedupes it.
