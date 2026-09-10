@@ -333,28 +333,32 @@ func (d *Detector) HandleWebSubPush(feed *WebSubFeed) {
 // idempotent, so over-renewing costs nothing.
 func (d *Detector) runWebSubRenew() {
 	backoff := time.Duration(0)
+	// pending is the set still to subscribe. Empty means "all of them", which
+	// is what a scheduled renewal does; after a partial failure it narrows to
+	// just the channels that failed.
+	var pending []string
 	for {
 		// A 503 from the hub means "try again later", but the normal cadence
 		// is twelve hours - so without a retry schedule one bad afternoon
 		// costs the entire push path for half a day. Back off from minutes,
 		// not from the renewal interval.
-		failed, hubRetryAfter := d.webSubRenewOnce()
-		if failed {
-			backoff = nextWebSubBackoff(backoff)
-			wait, source := backoff, "backoff"
-			// Prefer the hub's own guidance over our schedule when it gave
-			// any: it knows when it will be well, and on a short overload that
-			// recovers in minutes rather than the tens we would have waited.
-			if clamped := clampHubRetry(hubRetryAfter); clamped > 0 {
-				wait, source = clamped, "hub Retry-After"
-			}
-			slog.Warn("websub renewal failed; retrying sooner than the normal cadence",
-				"func", "Detector.runWebSubRenew", "retry_in", wait.String(), "source", source)
-			if !d.sleep(wait) {
+		stillFailing, hubRetryAfter := d.webSubRenewOnce(pending)
+		if len(stillFailing) > 0 {
+			// Retry ONLY what failed. Re-subscribing a channel that already
+			// succeeded achieves nothing and adds load to a hub that has just
+			// asked us to back off.
+			pending = stillFailing
+			backoff = nextWebSubBackoff(backoff, hubRetryAfter)
+			slog.Warn("websub renewal failed; retrying only the failed channels",
+				"func", "Detector.runWebSubRenew",
+				"remaining", len(pending), "retry_in", backoff.String())
+			if !d.sleep(backoff) {
 				return
 			}
 			continue
 		}
+
+		pending = nil
 		backoff = 0
 		if !d.sleep(webSubRenewInterval) {
 			return
@@ -380,35 +384,54 @@ func clampHubRetry(d time.Duration) time.Duration {
 	return d
 }
 
-// nextWebSubBackoff doubles from five minutes up to an hour. The cap matters
-// more than the growth: the hub is flaky rather than hostile, and giving up for
-// longer than an hour would mean a transient outage silently costing most of a
-// day of push coverage.
-func nextWebSubBackoff(current time.Duration) time.Duration {
+// nextWebSubBackoff picks the next retry delay.
+//
+// The hub's Retry-After is a FLOOR, not the whole answer. Google's hub repeats
+// the same static "2 minutes" however long it has been unwell, so obeying it
+// literally means retrying every two minutes forever against a service that is
+// explicitly overloaded — compliant, but not useful to either side. So the
+// first delay starts from the hub's suggestion, and then doubles on each
+// consecutive failure, never dropping below whatever the hub last asked for.
+func nextWebSubBackoff(current, hubRetryAfter time.Duration) time.Duration {
 	const (
-		first = 5 * time.Minute
-		max   = time.Hour
+		firstWithoutHint = 5 * time.Minute
+		ceiling          = time.Hour
 	)
-	if current <= 0 {
-		return first
+	hint := clampHubRetry(hubRetryAfter)
+
+	var next time.Duration
+	switch {
+	case current <= 0 && hint > 0:
+		next = hint
+	case current <= 0:
+		next = firstWithoutHint
+	default:
+		next = current * 2
 	}
-	if next := current * 2; next < max {
-		return next
+
+	if next < hint {
+		next = hint
 	}
-	return max
+	if next > ceiling {
+		next = ceiling
+	}
+	return next
 }
 
-// webSubRenewOnce subscribes (or renews) every channel and reports whether any
-// channel failed.
-func (d *Detector) webSubRenewOnce() (anyFailed bool, hubRetryAfter time.Duration) {
+// webSubRenewOnce subscribes (or renews) the given channels, or every channel
+// when the list is empty. It returns the channels that failed and the longest
+// Retry-After the hub supplied.
+func (d *Detector) webSubRenewOnce(only []string) (failedChannels []string, hubRetryAfter time.Duration) {
 	callback := d.webSubCallbackURL()
-	channels := make([]string, 0, len(d.ytTargets))
-	for id := range d.ytTargets {
-		channels = append(channels, id)
+
+	channels := only
+	if len(channels) == 0 {
+		channels = make([]string, 0, len(d.ytTargets))
+		for id := range d.ytTargets {
+			channels = append(channels, id)
+		}
 	}
 	slices.Sort(channels)
-
-	failed := 0
 	for _, channelID := range channels {
 		// Each channel gets its own deadline: one slow hub response must not
 		// consume a shared budget and cascade-fail every channel after it.
@@ -421,7 +444,7 @@ func (d *Detector) webSubRenewOnce() (anyFailed bool, hubRetryAfter time.Duratio
 		cancel()
 
 		if err != nil {
-			failed++
+			failedChannels = append(failedChannels, channelID)
 			// The hub tells us when to come back on an overload; take the
 			// longest suggestion across the pass so one channel's shorter
 			// window cannot make us hammer a hub that is still unwell.
@@ -442,13 +465,13 @@ func (d *Detector) webSubRenewOnce() (anyFailed bool, hubRetryAfter time.Duratio
 	// failuresBeforeAlert count channels instead of consecutive cycles, and
 	// recording success against the delivery leg would let a healthy hub
 	// subscription mask the fact that no push has ever arrived.
-	if failed > 0 {
+	if len(failedChannels) > 0 {
 		d.recordFailure(MechanismYouTubeWebSubRenew,
-			fmt.Errorf("%d of %d websub subscriptions could not be renewed", failed, len(channels)))
-		return true, hubRetryAfter
+			fmt.Errorf("%d of %d websub subscriptions could not be renewed", len(failedChannels), len(channels)))
+		return failedChannels, hubRetryAfter
 	}
 	d.recordSuccess(MechanismYouTubeWebSubRenew)
-	return false, 0
+	return nil, 0
 }
 
 // WebSubTopicSecret returns the HMAC secret for a topic so the HTTP handler

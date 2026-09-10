@@ -813,28 +813,54 @@ func TestProbeTreatsTransportFailureAsInconclusive(t *testing.T) {
 }
 
 func TestWebSubBackoffGrowsAndCaps(t *testing.T) {
-	got := nextWebSubBackoff(0)
+	got := nextWebSubBackoff(0, 0)
 	if got != 5*time.Minute {
-		t.Fatalf("first backoff = %v, want 5m", got)
+		t.Fatalf("first backoff without a hub hint = %v, want 5m", got)
 	}
 	// It must climb, so a persistently sick hub is not hammered...
 	for _, want := range []time.Duration{10 * time.Minute, 20 * time.Minute, 40 * time.Minute} {
-		got = nextWebSubBackoff(got)
+		got = nextWebSubBackoff(got, 0)
 		if got != want {
 			t.Fatalf("backoff = %v, want %v", got, want)
 		}
 	}
 	// ...but it must cap well under the 12h renewal cadence, or a transient
 	// outage silently costs most of a day of push coverage.
-	got = nextWebSubBackoff(got)
+	got = nextWebSubBackoff(got, 0)
 	if got != time.Hour {
 		t.Fatalf("backoff = %v, want the 1h cap", got)
 	}
-	if got = nextWebSubBackoff(got); got != time.Hour {
+	if got = nextWebSubBackoff(got, 0); got != time.Hour {
 		t.Fatalf("backoff = %v, want it to stay capped", got)
 	}
 	if got >= webSubRenewInterval {
 		t.Fatalf("a retry backoff of %v is no better than waiting for the normal cadence", got)
+	}
+}
+
+// Google's hub repeats a static "retry in 2 minutes" however long it has been
+// unwell, so obeying it literally means retrying every two minutes forever
+// against a service that is explicitly overloaded. It is a floor, not the
+// whole answer.
+func TestWebSubBackoffEscalatesPastAStaticRetryAfter(t *testing.T) {
+	const hint = 2 * time.Minute
+
+	// The first delay takes the hub at its word rather than waiting our longer
+	// default, so a genuinely brief overload costs only what it should.
+	got := nextWebSubBackoff(0, hint)
+	if got != hint {
+		t.Fatalf("first delay = %v, want the hub's %v", got, hint)
+	}
+	// Consecutive failures escalate anyway.
+	for _, want := range []time.Duration{4 * time.Minute, 8 * time.Minute, 16 * time.Minute} {
+		got = nextWebSubBackoff(got, hint)
+		if got != want {
+			t.Fatalf("backoff = %v, want %v; a static hint must not pin the retry rate", got, want)
+		}
+	}
+	// And the hub's floor is still respected if our schedule would go sooner.
+	if got := nextWebSubBackoff(0, 45*time.Minute); got != 45*time.Minute {
+		t.Fatalf("backoff = %v, want the hub's longer floor honoured", got)
 	}
 }
 
@@ -902,5 +928,70 @@ func TestWebSubHTTPErrorCarriesRetryAfter(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "retry") {
 		t.Errorf("the message should mention the retry hint, got %q", err.Error())
+	}
+}
+
+// A partial failure must retry only what failed. Re-subscribing a channel that
+// already succeeded achieves nothing and adds load to a hub that has just asked
+// us to back off.
+func TestWebSubRetriesOnlyTheFailedChannels(t *testing.T) {
+	var mu sync.Mutex
+	var attempts []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		topic := r.Form.Get("hub.topic")
+		mu.Lock()
+		attempts = append(attempts, topic)
+		mu.Unlock()
+
+		// One channel succeeds; the rest are refused with a retry hint.
+		if strings.Contains(topic, "UCgood") {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	d, err := New(config.LiveDetectConfig{
+		Enabled:       true,
+		PublicBaseURL: "https://example.test",
+		YouTube: config.LiveDetectYouTubeConfig{
+			Enabled: true, ApiKey: "k", WebSub: true, WebSubSecret: "s",
+		},
+	}, []config.ChannelConfig{
+		{Name: "good", YouTubeChannelId: "UCgoodaaaaaaaaaaaaaaaaaa"},
+		{Name: "bad", YouTubeChannelId: "UCbadaaaaaaaaaaaaaaaaaaa"},
+	}, &recordingSink{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.websub.HubURL = srv.URL
+
+	failed, retryAfter := d.webSubRenewOnce(nil)
+	if len(failed) != 1 || !strings.Contains(failed[0], "UCbad") {
+		t.Fatalf("failed = %v, want just the failing channel", failed)
+	}
+	if retryAfter != 2*time.Minute {
+		t.Errorf("retryAfter = %v, want the hub's 2m", retryAfter)
+	}
+
+	// The retry pass touches only the failure.
+	mu.Lock()
+	attempts = nil
+	mu.Unlock()
+
+	d.webSubRenewOnce(failed)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 1 {
+		t.Fatalf("retry made %d requests, want 1 (only the failed channel)", len(attempts))
+	}
+	if !strings.Contains(attempts[0], "UCbad") {
+		t.Errorf("retry hit %q, want the failed channel", attempts[0])
 	}
 }
