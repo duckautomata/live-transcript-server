@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,7 +31,7 @@ const (
 	webSubRenewInterval  = 12 * time.Hour       // renew far more often than needed
 	// webSubRequestTimeout is generous on purpose. Google's hub is a legacy
 	// App Engine service that is routinely slow to answer a subscribe, and
-	// this runs twice a day per channel — so waiting is free, while timing out
+	// this runs twice a day per channel - so waiting is free, while timing out
 	// costs the entire push path until the next renewal cycle.
 	webSubRequestTimeout = 45 * time.Second
 )
@@ -128,9 +129,54 @@ func (c *WebSubClient) request(ctx context.Context, mode, channelID, callbackURL
 
 	// 202 is the documented async answer; 204 appears for sync verification.
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("websub %s returned status %d", mode, resp.StatusCode)
+		return &WebSubHTTPError{
+			Mode:       mode,
+			Status:     resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		}
 	}
 	return nil
+}
+
+// WebSubHTTPError is a non-2xx answer from the hub, carrying the hub's own
+// Retry-After when it supplied one.
+//
+// Google's hub answers an overload with 503 plus Retry-After rather than
+// failing the request outright, so honouring that value recovers as fast as the
+// hub permits instead of waiting out a backoff we invented.
+type WebSubHTTPError struct {
+	Mode       string
+	Status     int
+	RetryAfter time.Duration
+}
+
+func (e *WebSubHTTPError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("websub %s returned status %d (hub asked for a retry in %s)",
+			e.Mode, e.Status, e.RetryAfter)
+	}
+	return fmt.Sprintf("websub %s returned status %d", e.Mode, e.Status)
+}
+
+// parseRetryAfter reads a Retry-After header in either documented form: delay
+// seconds, or an HTTP date. Returns 0 when absent or unparseable.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := t.Sub(now); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // WebSubFeed is the Atom document the hub POSTs.

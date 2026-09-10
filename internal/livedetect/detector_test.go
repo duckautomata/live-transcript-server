@@ -811,3 +811,96 @@ func TestProbeTreatsTransportFailureAsInconclusive(t *testing.T) {
 		t.Errorf("detail should say inconclusive, got %q", detail)
 	}
 }
+
+func TestWebSubBackoffGrowsAndCaps(t *testing.T) {
+	got := nextWebSubBackoff(0)
+	if got != 5*time.Minute {
+		t.Fatalf("first backoff = %v, want 5m", got)
+	}
+	// It must climb, so a persistently sick hub is not hammered...
+	for _, want := range []time.Duration{10 * time.Minute, 20 * time.Minute, 40 * time.Minute} {
+		got = nextWebSubBackoff(got)
+		if got != want {
+			t.Fatalf("backoff = %v, want %v", got, want)
+		}
+	}
+	// ...but it must cap well under the 12h renewal cadence, or a transient
+	// outage silently costs most of a day of push coverage.
+	got = nextWebSubBackoff(got)
+	if got != time.Hour {
+		t.Fatalf("backoff = %v, want the 1h cap", got)
+	}
+	if got = nextWebSubBackoff(got); got != time.Hour {
+		t.Fatalf("backoff = %v, want it to stay capped", got)
+	}
+	if got >= webSubRenewInterval {
+		t.Fatalf("a retry backoff of %v is no better than waiting for the normal cadence", got)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 9, 10, 6, 44, 56, 0, time.UTC)
+
+	// The form Google's hub actually sends.
+	if got := parseRetryAfter("120", now); got != 2*time.Minute {
+		t.Errorf("delay-seconds form: got %v, want 2m", got)
+	}
+	// The HTTP-date form the spec also permits.
+	if got := parseRetryAfter(now.Add(90*time.Second).Format(http.TimeFormat), now); got < 80*time.Second || got > 90*time.Second {
+		t.Errorf("http-date form: got %v, want about 90s", got)
+	}
+	// Absent, unparseable, or already elapsed all mean "no guidance".
+	for _, v := range []string{"", "   ", "soon", "0", "-5", now.Add(-time.Hour).Format(http.TimeFormat)} {
+		if got := parseRetryAfter(v, now); got != 0 {
+			t.Errorf("parseRetryAfter(%q) = %v, want 0", v, got)
+		}
+	}
+}
+
+// The hub knows when it will be well; a short overload should not cost us the
+// full invented backoff. But its guidance still has to be bounded.
+func TestClampHubRetry(t *testing.T) {
+	if got := clampHubRetry(2 * time.Minute); got != 2*time.Minute {
+		t.Errorf("a sane value must pass through, got %v", got)
+	}
+	if got := clampHubRetry(time.Second); got != 30*time.Second {
+		t.Errorf("a tiny value must be floored, got %v", got)
+	}
+	if got := clampHubRetry(48 * time.Hour); got != time.Hour {
+		t.Errorf("an absurd value must be capped, got %v", got)
+	}
+	if got := clampHubRetry(0); got != 0 {
+		t.Errorf("no guidance must stay zero so the backoff is used, got %v", got)
+	}
+}
+
+// The hub answers an overload with 503 + Retry-After rather than a transport
+// failure, so that has to survive as structured data rather than a string.
+func TestWebSubHTTPErrorCarriesRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewWebSubClient("secret")
+	c.HubURL = srv.URL
+
+	err := c.Subscribe(context.Background(), "UCaaaaaaaaaaaaaaaaaaaaaa", "https://example.test/cb")
+	if err == nil {
+		t.Fatal("expected an error for a 503")
+	}
+	var httpErr *WebSubHTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("error %v is not a *WebSubHTTPError; the retry hint would be lost", err)
+	}
+	if httpErr.Status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", httpErr.Status)
+	}
+	if httpErr.RetryAfter != 2*time.Minute {
+		t.Errorf("retryAfter = %v, want 2m", httpErr.RetryAfter)
+	}
+	if !strings.Contains(err.Error(), "retry") {
+		t.Errorf("the message should mention the retry hint, got %q", err.Error())
+	}
+}

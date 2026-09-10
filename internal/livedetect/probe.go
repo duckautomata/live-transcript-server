@@ -16,8 +16,8 @@ import (
 const MechanismCallbackProbe = "callback-probe"
 
 // callbackProbeInterval is how often the inbound path is re-checked. Edge
-// configuration changes under you — a bot-protection feature switched on, a
-// rule edited — so this is a standing check, not a startup one.
+// configuration changes under you - a bot-protection feature switched on, a
+// rule edited - so this is a standing check, not a startup one.
 const callbackProbeInterval = time.Hour
 
 // runCallbackProbe verifies that the public callback URLs actually reach this
@@ -26,7 +26,7 @@ const callbackProbeInterval = time.Hour
 // This exists because a bot challenge in front of the server is the one failure
 // that is invisible from both ends. Cloudflare's AI Labyrinth (and similar
 // protections) answer a suspicious request with a decoy page and a 2xx status
-// rather than an error — so Twitch records the notification as successfully
+// rather than an error - so Twitch records the notification as successfully
 // delivered and discards it, no retry, no revocation, no delivery-failure
 // counter. Nothing reaches this process, so nothing here can log it, and the
 // only symptom is detections that quietly always come from the polling leg.
@@ -113,7 +113,7 @@ func (d *Detector) probeCallbacksOnce() {
 //
 // An unsigned request is the ideal probe: the handler rejects it with 403
 // having already set the marker header, so a healthy result is unmistakable and
-// nothing is mutated. What matters is not the status but WHO answered — a
+// nothing is mutated. What matters is not the status but WHO answered - a
 // decoy page carries a plausible status and no marker.
 func (d *Detector) probeOne(url string) (reached bool, detail string) {
 	ctx, cancel := context.WithTimeout(d.ctx, 20*time.Second)
@@ -124,11 +124,14 @@ func (d *Detector) probeOne(url string) (reached bool, detail string) {
 		return false, "could not build probe request: " + err.Error()
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Identify the probe so the handler answers without walking the real push
+	// path, which would log a parse failure for this throwaway body.
+	req.Header.Set(HeaderCallbackProbe, "1")
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		// A transport failure is not proof of interception — the probe has to
+		// A transport failure is not proof of interception - the probe has to
 		// leave the container, reach the edge and come back, and that hairpin
 		// can fail for reasons unrelated to bot protection. Report it as
 		// inconclusive rather than crying wolf.

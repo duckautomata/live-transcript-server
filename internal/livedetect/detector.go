@@ -350,7 +350,7 @@ func (d *Detector) Close() error {
 // Discovery is the one cost that scales with channel count and is paid whether
 // or not anyone streams: one unit per channel per cycle, forever. State polling
 // is nearly free by comparison, but the fast ladder during an actual broadcast
-// costs roughly 700-2,000 units per stream — so a discovery bill that already
+// costs roughly 700-2,000 units per stream - so a discovery bill that already
 // eats most of the budget means detection dies partway through a busy day, at
 // which point the fast ladder is exactly what stops working.
 //
@@ -718,8 +718,8 @@ func (d *Detector) reseedFromLedger() {
 			d.watch.SeedClaimed(b.ID, b.ChannelKey, now)
 			yt++
 		case PlatformTwitch:
-			// Twitch has no watchlist — the poll leg re-derives state from
-			// Helix every cycle — but it DOES need to know which broadcast it
+			// Twitch has no watchlist - the poll leg re-derives state from
+			// Helix every cycle - but it DOES need to know which broadcast it
 			// was tracking. Without this the absence path bails on an empty
 			// twitchLiveID, so a broadcast that ended while the process was
 			// down keeps ended_at = 0 forever: it is handed back by

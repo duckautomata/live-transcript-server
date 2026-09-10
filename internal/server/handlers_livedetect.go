@@ -64,6 +64,12 @@ func (app *App) twitchEventSubHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
+	// The reachability probe only needs to learn who answered, which the
+	// marker above already tells it.
+	if r.Header.Get(livedetect.HeaderCallbackProbe) != "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	// RAW BYTES FIRST. The HMAC covers the exact bytes on the wire: decoding
 	// and re-encoding JSON changes key order and whitespace, and every
@@ -174,6 +180,10 @@ func (app *App) youtubeWebSubHandler(w http.ResponseWriter, r *http.Request) {
 
 	if !app.LiveDetect.WebSubEnabled() {
 		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	if r.Header.Get(livedetect.HeaderCallbackProbe) != "" {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 

@@ -172,8 +172,8 @@ Google cannot send an API key - and verify an HMAC over the raw request body:
 - `GET,POST /livedetect/youtube/websub`
 
 **Behind a CDN, exempt `/livedetect/` from bot protection.** Twitch and the
-WebSub hub both send as `Go-http-client/1.1` from cloud IPs — exactly what bot
-protection targets — and the failure is worse than a block: Cloudflare's AI
+WebSub hub both send as `Go-http-client/1.1` from cloud IPs - exactly what bot
+protection targets - and the failure is worse than a block: Cloudflare's AI
 Labyrinth answers with a decoy page and a **2xx**, so the sender records the
 notification as delivered and discards it, while nothing reaches this process to
 be logged. An hourly probe checks the callback path from the outside and alerts

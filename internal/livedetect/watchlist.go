@@ -401,7 +401,7 @@ func (w *watchlist) Sweep(now time.Time) []string {
 	}
 	// An ABANDONED UPCOMING frame is deliberately NOT retired. Retiring it
 	// would blind discovery to that id for a full day, and a stream scheduled
-	// more than 24 hours ahead is swept while still upcoming — so retiring it
+	// more than 24 hours ahead is swept while still upcoming - so retiring it
 	// could mean missing the go-live entirely. Letting it be rediscovered
 	// costs one re-seed per day per abandoned frame, which is nothing.
 	for _, id := range retire {

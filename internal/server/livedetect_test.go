@@ -540,7 +540,7 @@ func TestBackgroundWorkIsRefusedAfterClose(t *testing.T) {
 }
 
 // The reachability marker must be present on EVERY response from both
-// callbacks, including the rejection paths — it is what the probe uses to tell
+// callbacks, including the rejection paths - it is what the probe uses to tell
 // "our handler answered" from "the edge answered with a decoy". An unsigned
 // request is the probe's own shape, so that case matters most.
 func TestCallbackMarkerIsAlwaysSet(t *testing.T) {
@@ -583,6 +583,31 @@ func TestCallbackMarkerIsAlwaysSet(t *testing.T) {
 			if rr.Header().Get(livedetect.HeaderCallbackMarker) == "" {
 				t.Fatalf("no %s header on a %d response; the probe could not tell this from an intercepted request",
 					livedetect.HeaderCallbackMarker, rr.Code)
+			}
+		})
+	}
+}
+
+// The probe must not walk the real push path: its throwaway body would trip a
+// parse warning on every run, and a warning that always fires is a warning
+// nobody reads.
+func TestProbeRequestsAreAnsweredWithoutSideEffects(t *testing.T) {
+	for _, path := range []string{livedetect.TwitchEventSubPath, livedetect.YouTubeWebSubPath} {
+		t.Run(path, func(t *testing.T) {
+			_, mux := setupDetectApp(t)
+
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
+			req.Header.Set(livedetect.HeaderCallbackProbe, "1")
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusNoContent {
+				t.Errorf("status = %d, want 204", rr.Code)
+			}
+			// The marker is the whole point - without it the probe cannot tell
+			// this from an intercepted request.
+			if rr.Header().Get(livedetect.HeaderCallbackMarker) == "" {
+				t.Error("a probe response must still carry the handler marker")
 			}
 		})
 	}

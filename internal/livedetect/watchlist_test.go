@@ -366,8 +366,8 @@ func TestSeedWakesThePolLoop(t *testing.T) {
 }
 
 // A stream scheduled more than 24 hours ahead is swept while still upcoming.
-// Retiring it would blind discovery to that id for a full day — potentially
-// straight through the go-live — so only ended entries are remembered.
+// Retiring it would blind discovery to that id for a full day - potentially
+// straight through the go-live - so only ended entries are remembered.
 func TestAbandonedUpcomingFramesAreNotRetired(t *testing.T) {
 	w := newWatchlist()
 	w.Seed("far-future-stream", "doki", base, false)

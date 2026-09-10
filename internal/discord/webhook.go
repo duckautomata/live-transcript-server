@@ -622,8 +622,8 @@ func (d *Client) NotifyLiveDetectAuditMiss(channelKey, videoID string) {
 // This is the loudest alert in the detector, and it pings, because it is the
 // only failure that is invisible from both ends. A bot challenge in front of
 // the server answers with a decoy page and a 2xx status, so Twitch records the
-// notification as delivered and discards it — no retry, no revocation, no
-// delivery-failure counter — while nothing reaches this process to be logged.
+// notification as delivered and discards it - no retry, no revocation, no
+// delivery-failure counter - while nothing reaches this process to be logged.
 // Without this alert the only symptom is that every detection quietly arrives
 // via the slower polling leg.
 func (d *Client) NotifyLiveDetectCallbackBlocked(blocked []string) {
@@ -637,9 +637,9 @@ func (d *Client) NotifyLiveDetectCallbackBlocked(blocked []string) {
 				"title": "Live Detection Callback Is Being Intercepted",
 				"description": fmt.Sprintf(
 					"A probe of the push callback URL was answered by something other than this server:\n%s\n\n"+
-						"Push notifications are being silently discarded — a bot challenge returns a 2xx, so the sender treats the delivery as successful and never retries. "+
+						"Push notifications are being silently discarded - a bot challenge returns a 2xx, so the sender treats the delivery as successful and never retries. "+
 						"Detection still works via polling, but at minutes rather than seconds.\n\n"+
-						"Fix: add an edge rule that skips bot protection for the `/livedetect/` paths. They are safe to exempt — every push is HMAC-verified over the raw body and size-limited.",
+						"Fix: add an edge rule that skips bot protection for the `/livedetect/` paths. They are safe to exempt - every push is HMAC-verified over the raw body and size-limited.",
 					"• "+strings.Join(blocked, "\n• ")),
 				"color":     15158332, // Red
 				"timestamp": time.Now().Format(time.RFC3339),

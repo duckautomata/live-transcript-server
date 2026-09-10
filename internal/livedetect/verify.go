@@ -27,6 +27,15 @@ const (
 // internet and this process answered the request.
 const HeaderCallbackMarker = "X-Eventsub-Handler"
 
+// HeaderCallbackProbe marks the detector's own reachability probe so the
+// callback handlers can answer it without running (or logging) the real push
+// path. Without it the probe's throwaway body trips a "did not parse" warning
+// on every run, which trains the operator to ignore that warning.
+//
+// It grants no authority: the handler does nothing but set the marker and
+// return, so a forged probe header achieves exactly nothing.
+const HeaderCallbackProbe = "X-Livedetect-Probe"
+
 // Twitch EventSub message types.
 const (
 	TwitchMsgVerification = "webhook_callback_verification"

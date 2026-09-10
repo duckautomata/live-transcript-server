@@ -138,7 +138,7 @@ type twitchEnding struct{ login, id string }
 // The lock covers only the state update, never the sink calls: reporting an end
 // takes a database write, and holding this mutex across it would block the
 // EventSub delivery path behind it. The unlock is deferred so no panic in here
-// can leave the mutex held — it is shared with the webhook handlers, and
+// can leave the mutex held - it is shared with the webhook handlers, and
 // leaking it once would wedge both legs permanently and hang shutdown.
 func (d *Detector) applyTwitchPresence(logins []string, present map[string]TwitchStream, now time.Time) []twitchEnding {
 	var ended []twitchEnding
@@ -297,8 +297,8 @@ func (d *Detector) handleStreamOnline(ctx context.Context, ev TwitchStreamOnline
 // trackTwitchLive records the broadcast currently believed live for a login.
 //
 // The unlock is deferred rather than written out: this mutex is taken on the
-// EventSub delivery path AND the poll path, so leaking it once — to a panic
-// between Lock and Unlock — would wedge the poll leg permanently and hang
+// EventSub delivery path AND the poll path, so leaking it once - to a panic
+// between Lock and Unlock - would wedge the poll leg permanently and hang
 // shutdown, since the blocked goroutine holds the app WaitGroup.
 func (d *Detector) trackTwitchLive(login, broadcastID string, now time.Time) {
 	d.twitchAbsentMu.Lock()

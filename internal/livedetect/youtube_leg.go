@@ -332,15 +332,75 @@ func (d *Detector) HandleWebSubPush(feed *WebSubFeed) {
 // tracking an expiry we might never have observed. Re-subscribing is
 // idempotent, so over-renewing costs nothing.
 func (d *Detector) runWebSubRenew() {
+	backoff := time.Duration(0)
 	for {
-		d.webSubRenewOnce()
+		// A 503 from the hub means "try again later", but the normal cadence
+		// is twelve hours - so without a retry schedule one bad afternoon
+		// costs the entire push path for half a day. Back off from minutes,
+		// not from the renewal interval.
+		failed, hubRetryAfter := d.webSubRenewOnce()
+		if failed {
+			backoff = nextWebSubBackoff(backoff)
+			wait, source := backoff, "backoff"
+			// Prefer the hub's own guidance over our schedule when it gave
+			// any: it knows when it will be well, and on a short overload that
+			// recovers in minutes rather than the tens we would have waited.
+			if clamped := clampHubRetry(hubRetryAfter); clamped > 0 {
+				wait, source = clamped, "hub Retry-After"
+			}
+			slog.Warn("websub renewal failed; retrying sooner than the normal cadence",
+				"func", "Detector.runWebSubRenew", "retry_in", wait.String(), "source", source)
+			if !d.sleep(wait) {
+				return
+			}
+			continue
+		}
+		backoff = 0
 		if !d.sleep(webSubRenewInterval) {
 			return
 		}
 	}
 }
 
-func (d *Detector) webSubRenewOnce() {
+// clampHubRetry bounds a hub-supplied Retry-After into a sane window. A floor
+// stops a tiny value from turning a struggling hub into a hot loop; the same
+// one-hour ceiling as the backoff stops an absurd one from costing a day of
+// push coverage. Zero means the hub said nothing.
+func clampHubRetry(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	const floor = 30 * time.Second
+	if d < floor {
+		return floor
+	}
+	if d > time.Hour {
+		return time.Hour
+	}
+	return d
+}
+
+// nextWebSubBackoff doubles from five minutes up to an hour. The cap matters
+// more than the growth: the hub is flaky rather than hostile, and giving up for
+// longer than an hour would mean a transient outage silently costing most of a
+// day of push coverage.
+func nextWebSubBackoff(current time.Duration) time.Duration {
+	const (
+		first = 5 * time.Minute
+		max   = time.Hour
+	)
+	if current <= 0 {
+		return first
+	}
+	if next := current * 2; next < max {
+		return next
+	}
+	return max
+}
+
+// webSubRenewOnce subscribes (or renews) every channel and reports whether any
+// channel failed.
+func (d *Detector) webSubRenewOnce() (anyFailed bool, hubRetryAfter time.Duration) {
 	callback := d.webSubCallbackURL()
 	channels := make([]string, 0, len(d.ytTargets))
 	for id := range d.ytTargets {
@@ -352,7 +412,7 @@ func (d *Detector) webSubRenewOnce() {
 	for _, channelID := range channels {
 		// Each channel gets its own deadline: one slow hub response must not
 		// consume a shared budget and cascade-fail every channel after it.
-		// This deliberately bypasses pollCtx's 20s cap — that cap exists to
+		// This deliberately bypasses pollCtx's 20s cap - that cap exists to
 		// keep latency-critical polls from delaying shutdown, and renewal is
 		// neither latency-critical nor frequent. It still derives from d.ctx,
 		// so Close cancels it immediately.
@@ -362,6 +422,13 @@ func (d *Detector) webSubRenewOnce() {
 
 		if err != nil {
 			failed++
+			// The hub tells us when to come back on an overload; take the
+			// longest suggestion across the pass so one channel's shorter
+			// window cannot make us hammer a hub that is still unwell.
+			var httpErr *WebSubHTTPError
+			if errors.As(err, &httpErr) && httpErr.RetryAfter > hubRetryAfter {
+				hubRetryAfter = httpErr.RetryAfter
+			}
 			slog.Error("failed to renew websub subscription", "func", "Detector.webSubRenewOnce",
 				"channelId", channelID, "err", err)
 			continue
@@ -378,9 +445,10 @@ func (d *Detector) webSubRenewOnce() {
 	if failed > 0 {
 		d.recordFailure(MechanismYouTubeWebSubRenew,
 			fmt.Errorf("%d of %d websub subscriptions could not be renewed", failed, len(channels)))
-		return
+		return true, hubRetryAfter
 	}
 	d.recordSuccess(MechanismYouTubeWebSubRenew)
+	return false, 0
 }
 
 // WebSubTopicSecret returns the HMAC secret for a topic so the HTTP handler
