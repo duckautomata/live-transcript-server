@@ -995,3 +995,90 @@ func TestWebSubRetriesOnlyTheFailedChannels(t *testing.T) {
 		t.Errorf("retry hit %q, want the failed channel", attempts[0])
 	}
 }
+
+// Shutdown cancels whatever call is in flight. That is an expected consequence
+// of stopping, not a fault — reporting it produces a burst of ERROR lines and
+// can fire a Discord alert about a server that is merely exiting.
+func TestShutdownCancellationIsNotAFailure(t *testing.T) {
+	d := newTestDetector(t, &recordingSink{})
+
+	d.recordFailure(MechanismTwitchPoll, errors.New("before shutdown"))
+	d.mu.Lock()
+	before := d.health[MechanismTwitchPoll].failures
+	d.mu.Unlock()
+	if before != 1 {
+		t.Fatalf("a real failure should count, got %d", before)
+	}
+
+	d.cancel() // as Close does
+
+	for range 10 {
+		d.recordFailure(MechanismTwitchPoll, errors.New("context canceled"))
+	}
+	d.mu.Lock()
+	after := d.health[MechanismTwitchPoll].failures
+	alerted := d.health[MechanismTwitchPoll].alerted
+	d.mu.Unlock()
+
+	if after != before {
+		t.Errorf("failures went %d -> %d during shutdown; cancellation must not count", before, after)
+	}
+	if alerted {
+		t.Error("shutdown must never raise an alert")
+	}
+}
+
+// The hub is overloaded as a whole, not per channel. Once several in a row have
+// refused, working through the rest adds load to a service that has already
+// asked us to stop and delays our own backoff by 20s a channel.
+func TestWebSubPassAbortsWhenTheHubRefusesEverything(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	var channels []config.ChannelConfig
+	for i := range 6 {
+		channels = append(channels, config.ChannelConfig{
+			Name:             "ch" + string(rune('a'+i)),
+			YouTubeChannelId: "UC" + string(rune('a'+i)) + "aaaaaaaaaaaaaaaaaaaaa",
+		})
+	}
+	d, err := New(config.LiveDetectConfig{
+		Enabled:       true,
+		PublicBaseURL: "https://example.test",
+		YouTube: config.LiveDetectYouTubeConfig{
+			Enabled: true, ApiKey: "k", WebSub: true, WebSubSecret: "s",
+		},
+	}, channels, &recordingSink{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.websub.HubURL = srv.URL
+
+	failed, retryAfter := d.webSubRenewOnce(nil)
+
+	mu.Lock()
+	got := requests
+	mu.Unlock()
+
+	if got != webSubAbortAfterConsecutiveFailures {
+		t.Errorf("made %d requests, want %d before giving up on the pass",
+			got, webSubAbortAfterConsecutiveFailures)
+	}
+	// Everything still needs retrying, including what was never attempted.
+	if len(failed) != len(channels) {
+		t.Errorf("failed = %d channels, want all %d marked for retry", len(failed), len(channels))
+	}
+	if retryAfter != 2*time.Minute {
+		t.Errorf("retryAfter = %v, want the hub's 2m", retryAfter)
+	}
+}

@@ -22,6 +22,10 @@ const (
 	// ytRestartDiscovery is the discovery cadence while a channel is inside
 	// its post-broadcast restart window.
 	ytRestartDiscovery = 30 * time.Second
+	// webSubAbortAfterConsecutiveFailures stops a renewal pass once the hub
+	// has clearly refused everything, rather than working through the rest at
+	// twenty seconds apiece.
+	webSubAbortAfterConsecutiveFailures = 3
 )
 
 // ytDiscoveryInterval is the effective uploads-playlist scan cadence.
@@ -432,7 +436,8 @@ func (d *Detector) webSubRenewOnce(only []string) (failedChannels []string, hubR
 		}
 	}
 	slices.Sort(channels)
-	for _, channelID := range channels {
+	consecutive := 0
+	for i, channelID := range channels {
 		// Each channel gets its own deadline: one slow hub response must not
 		// consume a shared budget and cascade-fail every channel after it.
 		// This deliberately bypasses pollCtx's 20s cap - that cap exists to
@@ -444,6 +449,13 @@ func (d *Detector) webSubRenewOnce(only []string) (failedChannels []string, hubR
 		cancel()
 
 		if err != nil {
+			// Shutdown cancels the in-flight request; that is not a failure
+			// worth reporting, and the remaining channels are moot.
+			if d.shuttingDown() {
+				slog.Debug("abandoning websub renewal during shutdown",
+					"func", "Detector.webSubRenewOnce", "channelId", channelID)
+				return nil, 0
+			}
 			failedChannels = append(failedChannels, channelID)
 			// The hub tells us when to come back on an overload; take the
 			// longest suggestion across the pass so one channel's shorter
@@ -454,8 +466,22 @@ func (d *Detector) webSubRenewOnce(only []string) (failedChannels []string, hubR
 			}
 			slog.Error("failed to renew websub subscription", "func", "Detector.webSubRenewOnce",
 				"channelId", channelID, "err", err)
+
+			// The hub is overloaded as a whole, not per channel: once several
+			// in a row have refused, working through the rest just adds load
+			// to a service that has already asked us to stop, and delays our
+			// own backoff by twenty seconds a channel.
+			consecutive++
+			if consecutive >= webSubAbortAfterConsecutiveFailures && i+1 < len(channels) {
+				slog.Warn("hub is refusing every request; abandoning the rest of this pass",
+					"func", "Detector.webSubRenewOnce",
+					"failed_in_a_row", consecutive, "skipped", len(channels)-(i+1))
+				failedChannels = append(failedChannels, channels[i+1:]...)
+				break
+			}
 			continue
 		}
+		consecutive = 0
 		slog.Info("websub subscription requested", "func", "Detector.webSubRenewOnce",
 			"channelId", channelID, "key", d.ytTargets[channelID])
 	}

@@ -493,8 +493,24 @@ func (d *Detector) recordSuccess(mechanism string) {
 	}
 }
 
+// shuttingDown reports whether Close has been called.
+//
+// Every leg's context derives from d.ctx, so shutdown surfaces as a
+// cancellation error on whatever call was in flight. That is an expected
+// consequence of stopping, not a fault, and treating it as one produces a
+// burst of ERROR lines and can fire a Discord alert about a server that is
+// merely exiting.
+func (d *Detector) shuttingDown() bool {
+	return d.ctx.Err() != nil
+}
+
 // recordFailure marks a leg failed and alerts once per outage.
 func (d *Detector) recordFailure(mechanism string, err error) {
+	if d.shuttingDown() {
+		slog.Debug("ignoring a leg failure during shutdown",
+			"func", "Detector.recordFailure", "mechanism", mechanism, "err", err)
+		return
+	}
 	metrics.LiveDetectPolls.WithLabelValues(mechanism, "error").Inc()
 
 	d.mu.Lock()
