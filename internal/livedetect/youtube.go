@@ -55,8 +55,8 @@ type YTVideo struct {
 		ChannelID string `json:"channelId"`
 		Title     string `json:"title"`
 		// LiveBroadcastContent is "live", "upcoming" or "none". Livestreams and
-		// premieres are INDISTINGUISHABLE here , both report "live" while
-		// running , which is exactly what we want, since both are in scope.
+		// premieres are INDISTINGUISHABLE here - both report "live" while
+		// running - which is exactly what we want, since both are in scope.
 		LiveBroadcastContent string `json:"liveBroadcastContent"`
 		PublishedAt          string `json:"publishedAt"`
 	} `json:"snippet"`
@@ -72,8 +72,8 @@ type YTVideo struct {
 //
 // The nil check on LiveStreamingDetails is deliberately PERMISSIVE. Google's
 // reference scopes that object to "an upcoming, live, or completed live
-// broadcast" and never mentions premieres, so requiring it , or requiring
-// actualStartTime , would silently drop every premiere the day the API stops
+// broadcast" and never mentions premieres, so requiring it - or requiring
+// actualStartTime - would silently drop every premiere the day the API stops
 // attaching it. A missing object means "queue it anyway"; the object is read
 // only to detect an already-ended broadcast and to supply the start time.
 //
@@ -106,7 +106,7 @@ func (v YTVideo) State() State {
 // ONLY actualStartTime is accepted. scheduledStartTime is deliberately NOT a
 // fallback: the common real case is "scheduled 19:00, actually starts 21:30",
 // and using the scheduled time would report a stream detected four seconds
-// after going live as a two-and-a-half hour delay , worse than reporting
+// after going live as a two-and-a-half hour delay - worse than reporting
 // nothing, because it is indistinguishable from a genuine miss and the delay
 // is the number this whole exercise exists to measure.
 func (v YTVideo) StartedAt() time.Time {
@@ -154,7 +154,7 @@ func (v YTVideo) ChannelID() string {
 // The API key travels in the X-goog-api-key HEADER, never the query string.
 // A transport failure returns a *url.Error that stringifies the whole URL, and
 // that error is logged, stored on the leg's health record (which the admin
-// endpoint serves as JSON) and rendered into a Discord alert embed , so a key
+// endpoint serves as JSON) and rendered into a Discord alert embed - so a key
 // in the query string would leak into all three. Keeping it in a header means
 // no error-formatting path can ever carry it, without any redaction to
 // remember.
@@ -213,7 +213,7 @@ func isQuotaExceeded(body []byte) bool {
 //
 // This is the detection oracle. It costs ONE quota unit per call regardless of
 // how many ids it carries, so watching four videos costs exactly as much as
-// watching one , which is what makes a three-second poll interval affordable.
+// watching one - which is what makes a three-second poll interval affordable.
 //
 // contentDetails is deliberately not requested: nothing in the classification
 // reads duration, and asking for it invites re-adding a premiere-vs-livestream
@@ -292,7 +292,7 @@ func (c *YouTubeClient) PlaylistItems(ctx context.Context, playlistID string, ma
 
 // SearchLive asks directly which video a channel is live on.
 //
-// This draws on search.list's OWN quota bucket , 100 calls per day for the
+// This draws on search.list's OWN quota bucket - 100 calls per day for the
 // whole project, separate from the 10,000 units everything else shares. That
 // makes it useless as a primary detector but valuable as a low-rate audit and
 // as the contingency for a channel whose uploads playlist does not surface an

@@ -287,7 +287,7 @@ func TestTwitchPollIntervalIsClamped(t *testing.T) {
 // A restart mid-broadcast must resume watching what the ledger still believes
 // is live. Without this the in-memory watchlist comes back empty, the id only
 // returns on the next discovery pass, and until then nothing notices the
-// broadcast ending , which also suppresses the restart re-poll.
+// broadcast ending - which also suppresses the restart re-poll.
 func TestReseedFromLedgerRestoresWatchlist(t *testing.T) {
 	sink := &recordingSink{active: []Broadcast{
 		{Platform: PlatformYouTube, ChannelKey: "doki", ID: "vid-live"},
@@ -382,7 +382,7 @@ func TestTwitchIDChangeEndsTheOldBroadcast(t *testing.T) {
 }
 
 // A stale subscription that is not in the enabled state cannot deliver, so it
-// must never be adopted as healthy , that was the path by which a webhook
+// must never be adopted as healthy - that was the path by which a webhook
 // blocked at the edge looked fine forever.
 func TestPendingAndYoung(t *testing.T) {
 	now := base
@@ -436,8 +436,8 @@ func TestStalenessWindowFollowsEachLegsCadence(t *testing.T) {
 
 // The real deployment is served under a path prefix that the reverse proxy
 // strips (api.duck-automata.com/live/* -> this container), so publicBaseUrl
-// carries a path. The callbacks must keep that prefix , a third party dials the
-// public URL, not the container's , while the reconciler's ownership check
+// carries a path. The callbacks must keep that prefix - a third party dials the
+// public URL, not the container's - while the reconciler's ownership check
 // still resolves to the bare host.
 func TestCallbackURLsSurviveAPathPrefixedBase(t *testing.T) {
 	d, err := New(config.LiveDetectConfig{
@@ -508,9 +508,9 @@ func TestPerChannelPlatformTargeting(t *testing.T) {
 	}
 }
 
-// A malformed identifier fails SILENTLY at the API , Helix answers an unknown
+// A malformed identifier fails SILENTLY at the API - Helix answers an unknown
 // login with an empty array, and the Data API an unknown channel with no items
-// , so a typo would read as "never goes live" indefinitely. It must be caught
+// - so a typo would read as "never goes live" indefinitely. It must be caught
 // at construction and reported, while leaving every other channel working.
 func TestMalformedIdentifiersAreRejectedPerChannel(t *testing.T) {
 	channels := []config.ChannelConfig{

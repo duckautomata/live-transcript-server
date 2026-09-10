@@ -136,7 +136,7 @@ liveDetect:
   #
   # Behind Cloudflare, check that Twitch's sender is not being challenged:
   # its user agent is Go-http-client/1.1 and Browser Integrity Check is on by
-  # default. A blocked callback fails SILENTLY , Twitch reports
+  # default. A blocked callback fails SILENTLY - Twitch reports
   # webhook_callback_verification_failed and nothing reaches the application
   # log. Detection then falls back to the (slower) polling legs.
   publicBaseUrl: ""
@@ -146,7 +146,7 @@ liveDetect:
 
   twitch:
     enabled: false
-    # https://dev.twitch.tv/console/apps , a client-credentials app token.
+    # https://dev.twitch.tv/console/apps - a client-credentials app token.
     clientId: ""
     clientSecret: ""
 
@@ -162,8 +162,8 @@ liveDetect:
 
     # Helix polling cadence, the safety net beneath EventSub. Values below 60
     # are clamped: Twitch caches per edge server, so polling faster returns
-    # inconsistent results , including a phantom stream-id change that reads as
-    # a restart , without detecting anything sooner.
+    # inconsistent results - including a phantom stream-id change that reads as
+    # a restart - without detecting anything sooner.
     pollSeconds: 60
 
   youtube:
@@ -175,7 +175,7 @@ liveDetect:
     apiKey: ""
 
     # WebSub (PubSubHubbub) push discovery. The payload carries NO live-state
-    # field, so it never detects anything by itself , it hands the state poller
+    # field, so it never detects anything by itself - it hands the state poller
     # a video id seconds after a frame appears, which is what turns a scheduled
     # stream or premiere going live into a seconds-latency detection instead of
     # one gated on the next discovery pass.
@@ -186,7 +186,7 @@ liveDetect:
 
     # How often each channel's uploads playlist is scanned for video ids we have
     # not seen. This is the latency floor for an UNSCHEDULED surprise go-live
-    # only , every premiere and any stream with a waiting room is already on the
+    # only - every premiere and any stream with a waiting room is already on the
     # watchlist and is caught within seconds by the state poller.
     discoverySeconds: 120
 

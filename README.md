@@ -107,7 +107,7 @@ The server can detect for itself when a configured channel goes live, so a
 stream is still noticed when the Discord bot is down or the worker misses it.
 
 **It is an observer.** It never queues work for the worker, never writes the
-`streams` table, and never activates anything , the worker still owns
+`streams` table, and never activates anything - the worker still owns
 activation. Its only output is a Discord notification recording when the stream
 started, when we detected it, the delay between them, and which mechanism won.
 That measurement is the point: it is what decides whether this is trustworthy
@@ -126,7 +126,7 @@ Six mechanisms run together, deliberately redundant:
 
 The split matters. Push paths give the latency but are **edge-triggered**: one
 dropped delivery and the stream is never seen. Polling paths are slower but
-**level-triggered** and self-healing , they re-derive the truth every cycle, so
+**level-triggered** and self-healing - they re-derive the truth every cycle, so
 they recover from a missed webhook, a revoked subscription, a Cloudflare block,
 or a restart mid-stream. Running both means push supplies the speed and poll
 supplies the guarantee.
@@ -134,14 +134,14 @@ supplies the guarantee.
 Detection is opted into **per channel** by which identifiers a channel config
 carries: `twitchLogin` alone means Twitch only, `youtubeChannelId` alone means
 YouTube only, both means both, neither means the channel is not watched. Both
-values are format-checked at startup , every way of getting one wrong fails
+values are format-checked at startup - every way of getting one wrong fails
 silently at the API, so a typo would otherwise read as "never goes live"
-indefinitely , and the startup log prints the resulting mapping.
+indefinitely - and the startup log prints the resulting mapping.
 
 Two rules hold the design together:
 
 - **The ledger claim.** Every mechanism calls `Sink.ObserveLive` on every cycle
-  it sees a broadcast , hundreds of times per stream, from several goroutines.
+  it sees a broadcast - hundreds of times per stream, from several goroutines.
   `Store.ClaimDetection` is an `INSERT OR IGNORE` whose `RowsAffected` decides
   who notifies, so exactly one wins. That is what makes the redundancy free,
   and the mechanism recorded on the winning row is a real measurement of which
@@ -160,8 +160,8 @@ unscheduled surprise go-live waits for a discovery pass. `videos.list` costs one
 quota unit per **call** regardless of how many ids it carries, which is what
 makes a three-second poll affordable.
 
-Both push callbacks are public and unauthenticated by necessity , Twitch and
-Google cannot send an API key , and verify an HMAC over the raw request body:
+Both push callbacks are public and unauthenticated by necessity - Twitch and
+Google cannot send an API key - and verify an HMAC over the raw request body:
 
 - `POST /livedetect/twitch/eventsub`
 - `GET,POST /livedetect/youtube/websub`

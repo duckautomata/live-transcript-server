@@ -20,7 +20,7 @@ const detectionRetention = 30 * 24 * time.Hour
 // ObserveLive implements livedetect.Sink.
 //
 // It is called by every detection mechanism on every cycle it sees a broadcast
-// live , hundreds of times over one stream, from several goroutines at once.
+// live - hundreds of times over one stream, from several goroutines at once.
 // Store.ClaimDetection is what collapses that into a single notification: the
 // INSERT OR IGNORE means exactly one caller wins, and the winner is the one
 // that sends the Discord message. Everyone else returns silently.
@@ -88,14 +88,14 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 	// Wake the admin page so a detection shows up while the operator is
 	// watching a soak, rather than on the next slow refresh. Detections are
 	// once-per-broadcast, so this costs one extra long-poll recheck per
-	// stream , unlike the per-poll churn bumpAdminChange deliberately avoids.
+	// stream - unlike the per-poll churn bumpAdminChange deliberately avoids.
 	app.bumpAdminChange(b.ChannelKey)
 	return nil
 }
 
 // ObserveEnded implements livedetect.Sink. It stamps a broadcast as finished
 // so the detector can stop watching it and can accelerate its next discovery
-// pass , a restart is a brand-new broadcast id, so the window right after an
+// pass - a restart is a brand-new broadcast id, so the window right after an
 // end is exactly when a new one is most likely to appear.
 //
 // Best-effort by design: a missed end costs only that acceleration. Nothing

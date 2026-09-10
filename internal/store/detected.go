@@ -16,7 +16,7 @@ import (
 // them wins: the winner returns true and sends the notification, everyone else
 // returns false and does nothing. No locking, no leader election, and the
 // mechanism recorded on the row is a real measurement of which path is fastest
-// , which is the entire point of the shadow-mode soak.
+// - which is the entire point of the shadow-mode soak.
 //
 // It is also why a restart is handled with no special case: a restarted
 // broadcast has a new platform id, so it is a new row and it notifies again.

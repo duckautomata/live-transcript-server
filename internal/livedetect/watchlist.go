@@ -72,7 +72,7 @@ type watchEntry struct {
 	// EndReported latches the single end report per entry.
 	EndReported bool
 	// NextDue is when this entry should next be polled. It is stamped on EVERY
-	// exit path, including errors and quota refusals , an entry left permanently
+	// exit path, including errors and quota refusals - an entry left permanently
 	// overdue would make the scheduler compute a zero wait and spin.
 	NextDue time.Time
 	// Retired entries are dropped on the next sweep.
@@ -193,7 +193,7 @@ func (w *watchlist) Seed(videoID, channelKey string, now time.Time, boost bool) 
 	}
 	if e.Retired {
 		// A previously retired id reappearing in discovery is worth another
-		// look , creators un-hide and reschedule frames.
+		// look - creators un-hide and reschedule frames.
 		e.Retired = false
 		e.NextDue = now
 		isNew = true
@@ -229,7 +229,7 @@ func (w *watchlist) Wake() <-chan struct{} { return w.wake }
 // after a restart must still report the end. A plain Seed would leave SawLive
 // false, Observe would never call the end worthy, ended_at would stay zero
 // forever, and the row would be handed back on every restart and never pruned.
-// No boost , the go-live has already happened, so there is nothing to race.
+// No boost - the go-live has already happened, so there is nothing to race.
 func (w *watchlist) SeedClaimed(videoID, channelKey string, now time.Time) {
 	if videoID == "" {
 		return
@@ -297,8 +297,8 @@ func (w *watchlist) Due(now time.Time) []string {
 }
 
 // Defer pushes back the next poll for a set of ids. Used on every non-success
-// exit path , a transport error, a quota refusal, an id the API did not
-// return , so no entry can stay permanently overdue and spin the scheduler.
+// exit path - a transport error, a quota refusal, an id the API did not
+// return - so no entry can stay permanently overdue and spin the scheduler.
 func (w *watchlist) Defer(ids []string, until time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

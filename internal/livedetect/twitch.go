@@ -139,7 +139,7 @@ func (c *TwitchClient) invalidate() {
 
 // do performs a Helix request, retrying exactly once on 401 with a freshly
 // minted token. body is passed as bytes rather than an io.Reader precisely so
-// the retry can replay it , a consumed reader would send an empty body the
+// the retry can replay it - a consumed reader would send an empty body the
 // second time.
 func (c *TwitchClient) do(ctx context.Context, method, path string, body []byte, out any) error {
 	for attempt := range 2 {
@@ -254,7 +254,7 @@ type TwitchStream struct {
 // fit in one request, so every configured channel is covered by a single call
 // costing one rate-limit point.
 //
-// A login that is offline is simply ABSENT from the response , the endpoint is
+// A login that is offline is simply ABSENT from the response - the endpoint is
 // level-triggered on presence. Absence is not proof of being offline though:
 // Helix responses are edge-cached and a genuinely live channel can be missing
 // from one poll, which is why end detection requires several consecutive
@@ -317,7 +317,7 @@ const (
 
 // CreateEventSubSubscription registers a webhook subscription for one
 // broadcaster. A 409 means an identical subscription already exists, which is
-// success for our purposes , reconciliation adopts it.
+// success for our purposes - reconciliation adopts it.
 func (c *TwitchClient) CreateEventSubSubscription(ctx context.Context, subType, broadcasterID, callback, secret string) (*EventSubSubscription, error) {
 	body, err := json.Marshal(map[string]any{
 		"type":      subType,
@@ -347,7 +347,7 @@ func (c *TwitchClient) CreateEventSubSubscription(ctx context.Context, subType, 
 //
 // The scope is the CLIENT ID, not this deployment: a dev box or a twitch-cli
 // session sharing the credentials shows up here too. Callers must never delete
-// a subscription solely because they did not create it , see the callback-host
+// a subscription solely because they did not create it - see the callback-host
 // check in the reconciler.
 func (c *TwitchClient) ListEventSubSubscriptions(ctx context.Context) ([]EventSubSubscription, error) {
 	var out []EventSubSubscription

@@ -203,7 +203,7 @@ func (s *Store) GetFileIDsInRange(ctx context.Context, channelID string, streamI
 
 // GetAllMediaFileIDs returns the file IDs of every line of a stream that has
 // media stored, ordered by line ID. Same selection as GetFileIDsInRange
-// without the bounds , a full-VOD render covers the whole transcript.
+// without the bounds - a full-VOD render covers the whole transcript.
 func (s *Store) GetAllMediaFileIDs(ctx context.Context, channelID string, streamID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT file_id FROM transcripts WHERE channel_id = ? AND stream_id = ? AND media_available = 1 ORDER BY line_id ASC", channelID, streamID)
 	if err != nil {

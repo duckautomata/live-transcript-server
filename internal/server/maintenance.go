@@ -9,7 +9,7 @@ import (
 )
 
 // workerActiveWindow is how recently a worker must have been seen to be
-// considered active , shared by the public /status endpoint, the admin info
+// considered active - shared by the public /status endpoint, the admin info
 // endpoint, and the offline-alert sweep.
 const workerActiveWindow = 5 * time.Minute
 

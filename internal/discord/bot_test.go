@@ -32,7 +32,7 @@ func TestParsePingcordMessage(t *testing.T) {
 			wantOK:  true,
 		},
 		{
-			// Embed text is intentionally ignored , only Content is parsed.
+			// Embed text is intentionally ignored - only Content is parsed.
 			name: "embed-only message is ignored",
 			msg: &discordgo.Message{
 				Embeds: []*discordgo.MessageEmbed{

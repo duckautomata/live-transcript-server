@@ -130,7 +130,7 @@ type Detector struct {
 // Configuration problems DISABLE a leg and return a descriptive error rather
 // than being fatal. The caller logs it and carries on: this is an observer,
 // and nothing about a misconfigured shadow-mode detector should be able to
-// stop the transcript server , the actual product , from starting.
+// stop the transcript server - the actual product - from starting.
 func New(cfg config.LiveDetectConfig, channels []config.ChannelConfig, sink Sink, alerts *discord.Client) (*Detector, error) {
 	if !cfg.Enabled {
 		return nil, nil
@@ -549,7 +549,7 @@ func (d *Detector) Status() Status {
 // cycle. A single global staleness threshold is wrong: the search audit runs
 // every 3 hours and WebSub renewal every 12, so a 15-minute rule would report
 // both as permanently degraded and alert on every cycle. Push legs return zero
-// , they are legitimately silent when nobody is streaming, and silence there is
+// - they are legitimately silent when nobody is streaming, and silence there is
 // not evidence of a fault.
 func (d *Detector) expectedCadence(mechanism string) time.Duration {
 	switch mechanism {
@@ -646,7 +646,7 @@ var errNoResolvableLogins = errors.New("no configured twitch login could be reso
 // Without this a restart mid-broadcast loses track of a stream it already
 // detected: the watchlist is in-memory, so the id would only come back on the
 // next discovery pass, and until then nothing would notice the broadcast
-// ending , which in turn suppresses the accelerated re-poll that catches a
+// ending - which in turn suppresses the accelerated re-poll that catches a
 // restart. Re-seeding cannot cause a duplicate notification, because the
 // ledger claim for those broadcasts is already taken.
 func (d *Detector) reseedFromLedger() {

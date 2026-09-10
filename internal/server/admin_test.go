@@ -229,7 +229,7 @@ func TestAdminRestart(t *testing.T) {
 		t.Error("expected no restart pending after cancel")
 	}
 
-	// Cancel again , should still be 204 (idempotent), not 404
+	// Cancel again - should still be 204 (idempotent), not 404
 	rec = adminReq(t, mux, http.MethodDelete, "/doki/admin/restart", "admin-doki", nil)
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("cancel when nothing pending: status=%d want 204 (idempotent)", rec.Code)
@@ -239,7 +239,7 @@ func TestAdminRestart(t *testing.T) {
 func TestAdminDeleteStreamDataOnly(t *testing.T) {
 	app, mux := setupTestApp(t, []string{"doki"})
 	seedExampleData(t, app, "doki")
-	// Live streams cannot be deleted , deactivate before testing the happy path.
+	// Live streams cannot be deleted - deactivate before testing the happy path.
 	if err := app.Store.SetStreamLive(context.Background(), "doki", "stream-1", false); err != nil {
 		t.Fatalf("deactivate: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestAdminDeleteStreamDataOnly(t *testing.T) {
 		t.Errorf("delete unknown: status=%d want 404", rec.Code)
 	}
 
-	// Default delete (no ?media param) , data-only
+	// Default delete (no ?media param) - data-only
 	rec = adminReq(t, mux, http.MethodDelete, "/doki/admin/stream/stream-1", "admin-doki", nil)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("delete: status=%d body=%s", rec.Code, rec.Body.String())
@@ -353,7 +353,7 @@ func streamRow(t *testing.T, app *App, channel, streamID string) *model.Stream {
 // dialAndDrain connects a websocket client and consumes the messages sent on
 // connect, leaving the connection ready to observe broadcasts. connectMessages
 // is always 1 (the sync message) plus 1 more when the channel has past streams
-// to send , a read timeout permanently breaks a gorilla connection, so this is
+// to send - a read timeout permanently breaks a gorilla connection, so this is
 // counted rather than drained until quiet.
 func dialAndDrain(t *testing.T, mux *http.ServeMux, channel string, connectMessages int) (*websocket.Conn, func()) {
 	t.Helper()
@@ -603,8 +603,8 @@ func TestAdminEditStreamBroadcastsUpdate(t *testing.T) {
 }
 
 // The past-stream broadcast holds one stream out as the channel's current one.
-// When the live stream is not the most recently activated , a state the worker
-// can leave behind by resyncing an older stream , holding out the newest one
+// When the live stream is not the most recently activated - a state the worker
+// can leave behind by resyncing an older stream - holding out the newest one
 // would leave viewers with an empty list instead of the streams that ended.
 func TestAdminEditStreamPastStreamsPrefersLiveStream(t *testing.T) {
 	app, mux := setupTestApp(t, []string{"doki"})
@@ -734,7 +734,7 @@ func TestAdminDeleteStreamWithMedia(t *testing.T) {
 		t.Fatalf("delete: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	// The storage delete is fire-and-forget on a goroutine , poll for it to land.
+	// The storage delete is fire-and-forget on a goroutine - poll for it to land.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(mediaPath); os.IsNotExist(err) {

@@ -24,7 +24,7 @@ func isValidID(s string) bool {
 }
 
 // RegisterRoutes registers every endpoint on mux. Routes are grouped by
-// audience , worker (X-API-Key), admin (X-Admin-Key), public , and each
+// audience - worker (X-API-Key), admin (X-Admin-Key), public - and each
 // audience maps to one handlers_*.go file. A new endpoint is one handler in
 // the matching file plus one line here.
 func (app *App) RegisterRoutes(mux *http.ServeMux) {
@@ -85,8 +85,8 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 // resolved channel.
 type channelHandler func(w http.ResponseWriter, r *http.Request, cs *ChannelState)
 
-// withChannel resolves the {channel} path value once , 404, metric, and log
-// on failure , and passes the channel state to the handler. Every handler on
+// withChannel resolves the {channel} path value once - 404, metric, and log
+// on failure - and passes the channel state to the handler. Every handler on
 // a /{channel}/... route uses this instead of repeating the lookup.
 func (app *App) withChannel(h channelHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

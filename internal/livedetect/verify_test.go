@@ -158,7 +158,7 @@ func TestSeenCacheDedupesAndExpires(t *testing.T) {
 	if c.SeenOrRecord("a", now.Add(2*time.Minute)) {
 		t.Error("an id past the ttl must no longer be remembered")
 	}
-	// An empty id carries no identity, so it can never be deduped , treating
+	// An empty id carries no identity, so it can never be deduped - treating
 	// it as seen would drop every message that arrived without one.
 	if c.SeenOrRecord("", now) {
 		t.Error("an empty id must never report as seen")

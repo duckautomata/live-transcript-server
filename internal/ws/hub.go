@@ -49,7 +49,7 @@ type Client struct {
 	send chan Message
 	done chan struct{}
 	// closeOnce guards close(done). The send channel is deliberately never
-	// closed , done is the removal signal and the GC reclaims send , so
+	// closed - done is the removal signal and the GC reclaims send - so
 	// TrySend can never panic on a closed channel.
 	closeOnce sync.Once
 }
@@ -82,7 +82,7 @@ type Hub struct {
 	// connections counts reserved connection slots, not registered clients:
 	// Reserve takes a slot before the HTTP upgrade so the cap is enforced
 	// atomically (a plain read-then-upgrade would let concurrent upgrades
-	// slip past maxConn , TOCTOU).
+	// slip past maxConn - TOCTOU).
 	connections int
 	maxConn     int
 

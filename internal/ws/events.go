@@ -89,7 +89,7 @@ type EventPastStreamsData struct {
 // (by an admin via the admin UI). It carries the stream's complete state after
 // the edit, so a client can replace whatever it holds for StreamID rather than
 // work out what changed. Clients should apply it to whichever they hold the
-// stream in , the current stream or the past-stream list.
+// stream in - the current stream or the past-stream list.
 //
 // IsLive is included to complete the record, but an edit never changes it:
 // live/ended transitions stay the worker's, and keep arriving as EventStatus.

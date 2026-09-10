@@ -39,8 +39,8 @@ const (
 // WebSubClient manages hub subscriptions for YouTube channel feeds.
 //
 // WebSub here is a DISCOVERY hint, not a detection mechanism. The Atom payload
-// carries no live-state field at all , no liveBroadcastContent, no
-// liveStreamingDetails, no duration , so a push can only ever mean "a video
+// carries no live-state field at all - no liveBroadcastContent, no
+// liveStreamingDetails, no duration - so a push can only ever mean "a video
 // record for this channel was created or changed". What it buys is the video
 // id, seconds after a frame appears, which is what lets the state poller catch
 // the upcoming->live transition within seconds instead of waiting for a

@@ -137,7 +137,7 @@ func newSeenCache(ttl time.Duration) *seenCache {
 //
 // Callers must apply this ONLY to notifications. Running it over verification
 // handshakes would answer a redelivered challenge with an empty body, which
-// puts the subscription into webhook_callback_verification_failed , a state
+// puts the subscription into webhook_callback_verification_failed - a state
 // Twitch does not retry out of and that requires manual repair.
 func (c *seenCache) SeenOrRecord(id string, now time.Time) bool {
 	if id == "" {

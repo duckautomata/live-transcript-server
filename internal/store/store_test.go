@@ -410,7 +410,7 @@ func TestStore_UpdateStream(t *testing.T) {
 		t.Fatalf("expected ErrNoUpdate for an empty update, got %v", err)
 	}
 
-	// A single-field update leaves every other column alone , activated_time
+	// A single-field update leaves every other column alone - activated_time
 	// especially, since it is what orders the stream lists.
 	if err := s.UpdateStream(ctx, channelID, streamID, StreamUpdate{StartTime: &newStart}); err != nil {
 		t.Fatalf("UpdateStream failed: %v", err)
@@ -463,7 +463,7 @@ func TestStore_UpdateStream(t *testing.T) {
 	}
 }
 
-// An edit must never touch another stream in the channel , in particular it
+// An edit must never touch another stream in the channel - in particular it
 // cannot start or end one, which stays the worker's business.
 func TestStore_UpdateStreamLeavesOtherStreamsAlone(t *testing.T) {
 	s := newTestStore(t)

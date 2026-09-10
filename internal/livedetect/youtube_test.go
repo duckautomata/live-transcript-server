@@ -224,7 +224,7 @@ func isQuotaError(err error) bool { return errors.Is(err, errYouTubeQuota) }
 // The API key must never reach an error string. Transport errors return a
 // *url.Error that stringifies the whole URL, and that error is logged, stored
 // on the leg health record the admin endpoint serves as JSON, and rendered
-// into a Discord alert , so a key in the query string would leak to all three.
+// into a Discord alert - so a key in the query string would leak to all three.
 func TestYouTubeAPIKeyNeverAppearsInErrors(t *testing.T) {
 	const sentinel = "SUPER-SECRET-API-KEY-SENTINEL"
 

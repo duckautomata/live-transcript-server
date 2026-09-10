@@ -46,10 +46,10 @@ func TestIncomingEndpoints(t *testing.T) {
 		t.Errorf("GET body=%q want %q", rec.Body.String(), want)
 	}
 
-	// GET should be idempotent , call again, same result
+	// GET should be idempotent - call again, same result
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/doki/incoming", nil).WithContext(ctx))
-	// (no api key , should fail auth)
+	// (no api key - should fail auth)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 without api key, got %d", rec.Code)
 	}

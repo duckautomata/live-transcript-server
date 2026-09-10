@@ -25,7 +25,7 @@ import (
 var adminUIFS embed.FS
 
 // adminUIHandler serves the embedded admin UI page. The page itself is static
-// , auth is enforced on the API endpoints it calls. The JS reads the channel
+// - auth is enforced on the API endpoints it calls. The JS reads the channel
 // from the URL and prompts for the per-channel admin key on first load.
 func (app *App) adminUIHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
 	data, err := adminUIFS.ReadFile("admin_ui.html")
@@ -242,7 +242,7 @@ func (app *App) deleteAdminRestartHandler(w http.ResponseWriter, r *http.Request
 }
 
 // deleteAdminStreamHandler removes a stream's metadata and transcript. By
-// default the media files are kept , pass `?media=true` to also delete the
+// default the media files are kept - pass `?media=true` to also delete the
 // stream's storage folder. Defaulting to data-only lets a local dev server
 // safely "delete" streams that point at shared (e.g. R2) media without
 // touching the real assets.
@@ -291,7 +291,7 @@ func (app *App) deleteAdminStreamHandler(w http.ResponseWriter, r *http.Request,
 }
 
 // startTimeFloor rejects timestamps from before 2000-01-01. A start time below
-// it is not a stream that began in 1970 , it is a bad unit or a typo.
+// it is not a stream that began in 1970 - it is a bad unit or a typo.
 const startTimeFloor = 946684800
 
 // startTimeFutureGrace is how far ahead of the server's clock a corrected start
@@ -322,7 +322,7 @@ var editableMediaTypes = []string{"audio", "video", "none"}
 // Whether a stream is live is not editable here. It is the worker's to set,
 // and an admin lever for it would have to answer what happens to the stream
 // that was live, to the worker still pushing lines, and to the clients holding
-// either , more conditions than a one-field edit can carry honestly.
+// either - more conditions than a one-field edit can carry honestly.
 func (app *App) postAdminStreamHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
 	streamID := r.PathValue("streamID")
 	if !isValidID(streamID) {
@@ -332,7 +332,7 @@ func (app *App) postAdminStreamHandler(w http.ResponseWriter, r *http.Request, c
 	}
 
 	// Pointers so that "field absent" is distinguishable from "field set to
-	// empty" , the difference between leaving a title alone and clearing it.
+	// empty" - the difference between leaving a title alone and clearing it.
 	var body struct {
 		StreamTitle *string `json:"streamTitle"`
 		StartTime   *int64  `json:"startTime"`
@@ -453,7 +453,7 @@ func (app *App) announceStreamEdit(ctx context.Context, cs *ChannelState, before
 
 // syncActivationMetric keeps the activation gauge in step with an edit. The
 // series exists only while a stream is live, is labeled with its title, and
-// carries the start time as its value , so a retitle has to move it rather
+// carries the start time as its value - so a retitle has to move it rather
 // than leave a second series behind under the old name, and a corrected start
 // time has to be written through.
 func (app *App) syncActivationMetric(channelKey string, before, after *model.Stream) {

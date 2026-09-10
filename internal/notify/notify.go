@@ -85,7 +85,7 @@ func (n *Notifier) Wait(ctx context.Context, deadline time.Time, check func() bo
 		select {
 		case <-signal:
 			timer.Stop()
-			// Something changed somewhere , loop to recheck.
+			// Something changed somewhere - loop to recheck.
 		case <-timer.C:
 			return Timeout
 		case <-ctx.Done():

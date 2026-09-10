@@ -43,7 +43,7 @@ func (d *Detector) twitchPollInterval() time.Duration {
 // runTwitchPoll is the level-triggered Twitch leg.
 //
 // It is the SAFETY NET, not the latency path. Helix caches its responses, so
-// this detects on the order of a minute however fast it runs , EventSub is the
+// this detects on the order of a minute however fast it runs - EventSub is the
 // only seconds-scale Twitch mechanism. What polling provides is the guarantee:
 // it re-derives ground truth every cycle, so it recovers on its own from a
 // missed webhook, a revoked subscription, a Cloudflare block, or a restart
@@ -223,7 +223,7 @@ func (d *Detector) SeenEventSubMessage(msgID string, now time.Time) bool {
 // Work for a single broadcaster is serialised: an offline and the online that
 // follows it (a restart) would otherwise be free to execute in either order,
 // and an offline applied after the online would end the NEW broadcast instead
-// of the old one , precisely the case restart detection exists to handle.
+// of the old one - precisely the case restart detection exists to handle.
 func (d *Detector) HandleEventSubNotification(ctx context.Context, env TwitchEnvelope, sentAt time.Time) {
 	if d == nil {
 		return
@@ -280,7 +280,7 @@ func (d *Detector) handleStreamOnline(ctx context.Context, ev TwitchStreamOnline
 
 	startedAt, _ := time.Parse(time.RFC3339, ev.StartedAt)
 	// The event carries no title. Enriching it here would mean a Helix call on
-	// the latency path, which is exactly what EventSub exists to avoid , the
+	// the latency path, which is exactly what EventSub exists to avoid - the
 	// notification renders "(no title reported)" instead, and that is also a
 	// visible marker that EventSub won the race.
 	d.observe(ctx, Broadcast{
@@ -346,7 +346,7 @@ func (d *Detector) handleStreamOffline(ctx context.Context, ev TwitchStreamOffli
 	}
 
 	if id == "" {
-		// We never saw this broadcast start , a restart during downtime, or a
+		// We never saw this broadcast start - a restart during downtime, or a
 		// stream that began before the process did. Nothing to end.
 		slog.Info("stream.offline for a broadcast we never saw start",
 			"func", "Detector.handleStreamOffline", "login", login)
@@ -389,7 +389,7 @@ func (d *Detector) runEventSubReconcile() {
 //
 // Deletion is scoped by CALLBACK HOST, not merely by "we did not want this".
 // The subscription list is per client id, so a dev box or a twitch-cli session
-// sharing the credentials appears here too , deleting those would have the two
+// sharing the credentials appears here too - deleting those would have the two
 // deployments tear down each other's subscriptions every reconcile pass, and
 // the resulting silence is exactly the failure this design exists to prevent.
 func (d *Detector) reconcileEventSub() {
@@ -430,7 +430,7 @@ func (d *Detector) reconcileEventSub() {
 		// (verification failed, notification_failures_exceeded, user removed,
 		// authorization revoked, version removed), and treating anything not
 		// explicitly known-bad as healthy meant a webhook Cloudflare was
-		// blocking would be adopted as working and never repaired , the exact
+		// blocking would be adopted as working and never repaired - the exact
 		// silent failure this whole design is supposed to make impossible.
 		case !want[key], s.Status != EventSubStatusEnabled && !pendingAndYoung(s, time.Now()):
 			// Stale or unusable and pointed at our host: safe to remove.
@@ -466,7 +466,7 @@ func (d *Detector) reconcileEventSub() {
 
 	// Health for the RECONCILER, not for delivery. Recording success against
 	// MechanismTwitchEventSub here would make the leg report healthy purely
-	// because Twitch answered an API call , while zero notifications were
+	// because Twitch answered an API call - while zero notifications were
 	// arriving. Delivery health is driven only by real deliveries.
 	if failed > 0 {
 		d.recordFailure(MechanismTwitchEventSubReconcile,
@@ -476,7 +476,7 @@ func (d *Detector) reconcileEventSub() {
 	}
 
 	// A subscription that stays un-enabled across consecutive passes means
-	// Twitch cannot deliver to the callback , most often something in front of
+	// Twitch cannot deliver to the callback - most often something in front of
 	// the server challenging its Go-http-client user agent. Latched so it
 	// alerts once per outage rather than every reconcile.
 	missing := len(want) - len(have) - created

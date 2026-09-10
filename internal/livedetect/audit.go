@@ -24,7 +24,7 @@ const MechanismYouTubeAudit = "youtube-search-audit"
 //
 // This is the backstop against SILENT failure, which is the worst outcome for
 // a detector: if discovery never surfaces a channel's in-progress broadcast ,
-// the specific risk for a channel whose uploads playlist lags , every other
+// the specific risk for a channel whose uploads playlist lags - every other
 // signal looks healthy while nothing is ever detected. Polls succeed, quota is
 // spent, no leg errors, and the only symptom is an absence of notifications,
 // which is indistinguishable from a channel that simply did not stream.

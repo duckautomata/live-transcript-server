@@ -1,6 +1,6 @@
 // Package metrics declares every Prometheus metric for the server. It must be
 // the ONLY package in the module that registers metrics on the default
-// registry , promauto panics on duplicate registration, so keeping all
+// registry - promauto panics on duplicate registration, so keeping all
 // registration here makes that constraint structural. Metric names are part of
 // the operational interface (dashboards, alerts) and must not change casually.
 package metrics

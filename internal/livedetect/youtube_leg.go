@@ -186,7 +186,7 @@ func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Ti
 // have not seen.
 //
 // This is the latency floor for an UNSCHEDULED surprise go-live. Anything
-// scheduled , every premiere, and any stream with a waiting room , is already
+// scheduled - every premiere, and any stream with a waiting room - is already
 // on the watchlist long before it starts and is caught by the state poller in
 // seconds, so this leg only has to cover the case where a channel goes live
 // with no prior frame at all.
@@ -269,7 +269,7 @@ func (d *Detector) youtubeDiscoverOnce() {
 				continue
 			}
 			// Boost a newly discovered id so its first state poll is immediate
-			// , the id may already be live.
+			// - the id may already be live.
 			d.watch.Seed(id, key, now, true)
 			fresh++
 		}

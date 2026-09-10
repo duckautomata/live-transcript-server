@@ -69,7 +69,7 @@ type FullInfoResponse struct {
 // live. It is the ledger row that makes detection notify exactly once per
 // broadcast no matter how many mechanisms see it or how often they poll.
 //
-// The primary key is (Platform, BroadcastID) , the platform's own per-broadcast
+// The primary key is (Platform, BroadcastID) - the platform's own per-broadcast
 // identifier, never the URL. A Twitch channel reuses the same
 // https://twitch.tv/{login} for every broadcast it will ever do, so a
 // URL-keyed ledger would report a channel's first stream and then go silent

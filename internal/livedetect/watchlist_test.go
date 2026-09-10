@@ -245,7 +245,7 @@ func TestQuotaGovernorRollsOverAtThePacificDay(t *testing.T) {
 
 // Discovery seeds every id on the uploads playlist with a boost, and an
 // ordinary past upload classifies as ended. If the boost outranked that state,
-// each one would be polled every 3 seconds , one channel with one old upload
+// each one would be polled every 3 seconds - one channel with one old upload
 // is enough to spend 28,800 quota units a day against an 8,000 budget.
 func TestEndedStateBeatsTheBoost(t *testing.T) {
 	e := &watchEntry{FirstSeen: base, State: StateEnded, BoostUntil: base.Add(10 * time.Minute)}
@@ -327,7 +327,7 @@ func TestObserveReportsEndOnlyForBroadcastsSeenLive(t *testing.T) {
 }
 
 // A broadcast restored from the ledger was live by definition, so an end that
-// happened while the process was down must still be reported , otherwise the
+// happened while the process was down must still be reported - otherwise the
 // row stays live forever and is never pruned.
 func TestSeedClaimedReportsAnEndThatHappenedWhileDown(t *testing.T) {
 	w := newWatchlist()

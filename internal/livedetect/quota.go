@@ -7,7 +7,7 @@ import (
 
 // YouTube Data API quota facts. The daily allocation is per PROJECT and resets
 // at midnight Pacific, and search.list sits in its own bucket rather than
-// drawing on the shared units , so exhausting one must never stop the other.
+// drawing on the shared units - so exhausting one must never stop the other.
 const (
 	youtubeDailyUnits       = 10000
 	youtubeDailySearchCalls = 100
@@ -24,7 +24,7 @@ const quotaPacificOffsetHours = -8
 //
 // Two independent buckets, because the API has two: the shared unit budget
 // used by videos.list and playlistItems.list, and search.list's own daily call
-// count. A 403 quotaExceeded from one must trip only that bucket , tripping
+// count. A 403 quotaExceeded from one must trip only that bucket - tripping
 // both on a search exhaustion would stop all detection while 90% of the unit
 // budget sat unused.
 //

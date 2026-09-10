@@ -116,7 +116,7 @@ type LiveDetectYouTubeConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	ApiKey  string `yaml:"apiKey"`
 	// WebSub enables push discovery through Google's PubSubHubbub hub.
-	// Requires publicBaseUrl. The push carries no live state , it only hands
+	// Requires publicBaseUrl. The push carries no live state - it only hands
 	// us a video id early, which is what lets the state poller catch the
 	// go-live within seconds instead of waiting for a discovery pass.
 	WebSub bool `yaml:"webSub"`

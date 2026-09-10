@@ -31,7 +31,7 @@ type Storage interface {
 	StreamExists(ctx context.Context, key string) (bool, error)
 
 	// List returns the keys of every object directly under prefix. It is for
-	// the objects whose names cannot be derived , a stream's VOD render is
+	// the objects whose names cannot be derived - a stream's VOD render is
 	// named with a random ID, so it has to be looked up. Missing prefixes list
 	// as empty rather than erroring.
 	List(ctx context.Context, prefix string) ([]string, error)

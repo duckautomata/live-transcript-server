@@ -87,7 +87,7 @@ type App struct {
 }
 
 // NewApp wires the application together. It performs no environment side
-// effects (no mkdirs, no DB writes) , those live in Init so construction can
+// effects (no mkdirs, no DB writes) - those live in Init so construction can
 // never half-succeed and tests can build an App without touching the world.
 func NewApp(cfg config.Config, st *store.Store, tempDir, version, buildTime string) (*App, error) {
 	ttlMinutes := cfg.Discord.Bot.StreamTTLMinutes
@@ -241,11 +241,11 @@ func (app *App) QueueIncomingStream(ctx context.Context, channelKey, url string)
 }
 
 // bumpAdminChange advances the channel's admin change counter and wakes every
-// parked long poll (both GET /events and GET /{channel}/admin/poll , they
+// parked long poll (both GET /events and GET /{channel}/admin/poll - they
 // share the app-wide signal; a spurious wakeup costs one cheap recheck).
 // Call it after any write an admin page viewer should see promptly: incoming
 // queue changes, restart flag changes, and stream state changes. Deliberately
-// NOT bumped: worker status heartbeats and client connect/disconnect , they
+// NOT bumped: worker status heartbeats and client connect/disconnect - they
 // churn constantly and the page has a slow fallback refresh for them.
 func (app *App) bumpAdminChange(channelKey string) {
 	cs, ok := app.Channels[channelKey]
@@ -267,7 +267,7 @@ func (app *App) membershipEnabled(cs *ChannelState) bool {
 // notifyAdminAction posts an audit record of a completed admin operation to
 // Discord, tagged with the channel it acted on and the endpoint that did it.
 //
-// Call it only on the success path , a handler that failed returns before
+// Call it only on the success path - a handler that failed returns before
 // reaching it. Read-only admin endpoints (info, poll, membership list) do not
 // call it: the admin page polls them continuously and would flood the webhook.
 func (app *App) notifyAdminAction(r *http.Request, cs *ChannelState, action string, fields ...discord.AdminField) {
@@ -286,7 +286,7 @@ func yesNo(b bool) string {
 }
 
 // isClientGone reports whether err is a request-context cancellation ,
-// typically a client disconnect , rather than a real server failure.
+// typically a client disconnect - rather than a real server failure.
 func isClientGone(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

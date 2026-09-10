@@ -315,7 +315,7 @@ type AdminField struct {
 
 // NotifyAdminAction records a completed admin operation on the admin webhook:
 // what was done (action), which channel it was done to (channelKey), and the
-// operation's specifics (fields). It is an audit trail, not an alert , it
+// operation's specifics (fields). It is an audit trail, not an alert - it
 // never pings the operator.
 //
 // Callers must invoke it only after the operation has actually succeeded, and
@@ -408,7 +408,7 @@ func (d *Client) Notify500Error(err error, contextMsg string) {
 
 // NotifyStreamDetected reports that live detection observed a broadcast go
 // live. This is the entire output of shadow mode: detection runs, measures
-// itself, and tells the operator , it never queues anything for the worker.
+// itself, and tells the operator - it never queues anything for the worker.
 //
 // The numbers are the point. StartedAt is what the platform says; DetectedAt
 // is when we saw it; the delay between them is what decides whether this
@@ -422,7 +422,7 @@ func (d *Client) Notify500Error(err error, contextMsg string) {
 // something this server can shorten.
 //
 // Posts to the detection webhook, which falls back to the admin webhook and
-// then the main one , detection is high-volume during a soak and does not ping.
+// then the main one - detection is high-volume during a soak and does not ping.
 // Nil-receiver-safe so a detector built without a Discord client still runs.
 func (d *Client) NotifyStreamDetected(b model.DetectedBroadcast) {
 	if d == nil || d.detectWebhookURL() == "" {
@@ -469,7 +469,7 @@ func (d *Client) NotifyStreamDetected(b model.DetectedBroadcast) {
 		"title":       fmt.Sprintf("Live Detected: %s", fullName),
 		"description": fmt.Sprintf("**%s**\n[%s](%s)", truncate(title, 240), b.URL, b.URL),
 		"url":         b.URL,
-		"color":       3447003, // Blue , informational, distinct from the green stream-start announce.
+		"color":       3447003, // Blue - informational, distinct from the green stream-start announce.
 		"fields":      fields,
 		"timestamp":   time.Unix(b.DetectedAt, 0).UTC().Format(time.RFC3339),
 		"footer": map[string]string{
@@ -511,7 +511,7 @@ func (d *Client) detectWebhookURL() string {
 //
 // Routed to the detection webhook rather than the main one, and without a
 // ping: during a shadow-mode soak a detector leg failing is information, not
-// an emergency , nothing downstream depends on it yet.
+// an emergency - nothing downstream depends on it yet.
 func (d *Client) NotifyLiveDetectDown(mechanism string, err error, failures int) {
 	if d == nil || d.detectWebhookURL() == "" {
 		return
@@ -588,7 +588,7 @@ func (d *Client) NotifyLiveDetectRevoked(subType, status, broadcasterID string) 
 //
 // This is the alarm for the one failure that is otherwise invisible: if
 // discovery never surfaces a channel's in-progress broadcast, every leg looks
-// healthy and the only symptom is an absence of notifications , which is
+// healthy and the only symptom is an absence of notifications - which is
 // indistinguishable from a channel that simply did not stream that day.
 func (d *Client) NotifyLiveDetectAuditMiss(channelKey, videoID string) {
 	if d == nil || d.detectWebhookURL() == "" {

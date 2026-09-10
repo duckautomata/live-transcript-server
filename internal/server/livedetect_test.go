@@ -161,7 +161,7 @@ func TestEventSubRejectsMissingHeaders(t *testing.T) {
 
 // A stale-but-correctly-signed message must be ACKNOWLEDGED, not rejected.
 // Twitch counts a non-2xx as a delivery failure and enough of them revoke the
-// subscription , so a drifting clock would cost us detection entirely, to
+// subscription - so a drifting clock would cost us detection entirely, to
 // defend against a replay the ledger already makes a no-op.
 func TestEventSubAcknowledgesStaleButSignedMessage(t *testing.T) {
 	_, mux := setupDetectApp(t)
@@ -501,8 +501,8 @@ func waitForDetection(tb testing.TB, app *App, platform, id string) *model.Detec
 	return nil
 }
 
-// Verification is unauthenticated by design , the hub has no shared secret at
-// that point , so confirming an unsubscribe would let anyone who learns the
+// Verification is unauthenticated by design - the hub has no shared secret at
+// that point - so confirming an unsubscribe would let anyone who learns the
 // callback URL ask the hub to drop the subscription and have us agree,
 // silently killing the push leg. This server never unsubscribes.
 func TestWebSubRefusesUnsubscribeVerification(t *testing.T) {

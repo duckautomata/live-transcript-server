@@ -22,7 +22,7 @@ const maxWebhookBody = 1 << 20 // 1 MiB
 //
 // The HTTP response is always sent BEFORE this runs. Twitch and the WebSub hub
 // both count a slow or failed response as a delivery failure, and enough of
-// them revoke the subscription , so no database write, Discord post, or
+// them revoke the subscription - so no database write, Discord post, or
 // outbound call may sit between receiving a push and acknowledging it.
 //
 // Work is tracked so shutdown waits for it rather than closing the database
@@ -57,7 +57,7 @@ func (app *App) webhookWork(fn func(ctx context.Context)) {
 func (app *App) twitchEventSubHandler(w http.ResponseWriter, r *http.Request) {
 	// Marker for an external reachability probe. If a probe response lacks
 	// this header, something in front of the server (Cloudflare, Caddy)
-	// answered instead of Go , which is the silent failure mode for EventSub.
+	// answered instead of Go - which is the silent failure mode for EventSub.
 	w.Header().Set("X-Eventsub-Handler", "1")
 
 	if !app.LiveDetect.EventSubEnabled() {
@@ -87,7 +87,7 @@ func (app *App) twitchEventSubHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Signature before freshness. A 403 counts as a delivery failure in
 	// Twitch's accounting, so it is reserved for genuinely unauthenticated
-	// requests , never for a correctly signed message we merely dislike.
+	// requests - never for a correctly signed message we merely dislike.
 	if !livedetect.VerifyTwitchSignature(app.LiveDetect.EventSubSecret(), msgID, msgTS, raw, msgSig) {
 		metrics.LiveDetectWebhooks.WithLabelValues("twitch", "bad-signature").Inc()
 		http.Error(w, "Forbidden", http.StatusForbidden)
@@ -96,7 +96,7 @@ func (app *App) twitchEventSubHandler(w http.ResponseWriter, r *http.Request) {
 
 	// A stale but correctly signed message is acknowledged, not rejected. If
 	// the VPS clock drifted, rejecting would fail every delivery and Twitch
-	// would revoke the subscription , losing detection entirely to defend
+	// would revoke the subscription - losing detection entirely to defend
 	// against a replay that is already a no-op, since the ledger claim is
 	// insert-or-ignore and the end stamp is guarded.
 	if !livedetect.TwitchTimestampFresh(msgTS, time.Now()) {
@@ -192,7 +192,7 @@ func (app *App) webSubVerify(w http.ResponseWriter, r *http.Request) {
 	challenge := q.Get("hub.challenge")
 
 	// ONLY subscribe is confirmed. Verification is unauthenticated by design ,
-	// the hub has no shared secret at this point , so confirming an
+	// the hub has no shared secret at this point - so confirming an
 	// unsubscribe would let anyone who knows the callback URL ask the hub to
 	// drop the subscription and have us cheerfully agree, silently killing the
 	// push leg. This server never unsubscribes, so an unsubscribe challenge is
