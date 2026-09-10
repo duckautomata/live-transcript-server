@@ -666,3 +666,65 @@ func (d *Client) NotifyLiveDetectCallbackBlocked(blocked []string) {
 		},
 	})
 }
+
+// NotifyCookiesInvalid alerts that the worker's YouTube cookies have stopped
+// authenticating, so yt-dlp is scraping anonymously and streams may silently
+// read as offline. It needs a human to mint a new jar from the burner account,
+// so unlike the live-detect alerts this one pings and goes to the main webhook.
+//
+// Fired once on the healthy->degraded transition. The alerted flag is
+// persisted, so a server redeploy mid-outage does not re-ping the operator.
+func (d *Client) NotifyCookiesInvalid(state, reason string, since int64) {
+	if d == nil || d.WebhookURL == "" {
+		return
+	}
+	detail := "The worker's YouTube cookies are no longer authenticating, so yt-dlp is falling back to " +
+		"anonymous scraping. Streams may read as offline and go uncaptured.\n" +
+		"**Fix:** export a fresh cookies.txt from the burner account and redeploy the worker."
+	if reason != "" {
+		detail += fmt.Sprintf("\n**Detected:** %s", reason)
+	}
+	if since > 0 {
+		detail += fmt.Sprintf("\nDegraded for: %s", time.Since(time.Unix(since, 0)).Round(time.Second))
+	}
+	go d.send(map[string]any{
+		"content": d.NotifyPing,
+		"embeds": []map[string]any{
+			{
+				"title":       "YouTube Cookies Invalid",
+				"description": detail,
+				"color":       15158332, // Red
+				"timestamp":   time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("cookie state: %s · Version: %s", state, d.Version),
+				},
+			},
+		},
+	})
+}
+
+// NotifyCookiesRecovered announces that the worker's YouTube cookies are
+// authenticating again, sent once after a prior invalid alert.
+func (d *Client) NotifyCookiesRecovered(downFor time.Duration) {
+	if d == nil || d.WebhookURL == "" {
+		return
+	}
+	description := "The worker's YouTube cookies are authenticating again."
+	if downFor > 0 {
+		description += fmt.Sprintf("\nDegraded for: %s", downFor.Round(time.Second))
+	}
+	go d.send(map[string]any{
+		"content": d.NotifyPing,
+		"embeds": []map[string]any{
+			{
+				"title":       "YouTube Cookies Recovered",
+				"description": description,
+				"color":       3066993, // Green
+				"timestamp":   time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("Version: %s", d.Version),
+				},
+			},
+		},
+	})
+}

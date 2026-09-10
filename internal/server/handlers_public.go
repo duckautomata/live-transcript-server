@@ -17,6 +17,7 @@ import (
 	"live-transcript-server/internal/metrics"
 	"live-transcript-server/internal/model"
 	"live-transcript-server/internal/storage"
+	"live-transcript-server/internal/store"
 
 	"github.com/kennygrant/sanitize"
 	"github.com/lithammer/shortuuid/v4"
@@ -45,12 +46,20 @@ func (app *App) getStatusHandler(w http.ResponseWriter, r *http.Request) {
 		workers[i].IsActive = now-workers[i].LastSeen < int64(workerActiveWindow.Seconds())
 	}
 
+	// Best-effort: cookie health is diagnostic, so a read failure must not
+	// take down the whole status endpoint.
+	cookies, err := app.Store.GetCookieStatus(r.Context(), store.DefaultWorkerID)
+	if err != nil {
+		slog.Error("failed to get cookie status", "func", "getStatusHandler", "err", err)
+	}
+
 	writeJSON(w, model.FullInfoResponse{
 		Server: model.ServerInfo{
 			Version:   app.Version,
 			BuildTime: app.BuildTime,
 		},
 		Workers: workers,
+		Cookies: cookies,
 	})
 }
 

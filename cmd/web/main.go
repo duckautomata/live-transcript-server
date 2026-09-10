@@ -95,6 +95,45 @@ func main() {
 	mux.HandleFunc("GET /version", versionHandler)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
+	httpServer := &http.Server{
+		Addr:              ":8080",
+		Handler:           server.CorsMiddleware(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		// net/http logs "http: panic serving", "Accept error ...; retrying in"
+		// and every other transport-level error to the stdlib default logger,
+		// which writes to stderr -- where neither the log file nor promtail
+		// sees it. Route it into slog so those are actually greppable.
+		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
+	}
+
+	// --- Signal Handling ---
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	// Bind the listener BEFORE the slow startup work below.
+	//
+	// Everything that follows -- the maintenance loop, a synchronous Discord
+	// gateway handshake (DNS + TLS + WSS + IDENTIFY, then waiting for READY)
+	// and the live-detect reseed -- costs anywhere from hundreds of
+	// milliseconds to several seconds, and is network-bound on third parties.
+	// Binding after it meant every restart of this process, for any reason,
+	// handed clients a multi-second window of connection-refused: that window
+	// is what a routine redeploy looked like from the worker's side. Listening
+	// first shrinks it to the time it takes to open a socket.
+	//
+	// Serving during this window is safe: the mux is fully registered above
+	// and the database is open. Discord and live detection are best-effort
+	// observers that already tolerate not being connected yet.
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("unable to start WebSocket server", "func", "main", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	slog.Info("WebSocket server listening on port 8080", "func", "main")
+
 	// Start background tasks
 	app.StartMaintenanceLoop()
 
@@ -110,27 +149,6 @@ func main() {
 	if err := app.LiveDetect.Start(); err != nil {
 		slog.Error("failed to start live detection", "func", "main", "err", err)
 	}
-
-	httpServer := &http.Server{
-		Addr:              ":8080",
-		Handler:           server.CorsMiddleware(mux),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-	}
-
-	slog.Info("WebSocket server listening on port 8080", "func", "main")
-
-	// --- Signal Handling ---
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-
-	// Start server in its own goroutine
-	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("unable to start WebSocket server", "func", "main", "err", err)
-			os.Exit(1)
-		}
-	}()
 
 	// Wait for signal
 	<-stop

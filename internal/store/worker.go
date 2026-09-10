@@ -99,3 +99,42 @@ func (s *Store) DeleteRestartRequest(ctx context.Context, channelKey string) (in
 	}
 	return res.RowsAffected()
 }
+
+// DefaultWorkerID is the worker_cookie_status key used while a single worker
+// serves every channel. The column exists so a second worker has somewhere to
+// go without a migration.
+const DefaultWorkerID = "default"
+
+// GetCookieStatus returns the stored cookie health, or nil if the worker has
+// never reported any.
+func (s *Store) GetCookieStatus(ctx context.Context, workerID string) (*model.CookieStatus, error) {
+	row := s.db.QueryRowContext(ctx, `
+	SELECT worker_id, state, reason, since, alerted, updated_at
+	FROM worker_cookie_status WHERE worker_id = ?`, workerID)
+	var st model.CookieStatus
+	err := row.Scan(&st.WorkerID, &st.State, &st.Reason, &st.Since, &st.Alerted, &st.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+// UpsertCookieStatus records the worker's latest cookie health. `since` is
+// preserved across repeated reports of the same state so the server can
+// measure how long the outage has run from its own clock.
+func (s *Store) UpsertCookieStatus(ctx context.Context, st model.CookieStatus) error {
+	_, err := s.db.ExecContext(ctx, `
+	INSERT INTO worker_cookie_status (worker_id, state, reason, since, alerted, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?)
+	ON CONFLICT(worker_id) DO UPDATE SET
+		state = excluded.state,
+		reason = excluded.reason,
+		since = excluded.since,
+		alerted = excluded.alerted,
+		updated_at = excluded.updated_at;
+	`, st.WorkerID, st.State, st.Reason, st.Since, st.Alerted, st.UpdatedAt)
+	return err
+}

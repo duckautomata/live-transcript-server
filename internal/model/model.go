@@ -51,6 +51,11 @@ type WorkerStatusRequest struct {
 	Version   string   `json:"version"`
 	BuildTime string   `json:"build_time"`
 	Keys      []string `json:"keys"`
+	// CookieState is optional: an older worker omits it entirely, and this
+	// server must keep accepting that body. Empty means "not reported", which
+	// is never treated as a failure.
+	CookieState  string `json:"cookie_state,omitempty"`
+	CookieReason string `json:"cookie_reason,omitempty"`
 }
 
 // ServerInfo represents the version information of the server.
@@ -63,6 +68,9 @@ type ServerInfo struct {
 type FullInfoResponse struct {
 	Server  ServerInfo     `json:"server"`
 	Workers []WorkerStatus `json:"workers"`
+	// Cookies is nil until a worker reports cookie health, so existing
+	// clients that do not know the field are unaffected.
+	Cookies *CookieStatus `json:"cookies,omitempty"`
 }
 
 // DetectedBroadcast is one broadcast that live detection has observed going
@@ -95,4 +103,30 @@ type DetectedBroadcast struct {
 	// EndedAt is when the broadcast was first observed to be over, in unix
 	// seconds; zero while it is still live or was never seen to end.
 	EndedAt int64 `json:"endedAt"`
+}
+
+// Worker cookie-auth states, mirroring the worker's cookieauth.CookieAuth.
+const (
+	CookieStateNA      = "na"
+	CookieStateOK      = "ok"
+	CookieStateAbsent  = "absent"
+	CookieStateRotated = "rotated"
+)
+
+// CookieStatus is the worker's YouTube cookie health. Worker-global rather
+// than per-channel: one cookie jar backs every YouTube channel.
+type CookieStatus struct {
+	WorkerID  string `json:"workerId"`
+	State     string `json:"state"`
+	Reason    string `json:"reason"`
+	Since     int64  `json:"since"`     // when the current state began
+	Alerted   bool   `json:"alerted"`   // an operator alert has already gone out
+	UpdatedAt int64  `json:"updatedAt"` // last heartbeat that carried cookie health
+}
+
+// CookieDegraded reports whether a state means yt-dlp is scraping YouTube
+// anonymously. Unknown states are treated as healthy: a newer worker reporting
+// a state this server does not know must not be able to page the operator.
+func CookieDegraded(state string) bool {
+	return state == CookieStateAbsent || state == CookieStateRotated
 }

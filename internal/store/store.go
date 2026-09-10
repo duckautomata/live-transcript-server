@@ -213,6 +213,25 @@ func createSchema(db *sql.DB) error {
 		return fmt.Errorf("error creating worker_status table: %w", err)
 	}
 
+	// Cookie health is worker-global, not per-channel, so it gets its own
+	// single-row table rather than a column duplicated across worker_status.
+	// It is persisted rather than kept in memory so that a server redeploy
+	// mid-outage does not re-ping the operator about an outage they already
+	// know about.
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS worker_cookie_status (
+		worker_id TEXT PRIMARY KEY,
+		state TEXT NOT NULL,
+		reason TEXT NOT NULL DEFAULT '',
+		since INTEGER NOT NULL,
+		alerted INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL
+	);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating worker_cookie_status table: %w", err)
+	}
+
 	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS incoming_streams (
 		channel_key TEXT,

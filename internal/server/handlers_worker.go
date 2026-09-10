@@ -405,7 +405,65 @@ func (app *App) workerStatusHandler(w http.ResponseWriter, r *http.Request) {
 			slog.Error("failed to upsert worker status", "key", key, "err", err)
 		}
 	}
+	app.recordCookieStatus(r.Context(), req.CookieState, req.CookieReason, lastSeen)
 	w.WriteHeader(http.StatusOK)
+}
+
+// recordCookieStatus stores the worker's YouTube cookie health and alerts the
+// operator once on each healthy<->degraded transition.
+//
+// The alerted flag lives in the database rather than in memory so that a
+// server redeploy in the middle of a cookie outage does not re-ping about an
+// outage the operator already knows about - this server is redeployed often.
+//
+// A worker that does not report cookie health at all (an older build, or one
+// with cookies disabled) leaves the stored state untouched: absence of a
+// report is not evidence of a problem, and the worker-offline sweep already
+// covers a worker that has gone silent.
+func (app *App) recordCookieStatus(ctx context.Context, state, reason string, now int64) {
+	if state == "" || state == model.CookieStateNA {
+		return
+	}
+
+	previous, err := app.Store.GetCookieStatus(ctx, store.DefaultWorkerID)
+	if err != nil {
+		slog.Error("failed to read cookie status", "func", "recordCookieStatus", "err", err)
+		return
+	}
+
+	degraded := model.CookieDegraded(state)
+	next := model.CookieStatus{
+		WorkerID:  store.DefaultWorkerID,
+		State:     state,
+		Reason:    reason,
+		Since:     now,
+		UpdatedAt: now,
+	}
+	if previous != nil {
+		next.Alerted = previous.Alerted
+		if previous.State == state {
+			// Same state as last time: keep the original start so "degraded
+			// for" is measured from the server's own first observation.
+			next.Since = previous.Since
+		}
+	}
+
+	switch {
+	case degraded && !next.Alerted:
+		slog.Error("worker youtube cookies are not authenticating",
+			"func", "recordCookieStatus", "state", state, "reason", reason)
+		app.Discord.NotifyCookiesInvalid(state, reason, next.Since)
+		next.Alerted = true
+	case !degraded && next.Alerted:
+		slog.Info("worker youtube cookies are authenticating again",
+			"func", "recordCookieStatus", "state", state)
+		app.Discord.NotifyCookiesRecovered(time.Duration(now-next.Since) * time.Second)
+		next.Alerted = false
+	}
+
+	if err := app.Store.UpsertCookieStatus(ctx, next); err != nil {
+		slog.Error("failed to upsert cookie status", "func", "recordCookieStatus", "err", err)
+	}
 }
 
 func (app *App) statuscheckHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
