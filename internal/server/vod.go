@@ -172,7 +172,7 @@ type AdminVodResponse struct {
 }
 
 // vodExtension picks the container a stream renders into: video streams are
-// remuxed to mp4, everything else is encoded to m4a — the same split the clip
+// remuxed to mp4, everything else is encoded to m4a - the same split the clip
 // endpoint makes. An empty return means the stream has no media at all.
 func vodExtension(stream *model.Stream) string {
 	switch stream.MediaType {
@@ -196,7 +196,7 @@ type vodTarget struct {
 
 // resolveVodTarget validates the stream in the request path and loads its line
 // counts. It writes the error response itself and returns ok=false when the
-// stream cannot have a VOD built — unknown, still live, or media-less.
+// stream cannot have a VOD built - unknown, still live, or media-less.
 func (app *App) resolveVodTarget(w http.ResponseWriter, r *http.Request, cs *ChannelState) (vodTarget, bool) {
 	streamID := r.PathValue("streamID")
 	if !isValidID(streamID) {
@@ -294,7 +294,7 @@ func (app *App) vodResponse(ctx context.Context, cs *ChannelState, target vodTar
 // there is none. The render's name carries a random ID so it cannot be guessed
 // from the stream ID, which means it has to be looked up rather than derived.
 // The folder holds one render, so the first key with the right extension is it
-// — leftover .tmp files from an interrupted local write are filtered out by
+// - leftover .tmp files from an interrupted local write are filtered out by
 // the extension check.
 func (app *App) findVodArtifact(ctx context.Context, channelKey, streamID, ext string) (string, error) {
 	keys, err := app.Storage.List(ctx, storage.VodPrefix(channelKey, streamID))
@@ -327,8 +327,8 @@ func (app *App) vodDownloadLinks(key string, stream *model.Stream, ext string) (
 
 // vodDownloadName is the filename (without extension) a downloaded VOD is
 // saved under: the stream's title, reduced to filename-safe characters. Titles
-// that sanitize away to nothing — blank, or written entirely in a script
-// sanitize strips — fall back to the stream ID so the file is never unnamed.
+// that sanitize away to nothing - blank, or written entirely in a script
+// sanitize strips - fall back to the stream ID so the file is never unnamed.
 func vodDownloadName(stream *model.Stream) string {
 	if name := sanitize.BaseName(stream.StreamTitle); name != "" {
 		return name
@@ -338,7 +338,7 @@ func vodDownloadName(stream *model.Stream) string {
 
 // getAdminVodHandler reports the state of a stream's full VOD: whether one
 // exists, whether a build is running, and how much of the stream has media to
-// include. Side-effect-free — the admin page polls it while a build runs.
+// include. Side-effect-free - the admin page polls it while a build runs.
 func (app *App) getAdminVodHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
 	target, ok := app.resolveVodTarget(w, r, cs)
 	if !ok {
@@ -371,7 +371,7 @@ func (app *App) postAdminVodHandler(w http.ResponseWriter, r *http.Request, cs *
 	}
 
 	// Already built, or already building: hand back the current state. Checking
-	// storage first means a rebuild is never started for a VOD that exists —
+	// storage first means a rebuild is never started for a VOD that exists ,
 	// and a storage lookup that fails stops the build rather than risking a
 	// second copy under a different random name.
 	resp, err := app.vodResponse(r.Context(), cs, target)
@@ -426,7 +426,7 @@ func (app *App) postAdminVodHandler(w http.ResponseWriter, r *http.Request, cs *
 	// Re-derived rather than read off the job: a very fast build may already be
 	// done, and vodResponse is the one place that decides what to report. The
 	// build is under way either way, so a lookup failure here only costs the
-	// caller its status — reported as running, which it is.
+	// caller its status - reported as running, which it is.
 	final, err := app.vodResponse(r.Context(), cs, target)
 	if err != nil {
 		slog.Warn("failed to read vod state after starting build", "key", cs.Key, "func", "postAdminVodHandler", "streamID", streamID, "err", err)

@@ -105,6 +105,12 @@ func main() {
 		}
 	}
 
+	// Start live detection (no-op if not configured). It only observes and
+	// reports; it never queues work for the worker.
+	if err := app.LiveDetect.Start(); err != nil {
+		slog.Error("failed to start live detection", "func", "main", "err", err)
+	}
+
 	httpServer := &http.Server{
 		Addr:              ":8080",
 		Handler:           server.CorsMiddleware(mux),
@@ -149,6 +155,12 @@ func main() {
 		if err := app.DiscordBot.Close(); err != nil {
 			slog.Error("failed to close discord bot", "func", "main", "err", err)
 		}
+	}
+
+	// Stop live detection before the app closes the database: a poll must not
+	// be mid-write when the store goes away.
+	if err := app.LiveDetect.Close(); err != nil {
+		slog.Error("failed to close live detection", "func", "main", "err", err)
 	}
 
 	// Close App and DB

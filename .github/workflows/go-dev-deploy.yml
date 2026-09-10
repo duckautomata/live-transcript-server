@@ -10,7 +10,7 @@ on:
 jobs:
 
   # ─────────────────────────────────────────────
-  # JOB 1 — Tests
+  # JOB 1 - Tests
   # ─────────────────────────────────────────────
   test:
     runs-on: ubuntu-latest
@@ -45,7 +45,7 @@ jobs:
           fail-on-error: true
 
   # ─────────────────────────────────────────────
-  # JOB 2 — Docker build & push (dev tag)
+  # JOB 2 - Docker build & push (dev tag)
   # ─────────────────────────────────────────────
   build-push-dev:
     runs-on: ubuntu-latest

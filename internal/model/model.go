@@ -64,3 +64,35 @@ type FullInfoResponse struct {
 	Server  ServerInfo     `json:"server"`
 	Workers []WorkerStatus `json:"workers"`
 }
+
+// DetectedBroadcast is one broadcast that live detection has observed going
+// live. It is the ledger row that makes detection notify exactly once per
+// broadcast no matter how many mechanisms see it or how often they poll.
+//
+// The primary key is (Platform, BroadcastID) - the platform's own per-broadcast
+// identifier, never the URL. A Twitch channel reuses the same
+// https://twitch.tv/{login} for every broadcast it will ever do, so a
+// URL-keyed ledger would report a channel's first stream and then go silent
+// forever.
+type DetectedBroadcast struct {
+	Platform    string `json:"platform"`    // "youtube" or "twitch"
+	BroadcastID string `json:"broadcastId"` // YouTube video ID, or Twitch numeric stream ID
+	ChannelKey  string `json:"channelKey"`
+	URL         string `json:"url"`
+	Title       string `json:"title"`
+	// StartedAt is the platform's own start time (Helix started_at,
+	// liveStreamingDetails.actualStartTime) in unix seconds, NOT our first
+	// sighting. Zero when the platform did not report one.
+	StartedAt int64 `json:"startedAt"`
+	// DetectedAt is when this server first observed the broadcast live, in
+	// unix seconds. DetectedAt-StartedAt is the detection delay the shadow-mode
+	// notification reports.
+	DetectedAt int64 `json:"detectedAt"`
+	// Mechanism names the detection path that won the race to claim this
+	// broadcast, e.g. "twitch-eventsub" or "youtube-state-poll". It is the
+	// measurement the shadow-mode soak exists to collect.
+	Mechanism string `json:"mechanism"`
+	// EndedAt is when the broadcast was first observed to be over, in unix
+	// seconds; zero while it is still live or was never seen to end.
+	EndedAt int64 `json:"endedAt"`
+}

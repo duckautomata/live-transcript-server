@@ -21,6 +21,7 @@ import (
 	"live-transcript-server/internal/archive"
 	"live-transcript-server/internal/config"
 	"live-transcript-server/internal/discord"
+	"live-transcript-server/internal/livedetect"
 	"live-transcript-server/internal/media"
 	"live-transcript-server/internal/metrics"
 	"live-transcript-server/internal/notify"
@@ -49,12 +50,15 @@ type ChannelState struct {
 
 // App holds the application-wide dependencies and configuration.
 type App struct {
-	ApiKey      string
-	Store       *store.Store
-	Storage     storage.Storage
-	Media       media.Processor
-	Discord     *discord.Client
-	DiscordBot  *discord.Bot
+	ApiKey     string
+	Store      *store.Store
+	Storage    storage.Storage
+	Media      media.Processor
+	Discord    *discord.Client
+	DiscordBot *discord.Bot
+	// LiveDetect observes YouTube and Twitch for channels going live. It is
+	// nil when unconfigured, and every method is nil-receiver-safe.
+	LiveDetect  *livedetect.Detector
 	Archive     *archive.Client
 	Notifier    *notify.Notifier
 	Upgrader    websocket.Upgrader
@@ -73,10 +77,17 @@ type App struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// bgMu guards bgClosed, which gates every deferred background task started
+	// from a request handler. A sync.WaitGroup must not take a positive delta
+	// from zero once Wait has begun, so the flag and the Add have to be set
+	// under the same lock Close takes before waiting.
+	bgMu     sync.Mutex
+	bgClosed bool
 }
 
 // NewApp wires the application together. It performs no environment side
-// effects (no mkdirs, no DB writes) — those live in Init so construction can
+// effects (no mkdirs, no DB writes) - those live in Init so construction can
 // never half-succeed and tests can build an App without touching the world.
 func NewApp(cfg config.Config, st *store.Store, tempDir, version, buildTime string) (*App, error) {
 	ttlMinutes := cfg.Discord.Bot.StreamTTLMinutes
@@ -133,6 +144,15 @@ func NewApp(cfg config.Config, st *store.Store, tempDir, version, buildTime stri
 	}
 	app.DiscordBot = bot
 
+	// A misconfigured detector must never stop the server from starting: it is
+	// a shadow-mode observer, and the transcript service is the actual product.
+	// New disables the unusable legs and reports why; we log and carry on.
+	detector, err := livedetect.New(cfg.LiveDetect, cfg.Channels, app, app.Discord)
+	if err != nil {
+		slog.Error("live detection is degraded or disabled", "func", "NewApp", "err", err)
+	}
+	app.LiveDetect = detector
+
 	return app, nil
 }
 
@@ -167,6 +187,12 @@ func (app *App) Close() error {
 	if app.cancel != nil {
 		app.cancel()
 	}
+	// Refuse new background work before waiting, so nothing can Add after the
+	// Wait has started.
+	app.bgMu.Lock()
+	app.bgClosed = true
+	app.bgMu.Unlock()
+
 	app.wg.Wait()
 	for _, cs := range app.Channels {
 		cs.Hub.Wait()
@@ -175,6 +201,28 @@ func (app *App) Close() error {
 		return app.Store.Close()
 	}
 	return nil
+}
+
+// goBackground starts a tracked background task, unless the app is shutting
+// down. It returns whether the task was started.
+//
+// The lock is what makes this safe rather than merely likely-safe: Close sets
+// bgClosed under the same mutex before calling wg.Wait, so an Add can never
+// race a Wait that has already begun.
+func (app *App) goBackground(fn func()) bool {
+	app.bgMu.Lock()
+	if app.bgClosed {
+		app.bgMu.Unlock()
+		return false
+	}
+	app.wg.Add(1)
+	app.bgMu.Unlock()
+
+	go func() {
+		defer app.wg.Done()
+		fn()
+	}()
+	return true
 }
 
 // QueueIncomingStream records an announced stream URL for a channel and wakes
@@ -193,11 +241,11 @@ func (app *App) QueueIncomingStream(ctx context.Context, channelKey, url string)
 }
 
 // bumpAdminChange advances the channel's admin change counter and wakes every
-// parked long poll (both GET /events and GET /{channel}/admin/poll — they
+// parked long poll (both GET /events and GET /{channel}/admin/poll - they
 // share the app-wide signal; a spurious wakeup costs one cheap recheck).
 // Call it after any write an admin page viewer should see promptly: incoming
 // queue changes, restart flag changes, and stream state changes. Deliberately
-// NOT bumped: worker status heartbeats and client connect/disconnect — they
+// NOT bumped: worker status heartbeats and client connect/disconnect - they
 // churn constantly and the page has a slow fallback refresh for them.
 func (app *App) bumpAdminChange(channelKey string) {
 	cs, ok := app.Channels[channelKey]
@@ -219,7 +267,7 @@ func (app *App) membershipEnabled(cs *ChannelState) bool {
 // notifyAdminAction posts an audit record of a completed admin operation to
 // Discord, tagged with the channel it acted on and the endpoint that did it.
 //
-// Call it only on the success path — a handler that failed returns before
+// Call it only on the success path - a handler that failed returns before
 // reaching it. Read-only admin endpoints (info, poll, membership list) do not
 // call it: the admin page polls them continuously and would flood the webhook.
 func (app *App) notifyAdminAction(r *http.Request, cs *ChannelState, action string, fields ...discord.AdminField) {
@@ -237,8 +285,8 @@ func yesNo(b bool) string {
 	return "no"
 }
 
-// isClientGone reports whether err is a request-context cancellation —
-// typically a client disconnect — rather than a real server failure.
+// isClientGone reports whether err is a request-context cancellation ,
+// typically a client disconnect - rather than a real server failure.
 func isClientGone(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

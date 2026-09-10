@@ -191,7 +191,7 @@ func (s *R2Storage) List(ctx context.Context, prefix string) ([]string, error) {
 }
 
 func (s *R2Storage) StreamExists(ctx context.Context, key string) (bool, error) {
-	// Probe with a trailing slash so "chan/123" cannot match "chan/1234" —
+	// Probe with a trailing slash so "chan/123" cannot match "chan/1234" ,
 	// a false positive here can permanently skip pruning a stream.
 	prefix := ensureTrailingSlash(key)
 

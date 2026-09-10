@@ -96,7 +96,7 @@ func parseWaitSeconds(r *http.Request) time.Duration {
 // from `since` (immediately for a first poll or after a server restart, since
 // counters are seeded from the clock), and otherwise parks until a bump or
 // the wait elapses (204 No Content). The page then fetches /admin/info as
-// usual — this endpoint only says when, never what.
+// usual - this endpoint only says when, never what.
 func (app *App) adminPollHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
 	since, err := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 	if err != nil {
@@ -125,7 +125,7 @@ func (app *App) adminPollHandler(w http.ResponseWriter, r *http.Request, cs *Cha
 // It answers immediately when any listed channel has a pending signal and
 // otherwise parks until one is posted or `wait` elapses (204 No Content).
 // The GET /{channel}/incoming and /{channel}/restart endpoints remain the
-// source of truth — this endpoint only tells the worker to go read them.
+// source of truth - this endpoint only tells the worker to go read them.
 func (app *App) getEventsHandler(w http.ResponseWriter, r *http.Request) {
 	channelsParam := r.URL.Query().Get("channels")
 	if channelsParam == "" {

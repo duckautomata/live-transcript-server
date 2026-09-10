@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"regexp"
 
+	"live-transcript-server/internal/livedetect"
 	"live-transcript-server/internal/metrics"
 )
 
@@ -23,7 +24,7 @@ func isValidID(s string) bool {
 }
 
 // RegisterRoutes registers every endpoint on mux. Routes are grouped by
-// audience — worker (X-API-Key), admin (X-Admin-Key), public — and each
+// audience - worker (X-API-Key), admin (X-Admin-Key), public - and each
 // audience maps to one handlers_*.go file. A new endpoint is one handler in
 // the matching file plus one line here.
 func (app *App) RegisterRoutes(mux *http.ServeMux) {
@@ -61,6 +62,14 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /{channel}/admin/membership", app.withAdminChannel(app.postAdminMembershipHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/membership", app.withAdminChannel(app.deleteAdminMembershipHandler))
 
+	// Live-detection push callbacks. Public and unauthenticated by necessity:
+	// the callers are Twitch and Google's WebSub hub, neither of which can send
+	// an API key. Both handlers authenticate every request by HMAC over the raw
+	// body instead, and both 404 when their leg is disabled.
+	mux.HandleFunc("POST "+livedetect.TwitchEventSubPath, app.twitchEventSubHandler)
+	mux.HandleFunc("GET "+livedetect.YouTubeWebSubPath, app.youtubeWebSubHandler)
+	mux.HandleFunc("POST "+livedetect.YouTubeWebSubPath, app.youtubeWebSubHandler)
+
 	// Public routes
 	mux.HandleFunc("GET /status", app.getStatusHandler)
 	mux.HandleFunc("GET /{channel}/websocket", app.withChannel(app.wsHandler))
@@ -76,8 +85,8 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 // resolved channel.
 type channelHandler func(w http.ResponseWriter, r *http.Request, cs *ChannelState)
 
-// withChannel resolves the {channel} path value once — 404, metric, and log
-// on failure — and passes the channel state to the handler. Every handler on
+// withChannel resolves the {channel} path value once - 404, metric, and log
+// on failure - and passes the channel state to the handler. Every handler on
 // a /{channel}/... route uses this instead of repeating the lookup.
 func (app *App) withChannel(h channelHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

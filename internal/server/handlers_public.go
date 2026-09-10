@@ -55,7 +55,7 @@ func (app *App) getStatusHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // streamHandler serves media files for inline playback. Only available with
-// local storage — with R2 the client streams from the public bucket URL.
+// local storage - with R2 the client streams from the public bucket URL.
 func (app *App) streamHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
 	if !app.Storage.IsLocal() {
 		http.Error(w, "Endpoint disabled for remote storage", http.StatusBadRequest)
@@ -184,7 +184,7 @@ func (app *App) downloadHandler(w http.ResponseWriter, r *http.Request, cs *Chan
 
 	// "vod" is the full-stream render built from the admin page. It is served
 	// here rather than behind the admin key because a browser cannot attach
-	// the key to a plain download navigation — the same reasoning that has
+	// the key to a plain download navigation - the same reasoning that has
 	// remote storage handing these files out from a public bucket URL.
 	validMediaTypes := []string{"audio", "clips", "frame", "vod"}
 	if !slices.Contains(validMediaTypes, mediaType) {
