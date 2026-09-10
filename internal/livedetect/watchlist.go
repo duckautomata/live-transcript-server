@@ -377,7 +377,7 @@ func (w *watchlist) Sweep(now time.Time) []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	var dropped []string
+	var dropped, retire []string
 	for id, e := range w.entries {
 		switch {
 		// Measured from the END, not from first sighting: a broadcast whose
@@ -386,6 +386,10 @@ func (w *watchlist) Sweep(now time.Time) []string {
 		// entirely.
 		case e.State == StateEnded && !e.EndedAt.IsZero() && now.Sub(e.EndedAt) > ytEndedLinger:
 			dropped = append(dropped, id)
+			// Only an ENDED entry is worth remembering. It is a finished
+			// broadcast or an ordinary upload that will sit on the playlist
+			// forever, and re-seeding it is pure churn.
+			retire = append(retire, id)
 		case e.State == StateUpcoming && now.Sub(e.FirstSeen) > ytUpcomingMaxAge:
 			dropped = append(dropped, id)
 		case e.State == StateUnknown && now.Sub(e.FirstSeen) > ytUpcomingMaxAge:
@@ -394,6 +398,13 @@ func (w *watchlist) Sweep(now time.Time) []string {
 	}
 	for _, id := range dropped {
 		delete(w.entries, id)
+	}
+	// An ABANDONED UPCOMING frame is deliberately NOT retired. Retiring it
+	// would blind discovery to that id for a full day, and a stream scheduled
+	// more than 24 hours ahead is swept while still upcoming — so retiring it
+	// could mean missing the go-live entirely. Letting it be rediscovered
+	// costs one re-seed per day per abandoned frame, which is nothing.
+	for _, id := range retire {
 		// Remember it so discovery does not immediately re-seed the same id
 		// from the uploads playlist, which the id is still sitting on. Without
 		// this the sweep and the next discovery pass form a permanent churn

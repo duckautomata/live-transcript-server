@@ -364,3 +364,29 @@ func TestSeedWakesThePolLoop(t *testing.T) {
 	default:
 	}
 }
+
+// A stream scheduled more than 24 hours ahead is swept while still upcoming.
+// Retiring it would blind discovery to that id for a full day — potentially
+// straight through the go-live — so only ended entries are remembered.
+func TestAbandonedUpcomingFramesAreNotRetired(t *testing.T) {
+	w := newWatchlist()
+	w.Seed("far-future-stream", "doki", base, false)
+	w.Observe("far-future-stream", StateUpcoming, base.Add(72*time.Hour), base)
+
+	after := base.Add(ytUpcomingMaxAge + time.Hour)
+	if dropped := w.Sweep(after); len(dropped) != 1 {
+		t.Fatalf("expected the stale upcoming frame to be swept, got %v", dropped)
+	}
+	if w.Retired("far-future-stream", after) {
+		t.Fatal("an upcoming frame must stay rediscoverable; retiring it could miss the go-live")
+	}
+
+	// An ended entry is still remembered, so the churn protection survives.
+	w.Seed("ordinary-upload", "doki", base, true)
+	w.Observe("ordinary-upload", StateEnded, time.Time{}, base)
+	endAfter := base.Add(ytEndedLinger + time.Minute)
+	w.Sweep(endAfter)
+	if !w.Retired("ordinary-upload", endAfter) {
+		t.Fatal("an ended entry must still be retired, or discovery churns it forever")
+	}
+}

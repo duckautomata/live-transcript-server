@@ -36,16 +36,6 @@ func (d *Detector) ytDiscoveryInterval() time.Duration {
 	return time.Duration(s) * time.Second
 }
 
-// SeedVideo puts a video id on the watchlist and holds it at the fast poll
-// interval. Exported so an external signal , a WebSub push, an operator, a
-// Discord announcement , can shortcut discovery.
-func (d *Detector) SeedVideo(videoID, channelKey string) {
-	if d == nil || videoID == "" {
-		return
-	}
-	d.watch.Seed(videoID, channelKey, time.Now(), true)
-}
-
 // runYouTubeState is the detection leg: it polls the live state of every video
 // id on the watchlist.
 //
@@ -134,6 +124,11 @@ func (d *Detector) youtubeStateOnce() {
 		}
 	}
 	if len(missing) > 0 {
+		// An id the API declines to return (deleted, private, region-blocked,
+		// or made members-only) is a SILENT miss: the call succeeded, so the
+		// leg still reports healthy. Counting it is the only way this becomes
+		// visible short of the search audit.
+		metrics.LiveDetectPolls.WithLabelValues(MechanismYouTubeState, "unreturned").Add(float64(len(missing)))
 		d.watch.Defer(missing, now.Add(ytIntervalCool))
 		slog.Debug("youtube did not return watched ids", "func", "Detector.youtubeStateOnce", "ids", missing)
 	}

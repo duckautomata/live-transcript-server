@@ -88,7 +88,6 @@ func TestNewReturnsNilWhenDisabled(t *testing.T) {
 	if st := d.Status(); st.Enabled {
 		t.Error("nil Status should report disabled")
 	}
-	d.SeedVideo("v", "doki")
 	d.HandleWebSubPush(nil)
 }
 
@@ -575,5 +574,132 @@ func TestValidTwitchLogin(t *testing.T) {
 		if validTwitchLogin(v) {
 			t.Errorf("%q should be rejected", v)
 		}
+	}
+}
+
+// The EventSub delivery path had no direct coverage, which is how a nil map in
+// handleStreamOnline reached this far. It panicked inside a held mutex, so the
+// blast radius was the whole Twitch side: the poll leg would block forever on
+// its next cycle and shutdown would hang.
+func TestHandleStreamOnlineRecordsTheLiveBroadcast(t *testing.T) {
+	sink := &recordingSink{}
+	d := newTestDetector(t, sink)
+
+	env := TwitchEnvelope{
+		Subscription: EventSubSubscription{
+			Type:      EventSubTypeStreamOnline,
+			Condition: map[string]string{"broadcaster_user_id": "1234"},
+		},
+		Event: []byte(`{"id":"999","broadcaster_user_id":"1234","broadcaster_user_login":"dokibird","type":"live","started_at":"2026-01-01T19:00:00Z"}`),
+	}
+	d.HandleEventSubNotification(context.Background(), env, time.Now())
+
+	sink.mu.Lock()
+	got := len(sink.live)
+	sink.mu.Unlock()
+	if got != 1 {
+		t.Fatalf("observed %d broadcasts, want 1", got)
+	}
+
+	// The mutex must be free afterwards: if the handler leaked it, every later
+	// poll cycle and every later webhook would block on it forever.
+	done := make(chan struct{})
+	go func() {
+		d.reconcileTwitchAbsences(context.Background(), []string{"dokibird"}, map[string]TwitchStream{
+			"dokibird": {ID: "999", UserLogin: "dokibird"},
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the poll leg blocked; the eventsub handler leaked twitchAbsentMu")
+	}
+}
+
+// An offline that Twitch sent BEFORE we started tracking the current broadcast
+// arrived out of order and must not end the restart that superseded it.
+func TestOutOfOrderOfflineDoesNotEndTheRestart(t *testing.T) {
+	sink := &recordingSink{}
+	d := newTestDetector(t, sink)
+	ctx := context.Background()
+
+	// The restart goes live now.
+	online := TwitchEnvelope{
+		Subscription: EventSubSubscription{
+			Type: EventSubTypeStreamOnline, Condition: map[string]string{"broadcaster_user_id": "1234"},
+		},
+		Event: []byte(`{"id":"restart","broadcaster_user_id":"1234","broadcaster_user_login":"dokibird","type":"live","started_at":"2026-01-01T19:00:00Z"}`),
+	}
+	d.HandleEventSubNotification(ctx, online, time.Now())
+
+	// A stream.offline for the PREVIOUS broadcast, sent before the restart,
+	// lands afterwards.
+	offline := TwitchEnvelope{
+		Subscription: EventSubSubscription{
+			Type: EventSubTypeStreamOffline, Condition: map[string]string{"broadcaster_user_id": "1234"},
+		},
+		Event: []byte(`{"broadcaster_user_id":"1234","broadcaster_user_login":"dokibird"}`),
+	}
+	d.HandleEventSubNotification(ctx, offline, time.Now().Add(-time.Minute))
+
+	if got := sink.endedIDs(); len(got) != 0 {
+		t.Fatalf("ended %v; a late offline must not end the broadcast that replaced it", got)
+	}
+}
+
+// A well-ordered offline still ends the broadcast it refers to.
+func TestInOrderOfflineEndsTheBroadcast(t *testing.T) {
+	sink := &recordingSink{}
+	d := newTestDetector(t, sink)
+	ctx := context.Background()
+
+	d.HandleEventSubNotification(ctx, TwitchEnvelope{
+		Subscription: EventSubSubscription{
+			Type: EventSubTypeStreamOnline, Condition: map[string]string{"broadcaster_user_id": "1234"},
+		},
+		Event: []byte(`{"id":"live1","broadcaster_user_id":"1234","broadcaster_user_login":"dokibird","type":"live","started_at":"2026-01-01T19:00:00Z"}`),
+	}, time.Now().Add(-time.Hour))
+
+	d.HandleEventSubNotification(ctx, TwitchEnvelope{
+		Subscription: EventSubSubscription{
+			Type: EventSubTypeStreamOffline, Condition: map[string]string{"broadcaster_user_id": "1234"},
+		},
+		Event: []byte(`{"broadcaster_user_id":"1234","broadcaster_user_login":"dokibird"}`),
+	}, time.Now())
+
+	if got := sink.endedIDs(); len(got) != 1 || got[0] != "live1" {
+		t.Fatalf("ended = %v, want [live1]", got)
+	}
+}
+
+// A Twitch broadcast that ended while the process was down must be recoverable.
+// Without re-seeding the tracked login, the absence path bails on an empty
+// twitchLiveID, ended_at stays zero forever, and the row is handed back on
+// every restart and never pruned.
+func TestReseedRestoresTwitchTracking(t *testing.T) {
+	sink := &recordingSink{active: []Broadcast{
+		{Platform: PlatformTwitch, ChannelKey: "doki", ID: "was-live-before-restart"},
+	}}
+	d := newTestDetector(t, sink)
+
+	d.reseedFromLedger()
+
+	// It is now tracked, so three absent polls can conclude it ended.
+	for range twitchAbsencesBeforeEnd {
+		d.reconcileTwitchAbsences(context.Background(), []string{"dokibird"}, map[string]TwitchStream{})
+	}
+	if got := sink.endedIDs(); len(got) != 1 || got[0] != "was-live-before-restart" {
+		t.Fatalf("ended = %v, want the pre-restart broadcast to be closable", got)
+	}
+}
+
+func TestTwitchLoginFor(t *testing.T) {
+	d := newTestDetector(t, &recordingSink{})
+	if got := d.twitchLoginFor("doki"); got != "dokibird" {
+		t.Errorf("twitchLoginFor(doki) = %q, want dokibird", got)
+	}
+	if got := d.twitchLoginFor("nosuchchannel"); got != "" {
+		t.Errorf("an unknown channel must map to no login, got %q", got)
 	}
 }

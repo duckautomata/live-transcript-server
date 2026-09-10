@@ -137,19 +137,20 @@ func New(cfg config.LiveDetectConfig, channels []config.ChannelConfig, sink Sink
 	}
 
 	d := &Detector{
-		cfg:           cfg,
-		sink:          sink,
-		alerts:        alerts,
-		twitchTargets: map[string]string{},
-		twitchUserIDs: map[string]string{},
-		ytTargets:     map[string]string{},
-		watch:         newWatchlist(),
-		gov:           newQuotaGovernor(cfg.YouTube.DailyUnitBudget, 0),
-		seen:          newSeenCache(twitchReplayMaxAge + time.Minute),
-		webSubSeen:    newSeenCache(webSubDedupeTTL),
-		twitchAbsent:  map[string]int{},
-		twitchLiveID:  map[string]string{},
-		health:        map[string]*legHealth{},
+		cfg:             cfg,
+		sink:            sink,
+		alerts:          alerts,
+		twitchTargets:   map[string]string{},
+		twitchUserIDs:   map[string]string{},
+		ytTargets:       map[string]string{},
+		watch:           newWatchlist(),
+		gov:             newQuotaGovernor(cfg.YouTube.DailyUnitBudget, 0),
+		seen:            newSeenCache(twitchReplayMaxAge + time.Minute),
+		webSubSeen:      newSeenCache(webSubDedupeTTL),
+		twitchAbsent:    map[string]int{},
+		twitchLiveID:    map[string]string{},
+		twitchLiveSince: map[string]time.Time{},
+		health:          map[string]*legHealth{},
 	}
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 
@@ -658,17 +659,47 @@ func (d *Detector) reseedFromLedger() {
 		return
 	}
 	now := time.Now()
-	seeded := 0
+	yt, tw := 0, 0
 	for _, b := range active {
-		if b.Platform != PlatformYouTube || b.ID == "" {
-			continue // only YouTube has a per-video watchlist
+		if b.ID == "" {
+			continue
 		}
-		// SeedClaimed, not Seed: these were live by definition, so if one ended
-		// while the process was down the first poll must still report the end.
-		d.watch.SeedClaimed(b.ID, b.ChannelKey, now)
-		seeded++
+		switch b.Platform {
+		case PlatformYouTube:
+			// SeedClaimed, not Seed: these were live by definition, so if one
+			// ended while the process was down the first poll must still
+			// report the end.
+			d.watch.SeedClaimed(b.ID, b.ChannelKey, now)
+			yt++
+		case PlatformTwitch:
+			// Twitch has no watchlist — the poll leg re-derives state from
+			// Helix every cycle — but it DOES need to know which broadcast it
+			// was tracking. Without this the absence path bails on an empty
+			// twitchLiveID, so a broadcast that ended while the process was
+			// down keeps ended_at = 0 forever: it is handed back by
+			// GetLiveDetections on every subsequent restart and can never be
+			// pruned, since pruning only deletes ended rows.
+			login := d.twitchLoginFor(b.ChannelKey)
+			if login == "" {
+				continue
+			}
+			d.trackTwitchLive(login, b.ID, now)
+			tw++
+		}
 	}
-	if seeded > 0 {
-		slog.Info("re-seeded live detection watchlist", "func", "Detector.reseedFromLedger", "count", seeded)
+	if yt+tw > 0 {
+		slog.Info("re-seeded live detection from the ledger",
+			"func", "Detector.reseedFromLedger", "youtube", yt, "twitch", tw)
 	}
+}
+
+// twitchLoginFor reverses the login -> channel-key map. The map is small and
+// this runs once at startup, so a scan beats keeping a second index in sync.
+func (d *Detector) twitchLoginFor(channelKey string) string {
+	for login, key := range d.twitchTargets {
+		if key == channelKey {
+			return login
+		}
+	}
+	return ""
 }

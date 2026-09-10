@@ -119,40 +119,7 @@ func (d *Detector) twitchPollOnce() {
 // reconcileTwitchAbsences turns repeated absence from a successful Helix
 // response into an end, once the absence is credible.
 func (d *Detector) reconcileTwitchAbsences(ctx context.Context, logins []string, present map[string]TwitchStream) {
-	type ending struct{ login, id string }
-	var ended []ending
-
-	d.twitchAbsentMu.Lock()
-	for _, login := range logins {
-		if s, ok := present[login]; ok {
-			d.twitchAbsent[login] = 0
-			prev := d.twitchLiveID[login]
-			// A CHANGED stream id on a present channel is a restart: the
-			// broadcaster's ingest dropped past the reconnect grace window and
-			// Twitch minted a new id. Overwriting silently would leave the old
-			// broadcast live in the ledger forever. Note this only fires for an
-			// id we are currently tracking, so a stale Helix page carrying an
-			// id we already ended cannot resurrect it.
-			if prev != "" && prev != s.ID {
-				ended = append(ended, ending{login: login, id: prev})
-			}
-			d.twitchLiveID[login] = s.ID
-			continue
-		}
-		liveID := d.twitchLiveID[login]
-		if liveID == "" {
-			continue // nothing was live; absence is unremarkable
-		}
-		d.twitchAbsent[login]++
-		if d.twitchAbsent[login] >= twitchAbsencesBeforeEnd {
-			ended = append(ended, ending{login: login, id: liveID})
-			delete(d.twitchLiveID, login)
-			d.twitchAbsent[login] = 0
-		}
-	}
-	d.twitchAbsentMu.Unlock()
-
-	for _, e := range ended {
+	for _, e := range d.applyTwitchPresence(logins, present, time.Now()) {
 		slog.Info("twitch broadcast ended", "func", "Detector.reconcileTwitchAbsences",
 			"login", e.login, "broadcastId", e.id)
 		if err := d.sink.ObserveEnded(ctx, PlatformTwitch, e.id); err != nil {
@@ -160,6 +127,56 @@ func (d *Detector) reconcileTwitchAbsences(ctx context.Context, logins []string,
 				"broadcastId", e.id, "err", err)
 		}
 	}
+}
+
+// twitchEnding is one broadcast the poll leg concluded has finished.
+type twitchEnding struct{ login, id string }
+
+// applyTwitchPresence folds one Helix response into the tracked live state and
+// returns the broadcasts that ended.
+//
+// The lock covers only the state update, never the sink calls: reporting an end
+// takes a database write, and holding this mutex across it would block the
+// EventSub delivery path behind it. The unlock is deferred so no panic in here
+// can leave the mutex held — it is shared with the webhook handlers, and
+// leaking it once would wedge both legs permanently and hang shutdown.
+func (d *Detector) applyTwitchPresence(logins []string, present map[string]TwitchStream, now time.Time) []twitchEnding {
+	var ended []twitchEnding
+
+	d.twitchAbsentMu.Lock()
+	defer d.twitchAbsentMu.Unlock()
+
+	for _, login := range logins {
+		if s, ok := present[login]; ok {
+			d.twitchAbsent[login] = 0
+			prev := d.twitchLiveID[login]
+			// A CHANGED stream id on a present channel is a restart: the
+			// broadcaster's ingest dropped past the reconnect grace window and
+			// Twitch minted a new id. Overwriting silently would leave the old
+			// broadcast live in the ledger forever. This only fires for an id
+			// we are currently tracking, so a stale Helix page carrying an id
+			// we already ended cannot resurrect it.
+			if prev != "" && prev != s.ID {
+				ended = append(ended, twitchEnding{login: login, id: prev})
+			}
+			d.twitchLiveID[login] = s.ID
+			d.twitchLiveSince[login] = now
+			continue
+		}
+
+		liveID := d.twitchLiveID[login]
+		if liveID == "" {
+			continue // nothing was live; absence is unremarkable
+		}
+		d.twitchAbsent[login]++
+		if d.twitchAbsent[login] >= twitchAbsencesBeforeEnd {
+			ended = append(ended, twitchEnding{login: login, id: liveID})
+			delete(d.twitchLiveID, login)
+			delete(d.twitchLiveSince, login)
+			d.twitchAbsent[login] = 0
+		}
+	}
+	return ended
 }
 
 // TwitchEnvelope is the JSON body of every EventSub callback.
@@ -274,11 +291,43 @@ func (d *Detector) handleStreamOnline(ctx context.Context, ev TwitchStreamOnline
 		StartedAt:  startedAt,
 	}, MechanismTwitchEventSub)
 
+	d.trackTwitchLive(login, ev.ID, time.Now())
+}
+
+// trackTwitchLive records the broadcast currently believed live for a login.
+//
+// The unlock is deferred rather than written out: this mutex is taken on the
+// EventSub delivery path AND the poll path, so leaking it once — to a panic
+// between Lock and Unlock — would wedge the poll leg permanently and hang
+// shutdown, since the blocked goroutine holds the app WaitGroup.
+func (d *Detector) trackTwitchLive(login, broadcastID string, now time.Time) {
 	d.twitchAbsentMu.Lock()
-	d.twitchLiveID[login] = ev.ID
-	d.twitchLiveSince[login] = time.Now()
+	defer d.twitchAbsentMu.Unlock()
+	d.twitchLiveID[login] = broadcastID
+	d.twitchLiveSince[login] = now
 	d.twitchAbsent[login] = 0
-	d.twitchAbsentMu.Unlock()
+}
+
+// clearTwitchLive forgets the tracked broadcast for a login and returns what it
+// was, or "" when the offline should be ignored as out-of-order.
+func (d *Detector) clearTwitchLive(login string, sentAt time.Time) (id string, ignored bool) {
+	d.twitchAbsentMu.Lock()
+	defer d.twitchAbsentMu.Unlock()
+
+	id = d.twitchLiveID[login]
+	trackedSince := d.twitchLiveSince[login]
+	// The per-broadcaster mutex gives mutual exclusion, not arrival ordering:
+	// an offline and the online that followed it can still be handled in
+	// either order. Comparing Twitch's own send timestamp against when we
+	// started tracking the current broadcast is what stops a late-arriving
+	// offline from ending the restart that superseded it.
+	if id != "" && !trackedSince.IsZero() && sentAt.Before(trackedSince) {
+		return "", true
+	}
+	delete(d.twitchLiveID, login)
+	delete(d.twitchLiveSince, login)
+	d.twitchAbsent[login] = 0
+	return id, false
 }
 
 func (d *Detector) handleStreamOffline(ctx context.Context, ev TwitchStreamOfflineEvent, sentAt time.Time) {
@@ -289,24 +338,12 @@ func (d *Detector) handleStreamOffline(ctx context.Context, ev TwitchStreamOffli
 
 	d.recordSuccess(MechanismTwitchEventSub)
 
-	d.twitchAbsentMu.Lock()
-	id := d.twitchLiveID[login]
-	trackedSince := d.twitchLiveSince[login]
-	// The per-broadcaster mutex gives mutual exclusion, not arrival ordering:
-	// an offline and the online that followed it can still be handled in
-	// either order. Comparing Twitch's own send timestamp against when we
-	// started tracking the current broadcast is what stops a late-arriving
-	// offline from ending the restart that superseded it.
-	if id != "" && !trackedSince.IsZero() && sentAt.Before(trackedSince) {
-		d.twitchAbsentMu.Unlock()
+	id, ignored := d.clearTwitchLive(login, sentAt)
+	if ignored {
 		slog.Info("ignoring a stream.offline that predates the broadcast we are tracking",
-			"func", "Detector.handleStreamOffline", "login", login, "broadcastId", id)
+			"func", "Detector.handleStreamOffline", "login", login)
 		return
 	}
-	delete(d.twitchLiveID, login)
-	delete(d.twitchLiveSince, login)
-	d.twitchAbsent[login] = 0
-	d.twitchAbsentMu.Unlock()
 
 	if id == "" {
 		// We never saw this broadcast start , a restart during downtime, or a
