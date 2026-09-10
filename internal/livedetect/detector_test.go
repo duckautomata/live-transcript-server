@@ -3,6 +3,9 @@ package livedetect
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -701,5 +704,110 @@ func TestTwitchLoginFor(t *testing.T) {
 	}
 	if got := d.twitchLoginFor("nosuchchannel"); got != "" {
 		t.Errorf("an unknown channel must map to no login, got %q", got)
+	}
+}
+
+// Discovery is the cost that scales with channel count and is paid whether or
+// not anyone streams. At a high channel count it can eat the whole budget
+// before a single broadcast, so the projection must warn rather than let that
+// be discovered as an unexplained staleness alert hours later.
+func TestQuotaProjectionSuggestsASaferCadence(t *testing.T) {
+	channels := make([]config.ChannelConfig, 0, 6)
+	for i := range 6 {
+		channels = append(channels, config.ChannelConfig{
+			Name:             "ch" + string(rune('a'+i)),
+			YouTubeChannelId: "UC" + string(rune('a'+i)) + "aaaaaaaaaaaaaaaaaaaaa",
+		})
+	}
+
+	d, err := New(config.LiveDetectConfig{
+		Enabled: true,
+		YouTube: config.LiveDetectYouTubeConfig{
+			Enabled: true, ApiKey: "k", DiscoverySeconds: 120, DailyUnitBudget: 8000,
+		},
+	}, channels, &recordingSink{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	if len(d.ytTargets) != 6 {
+		t.Fatalf("expected 6 youtube targets, got %d", len(d.ytTargets))
+	}
+	// 6 channels x 720 cycles/day = 4320 units, which is over half of 8000.
+	cycles := int(24 * time.Hour / d.ytDiscoveryInterval())
+	if got := len(d.ytTargets) * cycles; got != 4320 {
+		t.Fatalf("projected discovery = %d units/day, expected 4320", got)
+	}
+	// The projection must not panic and must run on a nil alerts client.
+	d.logQuotaProjection()
+}
+
+// The probe's whole job is telling "our handler answered" from "something at
+// the edge answered". A decoy page carries a plausible status and no marker.
+func TestProbeDistinguishesHandlerFromInterception(t *testing.T) {
+	cases := []struct {
+		name        string
+		handler     http.HandlerFunc
+		wantReached bool
+	}{
+		{
+			name: "our handler answered",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(HeaderCallbackMarker, "1")
+				w.WriteHeader(http.StatusForbidden) // the unsigned-probe rejection
+			},
+			wantReached: true,
+		},
+		{
+			name: "bot challenge serves a decoy page with a 200",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cf-Ray", "a38c3b6dde1e054d")
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(http.StatusOK)
+				io.WriteString(w, "<html>decoy</html>")
+			},
+			wantReached: false,
+		},
+		{
+			name: "edge blocks outright",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cf-Ray", "deadbeefdeadbeef")
+				w.WriteHeader(http.StatusForbidden)
+			},
+			wantReached: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			t.Cleanup(srv.Close)
+
+			d := newTestDetector(t, &recordingSink{})
+			reached, detail := d.probeOne(srv.URL)
+			if reached != tc.wantReached {
+				t.Fatalf("reached = %v, want %v (detail: %s)", reached, tc.wantReached, detail)
+			}
+			if !reached && !strings.Contains(detail, "no handler marker") {
+				t.Errorf("detail should name the missing marker, got %q", detail)
+			}
+		})
+	}
+}
+
+// An unreachable probe target is INCONCLUSIVE, not proof of interception: the
+// request has to leave the container, reach the edge and hairpin back, and that
+// can fail for reasons that have nothing to do with bot protection. Crying wolf
+// here would train the operator to ignore the one alert that matters.
+func TestProbeTreatsTransportFailureAsInconclusive(t *testing.T) {
+	d := newTestDetector(t, &recordingSink{})
+	reached, detail := d.probeOne("http://127.0.0.1:1/livedetect/twitch/eventsub")
+
+	if !reached {
+		t.Fatalf("a transport failure must not be reported as interception (detail: %s)", detail)
+	}
+	if !strings.Contains(detail, "inconclusive") {
+		t.Errorf("detail should say inconclusive, got %q", detail)
 	}
 }

@@ -22,6 +22,11 @@ const (
 	HeaderTwitchSubscriptionType = "Twitch-Eventsub-Subscription-Type"
 )
 
+// HeaderCallbackMarker is set on every response from the inbound callback
+// handlers. Its absence in a probe response means something between the
+// internet and this process answered the request.
+const HeaderCallbackMarker = "X-Eventsub-Handler"
+
 // Twitch EventSub message types.
 const (
 	TwitchMsgVerification = "webhook_callback_verification"

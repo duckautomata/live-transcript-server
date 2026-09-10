@@ -538,3 +538,52 @@ func TestBackgroundWorkIsRefusedAfterClose(t *testing.T) {
 		t.Fatal("background work must be refused after Close")
 	}
 }
+
+// The reachability marker must be present on EVERY response from both
+// callbacks, including the rejection paths — it is what the probe uses to tell
+// "our handler answered" from "the edge answered with a decoy". An unsigned
+// request is the probe's own shape, so that case matters most.
+func TestCallbackMarkerIsAlwaysSet(t *testing.T) {
+	_, mux := setupDetectApp(t)
+
+	cases := []struct {
+		name string
+		req  *http.Request
+	}{
+		{
+			name: "twitch unsigned (the probe's own request)",
+			req:  httptest.NewRequest(http.MethodPost, livedetect.TwitchEventSubPath, strings.NewReader("{}")),
+		},
+		{
+			name: "twitch bad signature",
+			req: eventSubRequest(t, livedetect.TwitchMsgNotification, []byte(`{}`), func(r *http.Request) {
+				r.Header.Set(livedetect.HeaderTwitchMessageSignature, "sha256=bad")
+			}),
+		},
+		{
+			name: "twitch valid verification",
+			req: eventSubRequest(t, livedetect.TwitchMsgVerification,
+				[]byte(`{"challenge":"c","subscription":{"id":"s","type":"stream.online"}}`)),
+		},
+		{
+			name: "websub unsigned push",
+			req:  httptest.NewRequest(http.MethodPost, livedetect.YouTubeWebSubPath, strings.NewReader("<feed></feed>")),
+		},
+		{
+			name: "websub verification for an unknown topic",
+			req: httptest.NewRequest(http.MethodGet,
+				livedetect.YouTubeWebSubPath+"?hub.mode=subscribe&hub.challenge=c&hub.topic=https%3A%2F%2Fevil.test%2Ffeed", nil),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, tc.req)
+			if rr.Header().Get(livedetect.HeaderCallbackMarker) == "" {
+				t.Fatalf("no %s header on a %d response; the probe could not tell this from an intercepted request",
+					livedetect.HeaderCallbackMarker, rr.Code)
+			}
+		})
+	}
+}

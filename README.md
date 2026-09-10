@@ -153,6 +153,11 @@ Two rules hold the design together:
   its responses are edge-cached and a successful 200 can simply omit a channel
   that is still live.
 
+Discovery is the one cost that scales with channel count and is paid whether or
+not anyone streams (one quota unit per channel per cycle), so `discoverySeconds`
+must be scaled with the number of YouTube channels; the startup log prints the
+projection and warns when it leaves too little headroom for the fast ladder.
+
 Latency comes from knowing the video id *before* the stream starts. Every
 premiere and any stream with a waiting room is on the watchlist long in advance,
 so the `upcoming -> live` transition is caught within seconds; only an
@@ -166,9 +171,16 @@ Google cannot send an API key - and verify an HMAC over the raw request body:
 - `POST /livedetect/twitch/eventsub`
 - `GET,POST /livedetect/youtube/websub`
 
-See `liveDetect` in `config-example.yaml` for the full setup, including the
-Cloudflare caveat: Twitch's sender identifies as `Go-http-client/1.1` and
-Browser Integrity Check is on by default, which blocks callbacks **silently**.
+**Behind a CDN, exempt `/livedetect/` from bot protection.** Twitch and the
+WebSub hub both send as `Go-http-client/1.1` from cloud IPs — exactly what bot
+protection targets — and the failure is worse than a block: Cloudflare's AI
+Labyrinth answers with a decoy page and a **2xx**, so the sender records the
+notification as delivered and discards it, while nothing reaches this process to
+be logged. An hourly probe checks the callback path from the outside and alerts
+when anything other than this server answers it, because that is the one failure
+invisible from both ends.
+
+See `liveDetect` in `config-example.yaml` for the full setup.
 
 ### Media Clipping
 

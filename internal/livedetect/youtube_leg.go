@@ -352,7 +352,11 @@ func (d *Detector) webSubRenewOnce() {
 	for _, channelID := range channels {
 		// Each channel gets its own deadline: one slow hub response must not
 		// consume a shared budget and cascade-fail every channel after it.
-		ctx, cancel := d.pollCtx(15 * time.Second)
+		// This deliberately bypasses pollCtx's 20s cap — that cap exists to
+		// keep latency-critical polls from delaying shutdown, and renewal is
+		// neither latency-critical nor frequent. It still derives from d.ctx,
+		// so Close cancels it immediately.
+		ctx, cancel := context.WithTimeout(d.ctx, webSubRequestTimeout)
 		err := d.websub.Subscribe(ctx, channelID, callback)
 		cancel()
 

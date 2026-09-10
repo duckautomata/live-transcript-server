@@ -312,7 +312,11 @@ func (d *Detector) Start() error {
 			}
 		}
 		d.spawn(d.runHealthWatch)
+		if d.EventSubEnabled() || d.WebSubEnabled() {
+			d.spawn(d.runCallbackProbe)
+		}
 
+		d.logQuotaProjection()
 		slog.Info("live detection started",
 			"func", "Detector.Start",
 			"twitch", d.cfg.Twitch.Enabled,
@@ -338,6 +342,46 @@ func (d *Detector) Close() error {
 	})
 	d.wg.Wait()
 	return nil
+}
+
+// logQuotaProjection reports the fixed daily YouTube quota cost of the
+// configured discovery cadence, and warns when it leaves too little headroom.
+//
+// Discovery is the one cost that scales with channel count and is paid whether
+// or not anyone streams: one unit per channel per cycle, forever. State polling
+// is nearly free by comparison, but the fast ladder during an actual broadcast
+// costs roughly 700-2,000 units per stream — so a discovery bill that already
+// eats most of the budget means detection dies partway through a busy day, at
+// which point the fast ladder is exactly what stops working.
+//
+// Printed at startup because the failure it predicts is otherwise only visible
+// hours later, as a staleness alert with no obvious cause.
+func (d *Detector) logQuotaProjection() {
+	if !d.cfg.YouTube.Enabled || len(d.ytTargets) == 0 {
+		return
+	}
+	interval := d.ytDiscoveryInterval()
+	cyclesPerDay := int(24 * time.Hour / interval)
+	discoveryUnits := len(d.ytTargets) * cyclesPerDay
+	budget := d.gov.Snapshot(time.Now()).UnitBudget
+
+	// Below this, a few concurrent streams still fit inside the budget.
+	const headroomFloor = 0.5
+
+	attrs := []any{
+		"func", "Detector.logQuotaProjection",
+		"channels", len(d.ytTargets),
+		"discovery_interval", interval.String(),
+		"discovery_units_per_day", discoveryUnits,
+		"daily_budget", budget,
+	}
+	if budget > 0 && float64(discoveryUnits) > float64(budget)*headroomFloor {
+		suggested := int((float64(len(d.ytTargets)) * 86400) / (float64(budget) * 0.25))
+		slog.Warn("youtube discovery alone consumes most of the daily quota; raise discoverySeconds",
+			append(attrs, "suggested_discovery_seconds", suggested)...)
+		return
+	}
+	slog.Info("youtube quota projection", attrs...)
 }
 
 // watchSummary renders which platforms each channel is watched on, e.g.
@@ -565,6 +609,8 @@ func (d *Detector) expectedCadence(mechanism string) time.Duration {
 		return eventSubReconcileInterval
 	case MechanismYouTubeWebSubRenew:
 		return webSubRenewInterval
+	case MechanismCallbackProbe:
+		return callbackProbeInterval
 	default:
 		// Push legs (delivery, not polling): never stale.
 		return 0

@@ -168,6 +168,10 @@ func (app *App) twitchEventSubHandler(w http.ResponseWriter, r *http.Request) {
 // GET is the subscription verification handshake; POST is a feed push. Like
 // the Twitch callback this is public and authenticates by HMAC.
 func (app *App) youtubeWebSubHandler(w http.ResponseWriter, r *http.Request) {
+	// Same reachability marker as the Twitch callback: if a probe response
+	// lacks it, something in front of the server answered instead of Go.
+	w.Header().Set(livedetect.HeaderCallbackMarker, "1")
+
 	if !app.LiveDetect.WebSubEnabled() {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return

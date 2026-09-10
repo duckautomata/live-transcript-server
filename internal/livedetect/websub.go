@@ -28,6 +28,11 @@ const (
 const (
 	webSubRequestedLease = 432000 * time.Second // 5 days; the hub will cap it
 	webSubRenewInterval  = 12 * time.Hour       // renew far more often than needed
+	// webSubRequestTimeout is generous on purpose. Google's hub is a legacy
+	// App Engine service that is routinely slow to answer a subscribe, and
+	// this runs twice a day per channel — so waiting is free, while timing out
+	// costs the entire push path until the next renewal cycle.
+	webSubRequestTimeout = 45 * time.Second
 )
 
 // WebSubMode values on the verification GET.
@@ -57,7 +62,7 @@ type WebSubClient struct {
 // NewWebSubClient constructs a hub client.
 func NewWebSubClient(secret string) *WebSubClient {
 	return &WebSubClient{
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+		httpClient: &http.Client{Timeout: webSubRequestTimeout},
 		HubURL:     youtubeHubURL,
 		secret:     secret,
 	}
