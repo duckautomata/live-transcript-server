@@ -280,6 +280,40 @@ func (c *TwitchClient) GetStreams(ctx context.Context, logins []string) ([]Twitc
 	return resp.Data, nil
 }
 
+// TwitchChannel is one entry from GET /helix/channels: the broadcaster's
+// current stream settings, live or not.
+type TwitchChannel struct {
+	BroadcasterID    string `json:"broadcaster_id"`
+	BroadcasterLogin string `json:"broadcaster_login"`
+	Title            string `json:"title"`
+	GameName         string `json:"game_name"`
+}
+
+// GetChannel fetches a broadcaster's channel information by numeric id.
+//
+// Unlike GetStreams this answers whether or not the channel is live, and it
+// reflects the title the moment the streamer sets it - which is what makes it
+// the right source right after a stream.online event, when /streams can still
+// be a few seconds behind and answer "offline". A broadcaster Twitch does not
+// know is (nil, nil).
+func (c *TwitchClient) GetChannel(ctx context.Context, broadcasterID string) (*TwitchChannel, error) {
+	if broadcasterID == "" {
+		return nil, nil
+	}
+	var resp struct {
+		Data []TwitchChannel `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/channels?broadcaster_id="+url.QueryEscape(broadcasterID), nil, &resp); err != nil {
+		return nil, err
+	}
+	for i := range resp.Data {
+		if resp.Data[i].BroadcasterID == broadcasterID {
+			return &resp.Data[i], nil
+		}
+	}
+	return nil, nil
+}
+
 // EventSub subscription types and the transport we use.
 const (
 	EventSubTypeStreamOnline  = "stream.online"

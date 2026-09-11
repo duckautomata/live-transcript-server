@@ -169,6 +169,13 @@ type Payload struct {
 	// announcement never sees them.
 	Mechanism    string
 	SawScheduled bool
+
+	// Ended marks a broadcast that was already over when the payload was
+	// built. Only previews set it: a real announcement is always of a
+	// broadcast that just went live. Twitch serves a "404" placeholder as the
+	// preview image of an offline channel, so an ended Twitch payload offers
+	// no thumbnail rather than that.
+	Ended bool
 }
 
 // Channel is how one configured channel is presented in announcements.
@@ -181,10 +188,14 @@ type Channel struct {
 // ThumbnailURL is the platform's preview image for the payload. Twitch
 // previews share one URL for every broadcast a login will ever do, so a
 // cache-buster is appended: Discord proxies images by URL and would otherwise
-// happily show a week-old frame.
+// happily show a week-old frame. That URL only shows a frame while the
+// channel is live, so an ended Twitch broadcast has no thumbnail at all.
 func (p Payload) ThumbnailURL(ch Channel) string {
 	switch p.Platform {
 	case PlatformTwitch:
+		if p.Ended {
+			return ""
+		}
 		login := ch.TwitchLogin
 		if login == "" {
 			login = strings.ToLower(ch.DisplayName)

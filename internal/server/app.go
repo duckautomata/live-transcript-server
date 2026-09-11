@@ -99,6 +99,19 @@ type App struct {
 	bgClosed bool
 }
 
+// LocalVersion is the version string of a binary built and run by hand, with
+// no VERSION set: every deployed image carries a real version (or "dev" /
+// "unknown" from the Dockerfile). A few conveniences that must never reach a
+// deployment - the stand-in video behind a blank notification preview - key
+// off it.
+const LocalVersion = "local"
+
+// localBuild reports whether this process is a hand-built local binary
+// rather than a deployment.
+func (app *App) localBuild() bool {
+	return app.Version == LocalVersion
+}
+
 // NewApp wires the application together. It performs no environment side
 // effects (no mkdirs, no DB writes) - those live in Init so construction can
 // never half-succeed and tests can build an App without touching the world.

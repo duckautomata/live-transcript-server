@@ -74,7 +74,7 @@ func TestSendTestLabelsWebhookByName(t *testing.T) {
 	discord := newNotifDiscord(t)
 	d := newNotifDispatcher(t, store, discord, nil)
 
-	p := SamplePayload(TriggerLive, notifChannel(), nil, notifNow)
+	p := SamplePayload(TriggerLive, notifChannel(), notifNow)
 	if !p.IsSample() || p.ID != SampleVideoID || p.Title != SampleVideoTitle {
 		t.Fatalf("sample payload = %+v", p)
 	}

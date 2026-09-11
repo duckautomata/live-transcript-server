@@ -166,15 +166,12 @@ func (rc RenderContext) values() map[string]string {
 	if name == "" {
 		name = p.ChannelKey
 	}
-	// An empty title would render the default "**{title}**" line as four bare
-	// asterisks to an audience of thousands. Say "(untitled)" instead.
-	title := strings.TrimSpace(p.Title)
-	if title == "" {
-		title = "(untitled)"
-	}
+	// A missing title renders blank, nothing is invented in its place. Expand
+	// takes the emphasis around an empty placeholder with it, so the default
+	// "**{title}**" line disappears rather than posting four bare asterisks.
 	v := map[string]string{
 		"{channel}":    name,
-		"{title}":      title,
+		"{title}":      strings.TrimSpace(p.Title),
 		"{url}":        p.URL,
 		"{platform}":   PlatformLabel(p.Platform),
 		"{headline}":   p.Trigger.Headline(),
@@ -193,17 +190,30 @@ func (rc RenderContext) values() map[string]string {
 	return v
 }
 
-// placeholderPattern matches any {word}; unknown ones are left untouched so a
-// template author can write literal braces without an escape syntax.
-var placeholderPattern = regexp.MustCompile(`\{[A-Za-z]+\}`)
+// placeholderPattern matches any {word}, together with a Discord emphasis
+// marker hugging it on either side; unknown placeholders are left untouched
+// so a template author can write literal braces without an escape syntax.
+var placeholderPattern = regexp.MustCompile("(?:\\*\\*\\*|\\*\\*|\\*|___|__|_|~~|`)?\\{[A-Za-z]+\\}(?:\\*\\*\\*|\\*\\*|\\*|___|__|_|~~|`)?")
 
 // Expand substitutes placeholders in a template.
+//
+// A placeholder that expands to nothing takes matching emphasis markers on
+// both sides with it: "**{title}**" for a stream with no title renders as
+// nothing at all, not as four bare asterisks. Anything else around a
+// placeholder is left exactly as written.
 func Expand(template string, values map[string]string) string {
 	return placeholderPattern.ReplaceAllStringFunc(template, func(m string) string {
-		if v, ok := values[m]; ok {
-			return v
+		open := strings.IndexByte(m, '{')
+		closing := strings.IndexByte(m, '}')
+		lead, key, trail := m[:open], m[open:closing+1], m[closing+1:]
+		v, ok := values[key]
+		if !ok {
+			return m
 		}
-		return m
+		if v == "" && lead != "" && lead == trail {
+			return ""
+		}
+		return lead + v + trail
 	})
 }
 
@@ -211,7 +221,7 @@ func Expand(template string, values map[string]string) string {
 func Render(ev model.NotificationEvent, rc RenderContext) Message {
 	values := rc.values()
 	msg := Message{
-		Content:  truncate(Expand(ev.Content, values), MaxContentLength),
+		Content:  truncate(strings.TrimSpace(Expand(ev.Content, values)), MaxContentLength),
 		Mentions: MentionPolicy(ev.Content),
 	}
 	if !ev.EmbedEnabled {
@@ -220,11 +230,11 @@ func Render(ev model.NotificationEvent, rc RenderContext) Message {
 
 	embed := map[string]any{}
 	total := 0
-	if t := truncate(Expand(ev.Embed.Title, values), MaxEmbedTitle); t != "" {
+	if t := truncate(strings.TrimSpace(Expand(ev.Embed.Title, values)), MaxEmbedTitle); t != "" {
 		embed["title"] = t
 		total += utf8.RuneCountInString(t)
 	}
-	if d := truncate(Expand(ev.Embed.Description, values), MaxEmbedDescription); d != "" {
+	if d := truncate(strings.TrimSpace(Expand(ev.Embed.Description, values)), MaxEmbedDescription); d != "" {
 		embed["description"] = d
 		total += utf8.RuneCountInString(d)
 	}
@@ -244,7 +254,7 @@ func Render(ev model.NotificationEvent, rc RenderContext) Message {
 	if rc.FooterOverride != "" {
 		footer = rc.FooterOverride
 	}
-	if f := truncate(Expand(footer, values), MaxEmbedFooter); f != "" {
+	if f := truncate(strings.TrimSpace(Expand(footer, values)), MaxEmbedFooter); f != "" {
 		embed["footer"] = map[string]string{"text": f}
 		total += utf8.RuneCountInString(f)
 	}
@@ -479,19 +489,78 @@ func IsValidationError(err error) bool {
 	return errors.As(err, &ve)
 }
 
-// The stand-in video previews and test sends are rendered from when the
-// channel has no detection of its own yet: a real, public video, so the
-// thumbnail loads and the links resolve.
+// PreviewPayload builds the payload previews and test sends are rendered
+// from, out of the channel's own detections and nothing else: live is the
+// most recent live broadcast, and each other trigger is the most recent video
+// detected as that kind, falling back to the most recent YouTube broadcast
+// (which is a video too) when there is none. A detail the detection lacks -
+// a title EventSub never carried, a start time the platform did not report -
+// is left blank, and with no detection at all only the trigger and channel
+// are filled in. Nothing is ever invented: the result is what a real
+// announcement of that detection would have said.
+func PreviewPayload(trigger Trigger, ch Channel, live *model.DetectedBroadcast, video *model.DetectedVideo, now time.Time) Payload {
+	p := Payload{Trigger: trigger, ChannelKey: ch.Key, DetectedAt: now}
+	if live != nil && live.BroadcastID == "" {
+		live = nil
+	}
+	if video != nil && video.VideoID == "" {
+		video = nil
+	}
+
+	if trigger == TriggerLive {
+		if live != nil {
+			p.Platform = live.Platform
+			p.ID = live.BroadcastID
+			p.URL = live.URL
+			p.Title = live.Title
+			p.Mechanism = live.Mechanism
+			p.Ended = live.EndedAt > 0
+			if live.StartedAt > 0 {
+				p.EventTime = time.Unix(live.StartedAt, 0)
+			}
+		}
+		return p
+	}
+
+	// The remaining triggers are YouTube-only.
+	p.Platform = PlatformYouTube
+	switch {
+	case video != nil:
+		p.ID = video.VideoID
+		p.URL = video.URL
+		p.Title = video.Title
+		at := video.PublishedAt
+		if trigger == TriggerScheduled {
+			at = video.ScheduledAt
+		}
+		if at > 0 {
+			p.EventTime = time.Unix(at, 0)
+		}
+	case live != nil && live.Platform == PlatformYouTube:
+		// A finished YouTube broadcast is a video with a real thumbnail and a
+		// working link; only its time is unknown for this trigger.
+		p.ID = live.BroadcastID
+		p.URL = live.URL
+		p.Title = live.Title
+		p.Mechanism = live.Mechanism
+	}
+	return p
+}
+
+// The stand-in video a LOCAL build previews when the channel has no detection
+// of its own yet: a real, public video, so the thumbnail loads and the links
+// resolve while working on the page. A deployed build never shows it; see
+// SamplePayload.
 const (
 	SampleVideoID    = "oqFfSRupK_E"
 	SampleVideoTitle = "【NEW OUTFIT REVEAL】What time is it? #DOKIBEACHEPISODE【Dokibird】"
 )
 
-// SamplePayload builds a realistic payload for previews and test sends. When
-// a recent detection is supplied its title and id are reused, so the preview
-// shows the channel's own most recent stream; otherwise the stand-in video is
-// used.
-func SamplePayload(trigger Trigger, ch Channel, recent *model.DetectedBroadcast, now time.Time) Payload {
+// SamplePayload builds the stand-in payload for a trigger. It exists for
+// local development only, where no detection will ever be recorded and a
+// blank preview would make the editor impossible to work on; the caller
+// decides whether the build qualifies.
+func SamplePayload(trigger Trigger, ch Channel, now time.Time) Payload {
 	p := Payload{
 		Trigger:    trigger,
 		Platform:   PlatformYouTube,
@@ -508,19 +577,6 @@ func SamplePayload(trigger Trigger, ch Channel, recent *model.DetectedBroadcast,
 		p.EventTime = now.Add(2 * time.Hour)
 	case TriggerShort:
 		p.URL = "https://www.youtube.com/shorts/" + SampleVideoID
-	}
-	// A Twitch detection cannot illustrate a YouTube-only trigger; keep the
-	// stand-in values for those.
-	if recent != nil && recent.BroadcastID != "" && (recent.Platform != PlatformTwitch || trigger == TriggerLive) {
-		p.Platform = recent.Platform
-		p.ID = recent.BroadcastID
-		p.URL = recent.URL
-		if recent.Title != "" {
-			p.Title = recent.Title
-		}
-		if recent.Mechanism != "" {
-			p.Mechanism = recent.Mechanism
-		}
 	}
 	return p
 }

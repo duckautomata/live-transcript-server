@@ -230,9 +230,12 @@ embed to these Discord webhooks*.
 - **Mentions:** the pings a message can make are derived from the template,
   never from the rendered text - a stream title containing `@everyone` is
   shown but notifies nobody.
-- **Preview and test:** the editor renders the draft server-side from sample
-  data (the channel's most recent detection, when there is one), and can post
-  it to a webhook of the admin's choice with every mention suppressed.
+- **Preview and test:** the editor renders the draft server-side from the
+  channel's own most recent detection for the trigger - anything it lacked
+  is left blank - and can post it to a webhook of the admin's
+  choice with every mention suppressed. Only a hand-built local binary (no
+  `VERSION` set) falls back to a stand-in video when nothing has been
+  detected; a deployment previews blank details instead.
 
 These webhooks reach thousands of people, so nothing but a rendered
 announcement of a real observation - or an explicit admin test - is ever

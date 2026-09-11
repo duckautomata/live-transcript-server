@@ -46,6 +46,28 @@ func (s *Store) UpdateDetectionTitle(ctx context.Context, platform, broadcastID,
 	return err
 }
 
+// FillDetectionTitle records a title for a ledger row that has none, and
+// reports whether it did. A row that already carries a title is left alone:
+// this is how a later observation of the same broadcast (the Twitch poll leg
+// seeing a stream EventSub claimed without a title) backfills the ledger
+// without ever overwriting what the winning mechanism recorded.
+func (s *Store) FillDetectionTitle(ctx context.Context, platform, broadcastID, title string) (bool, error) {
+	if title == "" {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE detected_broadcasts SET title = ? WHERE platform = ? AND broadcast_id = ? AND title = ''",
+		title, platform, broadcastID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetDetection returns a single ledger row, or nil when the broadcast has
 // never been claimed.
 func (s *Store) GetDetection(ctx context.Context, platform, broadcastID string) (*model.DetectedBroadcast, error) {
@@ -121,7 +143,7 @@ func (s *Store) GetRecentDetections(ctx context.Context, channelKey string, limi
 	}
 	rows, err := s.db.QueryContext(ctx, `
 	SELECT platform, broadcast_id, channel_key, url, title, started_at, detected_at, mechanism, ended_at
-	FROM detected_broadcasts WHERE channel_key = ? ORDER BY detected_at DESC LIMIT ?;
+	FROM detected_broadcasts WHERE channel_key = ? ORDER BY detected_at DESC, rowid DESC LIMIT ?;
 	`, channelKey, limit)
 	if err != nil {
 		return nil, err

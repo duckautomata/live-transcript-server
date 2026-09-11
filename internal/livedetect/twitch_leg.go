@@ -307,8 +307,15 @@ const twitchTitleLookupTimeout = 5 * time.Second
 // EventSub wins the ledger claim for nearly every Twitch go-live. The sink
 // calls this after the claim and after the worker queue write, so the one
 // Helix round trip lands between detection and announcement rather than on
-// the latency path. Best-effort: any failure returns "" and the announcement
-// goes out without a title. Nil-receiver-safe.
+// the latency path.
+//
+// The channel endpoint is asked first: it carries the title whether or not
+// Helix considers the stream live yet, and right after stream.online the
+// streams endpoint can still say "offline" for a few seconds - which used to
+// come back as no title at all. The streams endpoint is the fallback for a
+// broadcaster whose id was never resolved (no EventSub configured, in which
+// case the poll leg supplies titles itself anyway). Best-effort: any failure
+// returns "" and the announcement goes out without a title. Nil-receiver-safe.
 func (d *Detector) LookupTwitchTitle(ctx context.Context, channelKey string) string {
 	if d == nil || d.twitch == nil {
 		return ""
@@ -320,6 +327,16 @@ func (d *Detector) LookupTwitchTitle(ctx context.Context, channelKey string) str
 	ctx, cancel := context.WithTimeout(ctx, twitchTitleLookupTimeout)
 	defer cancel()
 
+	if id := d.twitchUserIDFor(channelKey); id != "" {
+		ch, err := d.twitch.GetChannel(ctx, id)
+		if err != nil {
+			slog.Warn("could not look up the title of a detected twitch stream from its channel; trying the stream",
+				"func", "Detector.LookupTwitchTitle", "key", channelKey, "broadcasterId", id, "err", err)
+		} else if ch != nil && strings.TrimSpace(ch.Title) != "" {
+			return strings.TrimSpace(ch.Title)
+		}
+	}
+
 	streams, err := d.twitch.GetStreams(ctx, []string{login})
 	if err != nil {
 		slog.Warn("could not look up the title of a detected twitch stream",
@@ -328,7 +345,20 @@ func (d *Detector) LookupTwitchTitle(ctx context.Context, channelKey string) str
 	}
 	for _, s := range streams {
 		if strings.ToLower(s.UserLogin) == login {
-			return s.Title
+			return strings.TrimSpace(s.Title)
+		}
+	}
+	slog.Warn("helix reports no live stream for a channel that just went live; announcing without a title",
+		"func", "Detector.LookupTwitchTitle", "key", channelKey, "login", login)
+	return ""
+}
+
+// twitchUserIDFor is the numeric broadcaster id resolved for a channel key,
+// or "" when EventSub never resolved one.
+func (d *Detector) twitchUserIDFor(channelKey string) string {
+	for id, key := range d.twitchUserIDs {
+		if key == channelKey {
+			return id
 		}
 	}
 	return ""

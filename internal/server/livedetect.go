@@ -70,6 +70,21 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 		return err
 	}
 	if !won {
+		// The claim was lost, but this observation may know something the
+		// winner did not: the Twitch poll leg carries a title where EventSub
+		// carries none. Fill it in so the admin page shows the stream by
+		// name. The announcement is already out, so nothing else changes.
+		if b.Title != "" {
+			filled, err := app.Store.FillDetectionTitle(context.WithoutCancel(ctx), b.Platform, b.ID, b.Title)
+			if err != nil {
+				slog.Warn("failed to backfill a detected stream's title", "func", "App.ObserveLive",
+					"key", b.ChannelKey, "broadcastId", b.ID, "err", err)
+			} else if filled {
+				slog.Info("backfilled a detected stream's title", "func", "App.ObserveLive",
+					"key", b.ChannelKey, "platform", b.Platform, "broadcastId", b.ID, "mechanism", mechanism)
+				app.bumpAdminChange(b.ChannelKey)
+			}
+		}
 		return nil
 	}
 
@@ -121,7 +136,7 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 	// Twitch EventSub wins nearly every Twitch race and carries no title. One
 	// Helix round trip here - after the claim and the queue write, so it sits
 	// between detection and announcement rather than on the latency path -
-	// is what keeps the audience embed from reading "(untitled)".
+	// is what keeps the audience embed's title line from going out blank.
 	title := b.Title
 	if title == "" && b.Platform == livedetect.PlatformTwitch && app.TwitchTitleLookup != nil {
 		if looked := app.TwitchTitleLookup(context.WithoutCancel(ctx), b.ChannelKey); looked != "" {

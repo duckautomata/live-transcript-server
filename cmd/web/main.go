@@ -19,9 +19,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Set via environment variables VERSION and BUILD_TIME
+// Set via environment variables VERSION and BUILD_TIME. A binary run without
+// them is a local build, which the server treats slightly differently (see
+// server.LocalVersion).
 var (
-	Version   = "local"
+	Version   = server.LocalVersion
 	BuildTime = "unknown"
 )
 

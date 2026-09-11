@@ -413,28 +413,66 @@ func decodeNotificationDraft(w http.ResponseWriter, r *http.Request, cs *Channel
 	return &req, trigger, true
 }
 
-// samplePayload builds the payload previews and tests are rendered from,
-// reusing the channel's most recent live detection so the preview shows a
-// real title and thumbnail when there is one.
-func (app *App) samplePayload(ctx context.Context, cs *ChannelState, trigger announce.Trigger) announce.Payload {
-	var recent *model.DetectedBroadcast
-	if dets, err := app.Store.GetRecentDetections(ctx, cs.Key, 1); err == nil && len(dets) > 0 {
-		recent = &dets[0]
+// previewPayload builds the payload previews and tests are rendered from: the
+// channel's most recent detection for the trigger, with anything it lacks
+// left blank. Only a local build, where no detection will ever be recorded,
+// substitutes the stand-in video for a channel that has nothing yet; a
+// deployment previews blank details rather than someone else's stream.
+func (app *App) previewPayload(ctx context.Context, cs *ChannelState, trigger announce.Trigger) announce.Payload {
+	// The live trigger previews the newest broadcast on either platform; the
+	// video triggers can only borrow a YouTube one, so for them the newest
+	// YouTube broadcast is the one worth passing along.
+	var live *model.DetectedBroadcast
+	if dets, err := app.Store.GetRecentDetections(ctx, cs.Key, 20); err == nil {
+		for i := range dets {
+			if trigger == announce.TriggerLive || dets[i].Platform == announce.PlatformYouTube {
+				live = &dets[i]
+				break
+			}
+		}
 	}
-	return announce.SamplePayload(trigger, app.Announcer.ChannelInfo(cs.Key), recent, time.Now())
+	var video *model.DetectedVideo
+	if trigger != announce.TriggerLive {
+		if vids, err := app.Store.GetRecentVideoDetections(ctx, cs.Key, 50); err == nil {
+			for i := range vids {
+				if vids[i].Kind == string(trigger) {
+					video = &vids[i]
+					break
+				}
+			}
+		}
+	}
+	ch := app.Announcer.ChannelInfo(cs.Key)
+	p := announce.PreviewPayload(trigger, ch, live, video, time.Now())
+	if p.ID == "" && app.localBuild() {
+		p = announce.SamplePayload(trigger, ch, time.Now())
+	}
+	return p
 }
 
+// sampleDescription tells the editor where a preview's details came from, so
+// it can say why a field is blank: "recent" is the channel's own detection,
+// "sample" the stand-in video a local build falls back to, and "none" means
+// the channel has nothing for this trigger yet.
 func sampleDescription(p announce.Payload) map[string]any {
 	source := "recent"
-	if p.IsSample() {
+	switch {
+	case p.IsSample():
 		source = "sample"
+	case p.ID == "":
+		source = "none"
+	}
+	var eventTime int64
+	if !p.EventTime.IsZero() {
+		eventTime = p.EventTime.Unix()
 	}
 	return map[string]any{
 		"platform":  p.Platform,
 		"id":        p.ID,
 		"url":       p.URL,
 		"title":     p.Title,
-		"eventTime": p.EventTime.Unix(),
+		"eventTime": eventTime,
+		"ended":     p.Ended,
 		"source":    source,
 	}
 }
@@ -446,7 +484,7 @@ func (app *App) postAdminNotificationPreviewHandler(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	payload := app.samplePayload(r.Context(), cs, trigger)
+	payload := app.previewPayload(r.Context(), cs, trigger)
 	msg := app.Announcer.Preview(req.Event, payload)
 	writeJSON(w, NotificationPreviewResponse{
 		Trigger: string(trigger),
@@ -479,7 +517,7 @@ func (app *App) postAdminNotificationTestHandler(w http.ResponseWriter, r *http.
 
 	ctx, cancel := context.WithTimeout(r.Context(), testSendTimeout)
 	defer cancel()
-	payload := app.samplePayload(ctx, cs, trigger)
+	payload := app.previewPayload(ctx, cs, trigger)
 	result := app.Announcer.SendTest(ctx, req.Event, payload, hook)
 
 	app.bumpAdminChange(cs.Key)

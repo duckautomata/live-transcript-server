@@ -1178,7 +1178,7 @@
         <dt>Minimum time between notifications</dt>
         <dd>After the event posts for a trigger, it stays quiet for that trigger for this long. A stream that drops and restarts is a brand-new broadcast to the platform and would otherwise ping everyone again; 30 minutes swallows that while still announcing a second stream later in the day. Because the gap is per trigger, a “scheduled” ping never eats the “going live” ping that follows it. Suppressed pings are listed under Recent deliveries so you can see the limit working.</dd>
         <dt>Preview and Send test</dt>
-        <dd>The preview on the right of the editor is rendered by the server from sample data (your most recent detection, when there is one), so it is exactly what would be posted. <strong>Send test…</strong> posts that rendering to a webhook of your choice with <em>every ping suppressed</em> - role mentions appear as text and nobody is notified - so you can check the look in a real channel, or in a private one, before enabling the event.</dd>
+        <dd>The preview on the right of the editor is rendered by the server from this channel's most recent detection for the trigger, so it is exactly what would be posted; anything that detection lacked (a title, a start time) is left blank rather than made up, and a channel with nothing detected yet previews blank details. <strong>Send test…</strong> posts that rendering to a webhook of your choice with <em>every ping suppressed</em> - role mentions appear as text and nobody is notified - so you can check the look in a real channel, or in a private one, before enabling the event.</dd>
         <dt>Recent deliveries</dt>
         <dd>Every decision the server made: <span class="status-pill st-sent">Sent</span>, <span class="status-pill st-partial">Partial</span> (some webhooks failed - the detail says which and why), <span class="status-pill st-failed">Failed</span>, <span class="status-pill st-suppressed">Suppressed</span> by the minimum gap, or a <span class="status-pill st-test">Test</span> you sent. A webhook that was deleted in Discord shows up here as a failure with “webhook no longer exists”.</dd>
         <dt>Live detection cards</dt>
@@ -1268,7 +1268,7 @@
 <div class="modal-backdrop" id="test-modal">
   <div class="modal">
     <h3>Send a test message?</h3>
-    <p>This posts a <strong>visible</strong> message to the webhook below, rendered for the <strong id="test-trigger">Live</strong> trigger with sample data.
+    <p>This posts a <strong>visible</strong> message to the webhook below, rendered for the <strong id="test-trigger">Live</strong> trigger from the same detection as the preview.
 
 Every ping is suppressed: role mentions are shown as text, but nobody is notified.</p>
     <label class="field-label" for="test-webhook">Send it to</label>
@@ -2436,7 +2436,7 @@ Every ping is suppressed: role mentions are shown as text, but nobody is notifie
       return;
     }
     notifyLogBody.innerHTML = log.map(e => {
-      const title = e.title || e.broadcastId || '(untitled)';
+      const title = e.title || urlLabel(e.url) || e.broadcastId || '(untitled)';
       const link = e.url
         ? `<a href="${escapeHtml(e.url)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>`
         : escapeHtml(title);
@@ -2499,7 +2499,7 @@ Every ping is suppressed: role mentions are shown as text, but nobody is notifie
     ldDetectionsCount.textContent = shown.length ? `last ${shown.length}` : 'none yet';
     ldDetectionsClearBtn.disabled = !shown.length;
     ldDetectionsBody.innerHTML = shown.length ? shown.map(i => {
-      const label = escapeHtml(i.title || i.id || '(untitled)');
+      const label = escapeHtml(i.title || urlLabel(i.url) || i.id || '(untitled)');
       const link = i.url ? `<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${label}</a>` : label;
       return `
         <div class="row">
@@ -2865,10 +2865,29 @@ Every ping is suppressed: role mentions are shown as text, but nobody is notifie
     html += '</div></div>';
     nfPreview.innerHTML = html;
     nfPreview.querySelectorAll('img').forEach(img => img.addEventListener('error', () => img.classList.add('broken')));
-    const s = res.sample || {};
-    nfPreviewNote.textContent = s.source === 'recent'
-      ? 'Rendered by the server from your most recent detection, so this is exactly what would be posted. Pings are shown as they would appear.'
-      : 'Rendered by the server from a sample video, so this is exactly what would be posted. Once this channel has a detection of its own, that is used instead.';
+    nfPreviewNote.textContent = previewNote(res.sample || {});
+  }
+
+  // previewNote says where the preview's details came from, and why one may
+  // be blank: the server never invents a detail it does not have.
+  function previewNote(s) {
+    if (s.source === 'sample') {
+      return 'Rendered by the server from a stand-in video, because this is a local build and nothing has been detected for this trigger yet. A deployed server never shows it: with nothing detected, the details are simply blank.';
+    }
+    if (s.source === 'none') {
+      return 'Rendered by the server. Nothing has been detected for this trigger on this channel yet, so the stream details are blank; they fill in from the first real detection.';
+    }
+    const parts = ['Rendered by the server from your most recent detection, so this is exactly what would be posted. Pings are shown as they would appear.'];
+    if (!s.title) parts.push('No title was recorded for it, so {title} is blank here.');
+    if (s.platform === 'twitch' && s.ended) parts.push('Twitch only serves a preview image while a stream is live, so none is shown for this ended one.');
+    return parts.join(' ');
+  }
+
+  // A link needs text. A detection that has no title on record is shown by
+  // where it lives (twitch.tv/dokibird, youtube.com/watch?v=…) rather than
+  // by a bare platform id or a made-up "(untitled)".
+  function urlLabel(u) {
+    return String(u || '').replace(/^https?:\/\/(www\.)?/, '');
   }
 
   // --- Actions ---

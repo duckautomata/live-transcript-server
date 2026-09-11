@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -496,6 +497,16 @@ func TestPayloadThumbnailURL(t *testing.T) {
 	}
 	if got := tw.ThumbnailURL(Channel{DisplayName: "DokiBird"}); !strings.Contains(got, "live_user_dokibird-") {
 		t.Errorf("twitch thumbnail should fall back to the lowercased display name, got %q", got)
+	}
+	// Twitch serves a "404" placeholder for an offline channel, so an ended
+	// broadcast offers no image; a YouTube thumbnail outlives the stream.
+	ended := tw
+	ended.Ended = true
+	if got := ended.ThumbnailURL(ch); got != "" {
+		t.Errorf("ended twitch thumbnail = %q, want none", got)
+	}
+	if got := (Payload{Platform: PlatformYouTube, ID: "abc", Ended: true}).ThumbnailURL(ch); got != "https://i.ytimg.com/vi/abc/maxresdefault.jpg" {
+		t.Errorf("ended youtube thumbnail = %q, want it kept", got)
 	}
 	if got := (Payload{Platform: "kick", ID: "x"}).ThumbnailURL(ch); got != "" {
 		t.Errorf("unknown platform thumbnail = %q, want empty", got)
@@ -2071,7 +2082,7 @@ func TestSendTestSuppressesMentionsAndLogsTest(t *testing.T) {
 	// An unsaved draft (ID 0) with a webhook that is not in the rule's list.
 	ev := notifEvent(0, "draft", []Trigger{TriggerLive}, notifWebhookURL(notifWebhookA))
 	ev.Content = "<@&555555555555555555> @everyone {channel} {headline}"
-	p := SamplePayload(TriggerLive, notifChannel(), nil, notifNow)
+	p := SamplePayload(TriggerLive, notifChannel(), notifNow)
 
 	sentBefore := testutil.ToFloat64(metrics.Announcements.WithLabelValues("doki", "live", model.NotificationStatusSent))
 	res := d.SendTest(context.Background(), ev, p, model.Webhook{URL: notifWebhookURL(notifWebhookB)})
@@ -2121,7 +2132,7 @@ func TestSendTestFailures(t *testing.T) {
 	discord := newNotifDiscord(t)
 	d := newNotifDispatcher(t, store, discord, nil)
 	ev := notifEvent(3, "saved", []Trigger{TriggerLive}, notifWebhookURL(notifWebhookA))
-	p := SamplePayload(TriggerLive, notifChannel(), nil, notifNow)
+	p := SamplePayload(TriggerLive, notifChannel(), notifNow)
 
 	// Deleted webhook.
 	discord.reply(notifWebhookA, notifReply{status: http.StatusNotFound, body: `{"message":"Unknown Webhook","code":10015}`})
@@ -2173,62 +2184,137 @@ func TestSendTestFailures(t *testing.T) {
 
 func TestSamplePayload(t *testing.T) {
 	ch := notifChannel()
-	live := SamplePayload(TriggerLive, ch, nil, notifNow)
+	live := SamplePayload(TriggerLive, ch, notifNow)
 	if live.Trigger != TriggerLive || live.Platform != PlatformYouTube || live.ChannelKey != "doki" || live.ID != SampleVideoID ||
 		live.URL != "https://www.youtube.com/watch?v="+SampleVideoID || !live.EventTime.Equal(notifNow) || !live.DetectedAt.Equal(notifNow) || live.Mechanism == "" {
 		t.Errorf("live sample = %+v", live)
 	}
-	sched := SamplePayload(TriggerScheduled, ch, nil, notifNow)
+	if !live.IsSample() {
+		t.Error("the stand-in must identify itself as such")
+	}
+	sched := SamplePayload(TriggerScheduled, ch, notifNow)
 	if !sched.EventTime.Equal(notifNow.Add(2*time.Hour)) || sched.Title != SampleVideoTitle {
 		t.Errorf("scheduled sample = %+v", sched)
 	}
-	if up := SamplePayload(TriggerUpload, ch, nil, notifNow); up.Title != SampleVideoTitle || up.Trigger != TriggerUpload {
+	if up := SamplePayload(TriggerUpload, ch, notifNow); up.Title != SampleVideoTitle || up.Trigger != TriggerUpload {
 		t.Errorf("upload sample = %+v", up)
 	}
-	short := SamplePayload(TriggerShort, ch, nil, notifNow)
+	short := SamplePayload(TriggerShort, ch, notifNow)
 	if short.Title != SampleVideoTitle || short.URL != "https://www.youtube.com/shorts/"+SampleVideoID {
 		t.Errorf("short sample = %+v", short)
 	}
 	// Every sample renders a full default embed with a thumbnail.
 	for _, tr := range []Trigger{TriggerLive, TriggerScheduled, TriggerUpload, TriggerShort} {
-		msg := Render(DefaultEvent(), RenderContext{Payload: SamplePayload(tr, ch, nil, notifNow), Channel: ch, TranscriptURL: "https://lt.example/doki/"})
+		msg := Render(DefaultEvent(), RenderContext{Payload: SamplePayload(tr, ch, notifNow), Channel: ch, TranscriptURL: "https://lt.example/doki/"})
 		if msg.IsEmpty() || msg.Embed["image"] == nil || msg.Embed["timestamp"] == nil {
 			t.Errorf("%s sample renders incompletely: %+v", tr, msg.Embed)
 		}
 	}
+}
 
-	// A recent YouTube detection lends its id, url, title and mechanism.
-	recent := &model.DetectedBroadcast{Platform: PlatformYouTube, BroadcastID: "real1", URL: "https://www.youtube.com/watch?v=real1", Title: "Real title", Mechanism: "youtube-callback"}
-	got := SamplePayload(TriggerUpload, ch, recent, notifNow)
-	if got.ID != "real1" || got.URL != recent.URL || got.Title != "Real title" || got.Mechanism != "youtube-callback" || got.Platform != PlatformYouTube || got.Trigger != TriggerUpload {
-		t.Errorf("sample from recent = %+v", got)
-	}
-	// A recent detection with no title keeps the stand-in title.
-	got = SamplePayload(TriggerLive, ch, &model.DetectedBroadcast{Platform: PlatformYouTube, BroadcastID: "real2", URL: "u"}, notifNow)
-	if got.ID != "real2" || got.Title == "" || got.Mechanism != "youtube-state-poll" {
-		t.Errorf("sample from untitled recent = %+v", got)
-	}
-	// An empty id is ignored.
-	got = SamplePayload(TriggerLive, ch, &model.DetectedBroadcast{Platform: PlatformYouTube, Title: "ignored"}, notifNow)
-	if got.ID != SampleVideoID || got.Title == "ignored" {
-		t.Errorf("sample from id-less recent = %+v", got)
-	}
+// A preview is built from the channel's own detections and nothing else: a
+// detail the detection lacks stays blank rather than being borrowed from the
+// stand-in video, and a channel with nothing yet previews blank.
+func TestPreviewPayloadNeverInvents(t *testing.T) {
+	ch := notifChannel()
 
-	// A Twitch detection illustrates a live trigger, but never a YouTube-only one.
-	tw := &model.DetectedBroadcast{Platform: PlatformTwitch, BroadcastID: "42", URL: "https://twitch.tv/dokibird", Title: "Twitch title", Mechanism: "twitch-eventsub"}
-	got = SamplePayload(TriggerLive, ch, tw, notifNow)
-	if got.Platform != PlatformTwitch || got.ID != "42" || got.URL != tw.URL || got.Title != "Twitch title" || got.Mechanism != "twitch-eventsub" {
-		t.Errorf("twitch live sample = %+v", got)
-	}
-	if !strings.Contains(got.ThumbnailURL(ch), "live_user_dokibird") {
-		t.Errorf("twitch live sample thumbnail = %q", got.ThumbnailURL(ch))
-	}
-	for _, tr := range []Trigger{TriggerScheduled, TriggerUpload, TriggerShort} {
-		got = SamplePayload(tr, ch, tw, notifNow)
-		if got.Platform != PlatformYouTube || got.ID != SampleVideoID || got.Title == "Twitch title" || !strings.Contains(got.URL, "youtube.com") {
-			t.Errorf("%s sample from a Twitch detection must keep the YouTube stand-in, got %+v", tr, got)
+	t.Run("nothing detected", func(t *testing.T) {
+		for _, tr := range []Trigger{TriggerLive, TriggerScheduled, TriggerUpload, TriggerShort} {
+			got := PreviewPayload(tr, ch, nil, nil, notifNow)
+			if got.Trigger != tr || got.ChannelKey != "doki" || got.ID != "" || got.URL != "" || got.Title != "" || !got.EventTime.IsZero() || got.IsSample() {
+				t.Errorf("%s preview with nothing detected = %+v, want only trigger and channel", tr, got)
+			}
+			if tr != TriggerLive && got.Platform != PlatformYouTube {
+				t.Errorf("%s is YouTube-only, got platform %q", tr, got.Platform)
+			}
+			if tr == TriggerLive && got.Platform != "" {
+				t.Errorf("live preview with nothing detected has platform %q, want blank", got.Platform)
+			}
 		}
-	}
+		// Id-less rows count as nothing.
+		got := PreviewPayload(TriggerLive, ch, &model.DetectedBroadcast{Platform: PlatformYouTube, Title: "ignored"}, nil, notifNow)
+		if got.ID != "" || got.Title != "" {
+			t.Errorf("preview from an id-less detection = %+v", got)
+		}
+		got = PreviewPayload(TriggerUpload, ch, nil, &model.DetectedVideo{Title: "ignored"}, notifNow)
+		if got.ID != "" || got.Title != "" {
+			t.Errorf("preview from an id-less video = %+v", got)
+		}
+	})
+
+	t.Run("live from the latest broadcast, blanks kept blank", func(t *testing.T) {
+		// A Twitch broadcast EventSub claimed without a title, since ended.
+		tw := &model.DetectedBroadcast{Platform: PlatformTwitch, BroadcastID: "42", URL: "https://twitch.tv/dokibird", Mechanism: "twitch-eventsub", StartedAt: notifNow.Add(-time.Hour).Unix(), EndedAt: notifNow.Unix()}
+		got := PreviewPayload(TriggerLive, ch, tw, nil, notifNow)
+		if got.Platform != PlatformTwitch || got.ID != "42" || got.URL != tw.URL || got.Mechanism != "twitch-eventsub" || !got.EventTime.Equal(time.Unix(tw.StartedAt, 0)) {
+			t.Errorf("twitch live preview = %+v", got)
+		}
+		if got.Title != "" {
+			t.Errorf("title = %q, want blank: the detection had none", got.Title)
+		}
+		if !got.Ended || got.ThumbnailURL(ch) != "" {
+			t.Errorf("an ended Twitch broadcast has no preview image, got ended=%v thumbnail=%q", got.Ended, got.ThumbnailURL(ch))
+		}
+		msg := Render(DefaultEvent(), RenderContext{Payload: got, Channel: ch, TranscriptURL: "https://lt.example/doki/"})
+		if msg.Embed["image"] != nil {
+			t.Errorf("rendered embed carries an image for an ended Twitch stream: %v", msg.Embed["image"])
+		}
+		if desc, _ := msg.Embed["description"].(string); strings.Contains(desc, "*") || strings.Contains(desc, SampleVideoTitle) {
+			t.Errorf("description = %q, want no title line at all", desc)
+		}
+
+		// Still live: the preview image is offered, cache-busted by now.
+		tw.EndedAt = 0
+		got = PreviewPayload(TriggerLive, ch, tw, nil, notifNow)
+		if got.Ended || !strings.Contains(got.ThumbnailURL(ch), "live_user_dokibird-1280x720.jpg?t="+strconv.FormatInt(notifNow.Unix(), 10)) {
+			t.Errorf("live Twitch preview thumbnail = %q (ended=%v)", got.ThumbnailURL(ch), got.Ended)
+		}
+
+		// No start time reported: the time stays unknown rather than "now".
+		yt := &model.DetectedBroadcast{Platform: PlatformYouTube, BroadcastID: "real1", URL: "https://www.youtube.com/watch?v=real1", Title: "Real title", Mechanism: "youtube-callback"}
+		got = PreviewPayload(TriggerLive, ch, yt, nil, notifNow)
+		if got.ID != "real1" || got.Title != "Real title" || !got.EventTime.IsZero() || got.ThumbnailURL(ch) != "https://i.ytimg.com/vi/real1/maxresdefault.jpg" {
+			t.Errorf("youtube live preview = %+v", got)
+		}
+	})
+
+	t.Run("other triggers from the latest video of that kind", func(t *testing.T) {
+		v := &model.DetectedVideo{Platform: PlatformYouTube, VideoID: "short1", Kind: "short", URL: "https://www.youtube.com/shorts/short1", Title: "A short", PublishedAt: notifNow.Add(-time.Hour).Unix(), ScheduledAt: 0}
+		got := PreviewPayload(TriggerShort, ch, nil, v, notifNow)
+		if got.Platform != PlatformYouTube || got.ID != "short1" || got.URL != v.URL || got.Title != "A short" || !got.EventTime.Equal(time.Unix(v.PublishedAt, 0)) {
+			t.Errorf("short preview = %+v", got)
+		}
+		s := &model.DetectedVideo{Platform: PlatformYouTube, VideoID: "sched1", Kind: "scheduled", URL: "https://www.youtube.com/watch?v=sched1", Title: "Soon", PublishedAt: notifNow.Unix(), ScheduledAt: notifNow.Add(3 * time.Hour).Unix()}
+		got = PreviewPayload(TriggerScheduled, ch, nil, s, notifNow)
+		if !got.EventTime.Equal(time.Unix(s.ScheduledAt, 0)) {
+			t.Errorf("scheduled preview time = %v, want the scheduled start", got.EventTime)
+		}
+		// A video with no publish time keeps the time blank.
+		got = PreviewPayload(TriggerUpload, ch, nil, &model.DetectedVideo{Platform: PlatformYouTube, VideoID: "u1", Kind: "upload", URL: "x"}, notifNow)
+		if !got.EventTime.IsZero() || got.Title != "" {
+			t.Errorf("upload preview without a publish time = %+v", got)
+		}
+
+		// With no video of that kind, the latest YouTube broadcast stands in
+		// (it is a video too), but a Twitch one never does.
+		yt := &model.DetectedBroadcast{Platform: PlatformYouTube, BroadcastID: "real1", URL: "https://www.youtube.com/watch?v=real1", Title: "Real title", Mechanism: "youtube-callback", StartedAt: notifNow.Unix()}
+		got = PreviewPayload(TriggerUpload, ch, yt, nil, notifNow)
+		if got.Platform != PlatformYouTube || got.ID != "real1" || got.Title != "Real title" || !got.EventTime.IsZero() {
+			t.Errorf("upload preview from a broadcast = %+v", got)
+		}
+		tw := &model.DetectedBroadcast{Platform: PlatformTwitch, BroadcastID: "42", URL: "https://twitch.tv/dokibird", Title: "Twitch title"}
+		for _, tr := range []Trigger{TriggerScheduled, TriggerUpload, TriggerShort} {
+			got = PreviewPayload(tr, ch, tw, nil, notifNow)
+			if got.Platform != PlatformYouTube || got.ID != "" || got.Title != "" || got.URL != "" {
+				t.Errorf("%s preview from a Twitch broadcast = %+v, want blank", tr, got)
+			}
+		}
+		// The video of the right kind wins over the broadcast.
+		got = PreviewPayload(TriggerUpload, ch, yt, &model.DetectedVideo{Platform: PlatformYouTube, VideoID: "u2", Kind: "upload", URL: "y", Title: "The upload"}, notifNow)
+		if got.ID != "u2" || got.Title != "The upload" {
+			t.Errorf("upload preview should prefer the upload, got %+v", got)
+		}
+	})
 }
 
 // The mention policy is derived from the TEMPLATE, never the rendered text:
@@ -2276,16 +2362,49 @@ func notifIDListFromPolicy(policy map[string]any, key string) []string {
 	return list
 }
 
-// A title that arrives empty renders as "(untitled)" rather than leaving the
-// default "**{title}**" line as four bare asterisks.
-func TestRenderEmptyTitleFallsBack(t *testing.T) {
+// A title that arrives empty renders as nothing: not "(untitled)", not the
+// default "**{title}**" line as four bare asterisks. The emphasis around the
+// empty placeholder goes with it.
+func TestRenderEmptyTitleRendersBlank(t *testing.T) {
 	ev := DefaultEvent()
 	p := notifLivePayload()
 	p.Title = "   "
-	msg := Render(ev, RenderContext{Payload: p, Channel: notifChannel()})
+	msg := Render(ev, RenderContext{Payload: p, Channel: notifChannel(), TranscriptURL: "https://lt.example/doki/"})
 	desc, _ := msg.Embed["description"].(string)
-	if !strings.Contains(desc, "**(untitled)**") {
-		t.Errorf("description = %q, want the (untitled) fallback", desc)
+	if strings.Contains(desc, "untitled") || strings.Contains(desc, "*") {
+		t.Errorf("description = %q, want the title line gone", desc)
+	}
+	if !strings.HasPrefix(desc, "[Open on YouTube]") {
+		t.Errorf("description = %q, want it to start at the links", desc)
+	}
+}
+
+// An empty placeholder takes matching emphasis with it; everything else
+// around a placeholder is preserved exactly, empty or not.
+func TestExpandCollapsesEmphasisAroundEmptyValues(t *testing.T) {
+	values := map[string]string{"{title}": "", "{channel}": "Dokibird", "{time}": ""}
+	cases := map[string]string{
+		"**{title}**":                 "",
+		"***{title}***":               "",
+		"*{title}*":                   "",
+		"__{title}__":                 "",
+		"_{title}_":                   "",
+		"~~{title}~~":                 "",
+		"`{title}`":                   "",
+		"**{title}**\n\n[Open]":       "\n\n[Open]",
+		"**{channel}**":               "**Dokibird**",
+		"**{channel}'s {title}**":     "**Dokibird's **",
+		"**{title}*":                  "***",
+		"** {title} **":               "**  **",
+		"{channel}_{title}":           "Dokibird_",
+		"**{nope}**":                  "**{nope}**",
+		"**{title}** **{channel}**":   " **Dokibird**",
+		"live {time} **{title}** now": "live   now",
+	}
+	for in, want := range cases {
+		if got := Expand(in, values); got != want {
+			t.Errorf("Expand(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

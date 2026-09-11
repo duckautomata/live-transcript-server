@@ -860,6 +860,10 @@ func TestNotificationsPreviewRendersDraft(t *testing.T) {
 	app, mux := setupTestApp(t, []string{"doki"})
 	ws := newNotifWebhookServer(t, app)
 	transcript := app.Announcer.TranscriptURL("doki")
+	// The channel has no detection, so the stand-in video is what gets
+	// rendered - which only a local build does (a deployment previews blank;
+	// see TestNotificationsPreviewOnDeployedBuildNeverShowsStandIn).
+	app.Version = LocalVersion
 
 	draft := model.NotificationEvent{
 		Name:         "Draft",
@@ -1085,6 +1089,7 @@ func TestNotificationsTestSendDeliversWithMentionsSuppressed(t *testing.T) {
 	app, mux := setupTestApp(t, []string{"doki"})
 	ws := newNotifWebhookServer(t, app)
 	audits := captureAdminWebhook(t, app)
+	app.Version = LocalVersion // nothing detected: the stand-in is rendered
 
 	// The draft's own webhook and the test target differ: a test goes only
 	// where the admin pointed it, never to the rule's audience.
