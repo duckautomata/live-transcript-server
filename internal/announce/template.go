@@ -547,6 +547,12 @@ func PreviewPayload(trigger Trigger, ch Channel, live *model.DetectedBroadcast, 
 	return p
 }
 
+// ExampleTitle is what the editor's preview shows in place of the title of an
+// offline Twitch stream that was recorded without one, so the preview still
+// looks the way the announcement will. It is unmistakably an example, and the
+// editor labels it as one; it never reaches a webhook, not even a test send.
+const ExampleTitle = "Example stream title"
+
 // The stand-in video a LOCAL build previews when the channel has no detection
 // of its own yet: a real, public video, so the thumbnail loads and the links
 // resolve while working on the page. A deployed build never shows it; see

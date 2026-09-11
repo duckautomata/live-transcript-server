@@ -233,9 +233,13 @@ embed to these Discord webhooks*.
 - **Preview and test:** the editor renders the draft server-side from the
   channel's own most recent detection for the trigger - anything it lacked
   is left blank - and can post it to a webhook of the admin's
-  choice with every mention suppressed. Only a hand-built local binary (no
-  `VERSION` set) falls back to a stand-in video when nothing has been
-  detected; a deployment previews blank details instead.
+  choice with every mention suppressed. The one labelled exception is an
+  offline Twitch stream, which is previewed as it will look live (Twitch has
+  no preview frame for an offline channel) with the example image, and the
+  example title if none was recorded, marked as such; a test send of it goes
+  out as the detection stands. Only a hand-built local binary (no `VERSION`
+  set) falls back to a stand-in video when nothing has been detected; a
+  deployment previews blank details instead.
 
 These webhooks reach thousands of people, so nothing but a rendered
 announcement of a real observation - or an explicit admin test - is ever

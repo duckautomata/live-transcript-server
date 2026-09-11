@@ -694,6 +694,16 @@
   .dc-img-missing { display: none; background: #1e1f22; color: #949ba4; font-size: 12px; padding: 24px 12px; border-radius: 4px; text-align: center; }
   .dc-img-missing .mono { font-size: 11px; overflow-wrap: anywhere; }
   .dc-embed-image.broken + .dc-img-missing { display: block; }
+  /* Example frame for an offline Twitch stream. Twitch serves no preview
+     while a channel is offline, so the slot shows what will be there, and
+     says so. */
+  .dc-example-image { position: relative; width: 100%; max-width: 480px; aspect-ratio: 16 / 9; border-radius: 4px; border: 1px dashed #9a7cff; background: radial-gradient(ellipse at 30% 20%, #3a2570 0%, #1e1a2e 55%, #17181b 100%); display: flex; align-items: center; justify-content: center; text-align: center; color: #d6ccff; overflow: hidden; }
+  .dc-example-image .dc-example-badge { position: absolute; top: 8px; left: 8px; background: #9146ff; color: #fff; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: 2px 8px; border-radius: 3px; }
+  .dc-example-image .dc-example-text { font-size: 14px; font-weight: 600; }
+  .dc-example-image .dc-example-sub { font-size: 12px; color: #a99ee0; margin-top: 4px; padding: 0 20px; }
+  .dc-example-image.dc-example-thumb { width: 80px; height: 80px; aspect-ratio: auto; flex-shrink: 0; }
+  .dc-example-thumb .dc-example-badge { position: static; font-size: 9px; padding: 1px 5px; }
+  .dc-example { border-bottom: 1px dashed #b39dff; background: rgba(145, 70, 255, .2); border-radius: 2px; padding: 0 2px; cursor: help; }
   .dc-embed-footer { margin-top: 10px; font-size: 12px; color: #949ba4; }
 
   /* Responsive */
@@ -1271,6 +1281,7 @@
     <p>This posts a <strong>visible</strong> message to the webhook below, rendered for the <strong id="test-trigger">Live</strong> trigger from the same detection as the preview.
 
 Every ping is suppressed: role mentions are shown as text, but nobody is notified.</p>
+    <p id="test-offline-note" hidden></p>
     <label class="field-label" for="test-webhook">Send it to</label>
     <select id="test-webhook"></select>
     <input type="url" id="test-webhook-custom" placeholder="https://discord.com/api/webhooks/…" style="display:none" aria-label="Webhook URL to send the test to" />
@@ -1435,6 +1446,7 @@ Every ping is suppressed: role mentions are shown as text, but nobody is notifie
   const nfPreviewNote = $('nf-preview-note');
   const testModal = $('test-modal');
   const testTriggerEl = $('test-trigger');
+  const testOfflineNote = $('test-offline-note');
   const testWebhookSelect = $('test-webhook');
   const testWebhookCustom = $('test-webhook-custom');
   const testCancel = $('test-cancel');
@@ -2765,6 +2777,10 @@ Every ping is suppressed: role mentions are shown as text, but nobody is notifie
   // --- Preview ---
   let previewTimer = null;
   let previewSeq = 0;
+  // What the last preview was rendered from, so the test-send modal can say
+  // how a test of it will differ (an offline Twitch stream's examples stay
+  // on this page).
+  let lastPreviewSample = null;
   function renderPreviewTriggerOptions() {
     const sel = selectedTriggers();
     const opts = sel.length ? sel : ((notifyData && notifyData.triggers) || []).map(t => t.id);
@@ -2834,9 +2850,24 @@ Every ping is suppressed: role mentions are shown as text, but nobody is notifie
     return s.replace(/\n/g, '<br>');
   }
 
+  // An offline Twitch stream is previewed as it will look live: the server
+  // renders the Twitch preview URL, which serves nothing while the channel is
+  // offline, and flags it, so the page draws a labelled example frame there
+  // instead of a broken image (or Twitch's own "404" placeholder).
+  const TWITCH_PREVIEW_RE = /^https:\/\/static-cdn\.jtvnw\.net\/previews-ttv\//;
+  function exampleFrame(thumb) {
+    const label = 'Example preview image: Twitch shows a live frame here while the stream is live';
+    if (thumb) return `<div class="dc-example-image dc-example-thumb" role="img" aria-label="${label}" title="${label}"><span class="dc-example-badge">Example</span></div>`;
+    return `<div class="dc-example-image" role="img" aria-label="${label}"><span class="dc-example-badge">Example</span><div><div class="dc-example-text">Twitch preview image</div><div class="dc-example-sub">A live frame of the stream appears here once it is live. Twitch has none while it is offline.</div></div></div>`;
+  }
+
   function renderDiscordPreview(res) {
     const content = res.content || '';
     const embed = res.embed;
+    const s = res.sample || {};
+    lastPreviewSample = s;
+    const isExampleImage = (u) => !!s.exampleImage && TWITCH_PREVIEW_RE.test(u);
+    let mockedImage = false;
     const now = new Date();
     let html = `<div class="dc-row"><div class="dc-avatar">LT</div><div class="dc-main">
       <div class="dc-head"><span class="dc-name">Live Transcript</span><span class="dc-bot">APP</span><span class="dc-time">Today at ${escapeHtml(now.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }))}</span></div>`;
@@ -2850,11 +2881,16 @@ Every ping is suppressed: role mentions are shown as text, but nobody is notifie
           : `<div class="dc-embed-title">${discordMarkdown(embed.title)}</div>`;
       }
       const desc = embed.description ? `<div class="dc-embed-desc">${discordMarkdown(embed.description)}</div>` : '';
-      const thumb = embed.thumbnail && embed.thumbnail.url
-        ? `<img class="dc-embed-thumb" src="${escapeHtml(embed.thumbnail.url)}" alt="" />` : '';
-      const image = embed.image && embed.image.url
-        ? `<div class="dc-embed-image-wrap"><img class="dc-embed-image" src="${escapeHtml(embed.image.url)}" alt="" /><div class="dc-img-missing">image preview unavailable<br /><span class="mono">${escapeHtml(embed.image.url)}</span></div></div>`
-        : '';
+      let thumb = '';
+      if (embed.thumbnail && embed.thumbnail.url) {
+        if (isExampleImage(embed.thumbnail.url)) { mockedImage = true; thumb = exampleFrame(true); }
+        else thumb = `<img class="dc-embed-thumb" src="${escapeHtml(embed.thumbnail.url)}" alt="" />`;
+      }
+      let image = '';
+      if (embed.image && embed.image.url) {
+        if (isExampleImage(embed.image.url)) { mockedImage = true; image = `<div class="dc-embed-image-wrap">${exampleFrame(false)}</div>`; }
+        else image = `<div class="dc-embed-image-wrap"><img class="dc-embed-image" src="${escapeHtml(embed.image.url)}" alt="" /><div class="dc-img-missing">image preview unavailable<br /><span class="mono">${escapeHtml(embed.image.url)}</span></div></div>`;
+      }
       const footerParts = [];
       if (embed.footer && embed.footer.text) footerParts.push(escapeHtml(embed.footer.text));
       if (embed.timestamp) footerParts.push(escapeHtml(new Date(embed.timestamp).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })));
@@ -2863,14 +2899,21 @@ Every ping is suppressed: role mentions are shown as text, but nobody is notifie
     }
     if (!content.trim() && !embed) html += '<div class="dc-content dc-muted">(empty message - Discord would reject this; add text or enable the embed)</div>';
     html += '</div></div>';
+    if (s.exampleTitle) {
+      // The server substituted a clearly-named example title; mark every
+      // place it landed so nobody mistakes it for the stream's own.
+      const marked = `<span class="dc-example" title="Example: no title was recorded for this stream. The real title takes its place in the announcement.">${escapeHtml(s.exampleTitle)}</span>`;
+      html = html.split(escapeHtml(s.exampleTitle)).join(marked);
+    }
     nfPreview.innerHTML = html;
     nfPreview.querySelectorAll('img').forEach(img => img.addEventListener('error', () => img.classList.add('broken')));
-    nfPreviewNote.textContent = previewNote(res.sample || {});
+    nfPreviewNote.textContent = previewNote(s, mockedImage);
   }
 
-  // previewNote says where the preview's details came from, and why one may
-  // be blank: the server never invents a detail it does not have.
-  function previewNote(s) {
+  // previewNote says where the preview's details came from, and which of
+  // them are examples: the server never invents a detail it does not have,
+  // except - labelled - to show what an offline Twitch stream will look like.
+  function previewNote(s, mockedImage) {
     if (s.source === 'sample') {
       return 'Rendered by the server from a stand-in video, because this is a local build and nothing has been detected for this trigger yet. A deployed server never shows it: with nothing detected, the details are simply blank.';
     }
@@ -2878,8 +2921,15 @@ Every ping is suppressed: role mentions are shown as text, but nobody is notifie
       return 'Rendered by the server. Nothing has been detected for this trigger on this channel yet, so the stream details are blank; they fill in from the first real detection.';
     }
     const parts = ['Rendered by the server from your most recent detection, so this is exactly what would be posted. Pings are shown as they would appear.'];
-    if (!s.title) parts.push('No title was recorded for it, so {title} is blank here.');
-    if (s.platform === 'twitch' && s.ended) parts.push('Twitch only serves a preview image while a stream is live, so none is shown for this ended one.');
+    if (s.exampleTitle && mockedImage) {
+      parts.push('That stream is offline, so the title and the preview image are examples: no title was recorded for it, and Twitch only serves a preview frame while a channel is live. The real ones take their place in the announcement.');
+    } else if (mockedImage) {
+      parts.push('That stream is offline, so the preview image is an example: Twitch only serves a frame while a channel is live, and the real one takes its place in the announcement.');
+    } else if (s.exampleTitle) {
+      parts.push('No title was recorded for that stream, so the title is an example; the real one takes its place in the announcement.');
+    } else if (!s.title) {
+      parts.push('No title was recorded for it, so {title} is blank here.');
+    }
     return parts.join(' ');
   }
 
@@ -2991,6 +3041,14 @@ Every ping is suppressed: role mentions are shown as text, but nobody is notifie
     testWebhookSelect.value = hooks.length ? '0' : 'custom';
     testWebhookCustom.value = '';
     testTriggerEl.textContent = TRIGGER_SHORT[nfPreviewTrigger.value] || nfPreviewTrigger.value;
+    // A test is sent exactly as the detection stands: the examples an
+    // offline Twitch stream gets in the preview stay on this page.
+    const s = lastPreviewSample || {};
+    const offline = s.source === 'recent' && s.platform === 'twitch' && s.ended;
+    testOfflineNote.hidden = !offline;
+    testOfflineNote.textContent = !offline ? '' : s.exampleTitle
+      ? 'That stream is offline, so this test goes out without a preview image and with a blank title: the examples in the preview stand in only on this page. A real announcement carries the live frame and the title.'
+      : 'That stream is offline, so this test goes out without a preview image: Twitch only serves one while a channel is live. A real announcement carries it.';
     updateTestCustomVisibility();
     testModal.classList.add('show');
   });

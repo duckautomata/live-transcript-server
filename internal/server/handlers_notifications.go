@@ -479,18 +479,35 @@ func sampleDescription(p announce.Payload) map[string]any {
 
 // postAdminNotificationPreviewHandler renders a draft without sending it.
 // Read-only: no audit record, no change counter bump.
+//
+// An offline Twitch stream is previewed as it will look live. Twitch serves
+// no frame for an offline channel, and the row may predate the title lookup,
+// so a strictly honest preview would have a hole where the image goes and no
+// title line - which only raises the question of why, when both will be
+// there at go-live. The editor is told which parts are examples so it can
+// label them; a test send (postAdminNotificationTestHandler) gets none of
+// this and goes out exactly as the detection stands.
 func (app *App) postAdminNotificationPreviewHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
 	req, trigger, ok := decodeNotificationDraft(w, r, cs)
 	if !ok {
 		return
 	}
 	payload := app.previewPayload(r.Context(), cs, trigger)
+	sample := sampleDescription(payload)
+	if payload.Platform == announce.PlatformTwitch && payload.Ended {
+		if payload.Title == "" {
+			payload.Title = announce.ExampleTitle
+			sample["exampleTitle"] = announce.ExampleTitle
+		}
+		payload.Ended = false
+		sample["exampleImage"] = true
+	}
 	msg := app.Announcer.Preview(req.Event, payload)
 	writeJSON(w, NotificationPreviewResponse{
 		Trigger: string(trigger),
 		Content: msg.Content,
 		Embed:   msg.Embed,
-		Sample:  sampleDescription(payload),
+		Sample:  sample,
 	})
 }
 

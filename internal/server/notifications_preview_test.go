@@ -14,11 +14,13 @@ import (
 
 // A deployed build previews only what the channel has actually detected.
 // Nothing is borrowed from the stand-in video: a channel with nothing yet
-// previews blank details, a Twitch stream EventSub claimed without a title
-// previews with a blank title, and once that stream has ended the Twitch
-// preview image - a "404" placeholder for an offline channel - is left out.
+// previews blank details, and a live Twitch stream EventSub claimed without
+// a title previews with a blank title. The one labelled exception is an
+// offline Twitch stream, which is previewed as it will look live - Twitch
+// serves a "404" placeholder as the preview of an offline channel - with the
+// page told which parts are examples; a test send of it carries neither.
 func TestNotificationsPreviewOnDeployedBuildNeverShowsStandIn(t *testing.T) {
-	app, mux, _ := notifDetectApp(t)
+	app, mux, ws := notifDetectApp(t)
 	if app.localBuild() {
 		t.Fatalf("test app has version %q; this test needs a deployed one", app.Version)
 	}
@@ -95,7 +97,7 @@ func TestNotificationsPreviewOnDeployedBuildNeverShowsStandIn(t *testing.T) {
 		}
 	})
 
-	t.Run("an ended Twitch stream previews without the placeholder image", func(t *testing.T) {
+	t.Run("an offline Twitch stream previews as it will look live, examples labelled", func(t *testing.T) {
 		if err := app.ObserveEnded(ctx, livedetect.PlatformTwitch, "s1"); err != nil {
 			t.Fatalf("ObserveEnded: %v", err)
 		}
@@ -103,11 +105,43 @@ func TestNotificationsPreviewOnDeployedBuildNeverShowsStandIn(t *testing.T) {
 		if ended, _ := resp.Sample["ended"].(bool); !ended {
 			t.Errorf("sample = %#v, want ended", resp.Sample)
 		}
-		if resp.Embed["image"] != nil {
-			t.Errorf("embed.image = %v, want none for an ended Twitch stream", resp.Embed["image"])
+		// The sample still describes the detection as it is: no title.
+		if sampleStr(resp, "title") != "" || sampleStr(resp, "exampleTitle") != announce.ExampleTitle {
+			t.Errorf("sample = %#v, want a blank title and the example flagged", resp.Sample)
+		}
+		if ex, _ := resp.Sample["exampleImage"].(bool); !ex {
+			t.Errorf("sample = %#v, want exampleImage so the page can draw the frame", resp.Sample)
+		}
+		// Rendered as if live: the Twitch preview URL is in place for the page
+		// to stand in for, and the example title is where the title goes.
+		if got := notifNested(resp.Embed, "image", "url"); !strings.HasPrefix(got, "https://static-cdn.jtvnw.net/previews-ttv/live_user_dokibird-1280x720.jpg?t=") {
+			t.Errorf("embed.image.url = %q, want the Twitch preview slot", got)
+		}
+		if desc := notifNested(resp.Embed, "description"); !strings.HasPrefix(desc, "**"+announce.ExampleTitle+"**") {
+			t.Errorf("description = %q, want the example title line", desc)
 		}
 		if got := notifNested(resp.Embed, "url"); got != "https://twitch.tv/dokibird" {
 			t.Errorf("embed.url = %q; the link still works after the stream", got)
+		}
+	})
+
+	t.Run("a test send of that offline stream carries neither example", func(t *testing.T) {
+		rec := adminReq(t, mux, http.MethodPost, notifBase+"/test", notifAdminKey,
+			notificationDraftRequest{Event: draft, Trigger: "live", WebhookURL: notifWebhookURL})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		post := ws.next(t)
+		e := notifEmbed(t, post.Body)
+		if e["image"] != nil {
+			t.Errorf("test embed.image = %v, want none: Twitch has no frame for an offline channel", e["image"])
+		}
+		desc := notifNested(e, "description")
+		if strings.Contains(desc, announce.ExampleTitle) || strings.Contains(desc, "*") {
+			t.Errorf("test description = %q, want the title line simply gone", desc)
+		}
+		if body := rec.Body.String(); strings.Contains(body, announce.ExampleTitle) {
+			t.Errorf("test result mentions the example title: %s", body)
 		}
 	})
 
