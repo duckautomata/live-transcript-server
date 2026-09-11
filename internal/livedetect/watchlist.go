@@ -95,6 +95,11 @@ type watchEntry struct {
 	Misses int
 	// Retired entries are dropped on the next sweep.
 	Retired bool
+	// Announced latches which non-live kinds (scheduled, upload) have been
+	// handed to the sink for this entry, so a level-triggered poll reports
+	// each once per process rather than once per cycle. The durable
+	// once-ever guarantee is the sink's ledger, not this.
+	Announced map[string]bool
 }
 
 // interval returns how often this entry should be polled right now.
@@ -556,6 +561,37 @@ func (w *watchlist) SawUpcoming(videoID string) bool {
 		return e.SawUpcoming
 	}
 	return false
+}
+
+// ClaimAnnounce latches a (video, kind) announcement and reports whether this
+// call took the latch. False means it was already taken, or the id is not
+// tracked at all.
+func (w *watchlist) ClaimAnnounce(videoID, kind string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	e, ok := w.entries[videoID]
+	if !ok {
+		return false
+	}
+	if e.Announced == nil {
+		e.Announced = make(map[string]bool)
+	}
+	if e.Announced[kind] {
+		return false
+	}
+	e.Announced[kind] = true
+	return true
+}
+
+// ReleaseAnnounce gives a latch back after the sink failed to record the
+// observation, so the next poll tries again instead of losing it for the
+// life of the process.
+func (w *watchlist) ReleaseAnnounce(videoID, kind string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if e, ok := w.entries[videoID]; ok && e.Announced != nil {
+		delete(e.Announced, kind)
+	}
 }
 
 // Known reports whether an id is already tracked, so discovery can tell a new

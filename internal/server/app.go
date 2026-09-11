@@ -14,10 +14,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"live-transcript-server/internal/announce"
 	"live-transcript-server/internal/archive"
 	"live-transcript-server/internal/config"
 	"live-transcript-server/internal/discord"
@@ -58,14 +60,25 @@ type App struct {
 	DiscordBot *discord.Bot
 	// LiveDetect observes YouTube and Twitch for channels going live. It is
 	// nil when unconfigured, and every method is nil-receiver-safe.
-	LiveDetect  *livedetect.Detector
-	Archive     *archive.Client
-	Notifier    *notify.Notifier
-	Upgrader    websocket.Upgrader
-	Channels    map[string]*ChannelState
-	MaxConn     int
-	MaxClipSize int
-	TempDir     string
+	LiveDetect *livedetect.Detector
+	// Announcer turns detections into the admin-configured public Discord
+	// announcements (and the operator's own feed). Always constructed.
+	Announcer *announce.Dispatcher
+	// QueueIncoming is liveDetect.queueIncoming: whether a detected live
+	// broadcast is queued for the worker, or only observed and announced.
+	QueueIncoming bool
+	// TwitchTitleLookup fills in the title of a Twitch broadcast that was
+	// detected without one (EventSub carries none). Called after the ledger
+	// claim and the queue write, before the announcement. Nil disables it;
+	// tests set it to a stub so nothing reaches Helix.
+	TwitchTitleLookup func(ctx context.Context, channelKey string) string
+	Archive           *archive.Client
+	Notifier          *notify.Notifier
+	Upgrader          websocket.Upgrader
+	Channels          map[string]*ChannelState
+	MaxConn           int
+	MaxClipSize       int
+	TempDir           string
 	// Vods tracks in-flight full-VOD builds so concurrent admin requests for
 	// the same stream collapse into a single build. See vod.go.
 	Vods *vodRegistry
@@ -116,8 +129,23 @@ func NewApp(cfg config.Config, st *store.Store, tempDir, version, buildTime stri
 		IncomingStreamTTL: time.Duration(ttlMinutes) * time.Minute,
 		Version:           version,
 		BuildTime:         buildTime,
+		QueueIncoming:     cfg.LiveDetect.QueueIncoming,
 	}
 	app.ctx, app.cancel = context.WithCancel(context.Background())
+
+	// The announcer is the only thing allowed to post to audience webhooks.
+	// It runs deliveries through goBackground so shutdown waits for a post in
+	// flight, and wakes the admin page whenever it writes a log row.
+	app.Announcer = announce.New(announce.Config{
+		Store:              st,
+		Channels:           announceChannels(cfg.Channels),
+		TranscriptBaseURL:  discord.TranscriptBaseURL(cfg.Discord.TranscriptBaseURL, version),
+		OperatorWebhookURL: app.Discord.OperatorWebhookURL(),
+		Version:            version,
+		Background:         app.goBackground,
+		Shutdown:           app.ctx,
+		OnLogged:           app.bumpAdminChange,
+	})
 
 	for _, cc := range cfg.Channels {
 		cs := &ChannelState{
@@ -152,8 +180,31 @@ func NewApp(cfg config.Config, st *store.Store, tempDir, version, buildTime stri
 		slog.Error("live detection is degraded or disabled", "func", "NewApp", "err", err)
 	}
 	app.LiveDetect = detector
+	app.TwitchTitleLookup = detector.LookupTwitchTitle
 
 	return app, nil
+}
+
+// announceChannels builds the announcement presentation of every channel,
+// with the same defaults the Discord client applies: the display name falls
+// back to the key, and the Twitch login to the lowercased display name.
+func announceChannels(channels []config.ChannelConfig) map[string]announce.Channel {
+	out := make(map[string]announce.Channel, len(channels))
+	for _, cc := range channels {
+		ch := announce.Channel{
+			Key:         cc.Name,
+			DisplayName: cc.DisplayName,
+			TwitchLogin: strings.ToLower(strings.TrimSpace(cc.TwitchLogin)),
+		}
+		if ch.DisplayName == "" {
+			ch.DisplayName = cc.Name
+		}
+		if ch.TwitchLogin == "" {
+			ch.TwitchLogin = strings.ToLower(ch.DisplayName)
+		}
+		out[cc.Name] = ch
+	}
+	return out
 }
 
 // Init performs the environment side effects the app needs before serving:

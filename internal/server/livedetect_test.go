@@ -69,11 +69,98 @@ func setupDetectApp(tb testing.TB) (*App, *http.ServeMux) {
 	if err := app.Init(context.Background()); err != nil {
 		tb.Fatalf("failed to init app: %v", err)
 	}
+	// The real lookup would call Helix for a title-less Twitch detection.
+	// Tests that want it install a stub.
+	app.TwitchTitleLookup = nil
 	tb.Cleanup(func() { app.Close() })
 
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux)
 	return app, mux
+}
+
+// "upload" and "short" are two classifications of one publish event. A video
+// announced as a short must not be announced again as a video after a restart
+// reclassifies it (the probe was unsure the first time, say), while the same
+// id being scheduled is a separate event with its own claim.
+func TestObserveVideoUploadAndShortShareOneClaim(t *testing.T) {
+	app, _ := setupDetectApp(t)
+	ctx := context.Background()
+
+	claims := func(kind string) bool {
+		t.Helper()
+		before, _ := app.Store.GetRecentVideoDetections(ctx, "doki", 50)
+		err := app.ObserveVideo(ctx, livedetect.VideoEvent{
+			Kind: kind, Platform: livedetect.PlatformYouTube, ChannelKey: "doki", ID: "vid-1",
+			URL: livedetect.YouTubeWatchURL("vid-1"), Title: "clip", PublishedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("ObserveVideo(%s): %v", kind, err)
+		}
+		after, _ := app.Store.GetRecentVideoDetections(ctx, "doki", 50)
+		return len(after) == len(before)+1
+	}
+
+	if !claims(livedetect.VideoShort) {
+		t.Fatal("the first classification must claim the event")
+	}
+	if claims(livedetect.VideoUpload) {
+		t.Error("a later 'upload' classification of the same video must not claim a second announcement")
+	}
+	if claims(livedetect.VideoShort) {
+		t.Error("the same kind again must not claim either")
+	}
+	if !claims(livedetect.VideoScheduled) {
+		t.Error("'scheduled' is a different event for the same id and keeps its own claim")
+	}
+}
+
+// A Twitch broadcast that arrives without a title (EventSub's payload has
+// none) is enriched through the lookup after the claim, so the ledger - and
+// therefore the announcement - carries the title the poll leg would have.
+func TestObserveLiveLooksUpMissingTwitchTitle(t *testing.T) {
+	app, _ := setupDetectApp(t)
+	ctx := context.Background()
+
+	var asked []string
+	app.TwitchTitleLookup = func(_ context.Context, channelKey string) string {
+		asked = append(asked, channelKey)
+		return "looked-up title"
+	}
+
+	if err := app.ObserveLive(ctx, livedetect.Broadcast{
+		Platform: livedetect.PlatformTwitch, ChannelKey: "doki", ID: "notitle",
+		URL: "https://twitch.tv/dokibird", StartedAt: time.Now(),
+	}, livedetect.MechanismTwitchEventSub); err != nil {
+		t.Fatalf("ObserveLive: %v", err)
+	}
+	if len(asked) != 1 || asked[0] != "doki" {
+		t.Fatalf("lookup calls = %v, want exactly one for doki", asked)
+	}
+	det, err := app.Store.GetDetection(ctx, "twitch", "notitle")
+	if err != nil || det == nil {
+		t.Fatalf("detection missing: %v %v", det, err)
+	}
+	if det.Title != "looked-up title" {
+		t.Errorf("ledger title = %q, want the looked-up one", det.Title)
+	}
+
+	// A broadcast that already has a title, or a YouTube one, is never looked up.
+	if err := app.ObserveLive(ctx, livedetect.Broadcast{
+		Platform: livedetect.PlatformTwitch, ChannelKey: "doki", ID: "titled",
+		URL: "https://twitch.tv/dokibird", Title: "already titled", StartedAt: time.Now(),
+	}, livedetect.MechanismTwitchPoll); err != nil {
+		t.Fatalf("ObserveLive: %v", err)
+	}
+	if err := app.ObserveLive(ctx, livedetect.Broadcast{
+		Platform: livedetect.PlatformYouTube, ChannelKey: "doki", ID: "ytnotitle",
+		URL: livedetect.YouTubeWatchURL("ytnotitle"), StartedAt: time.Now(),
+	}, livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive: %v", err)
+	}
+	if len(asked) != 1 {
+		t.Errorf("lookup calls = %v, want no further calls", asked)
+	}
 }
 
 func eventSubRequest(t *testing.T, msgType string, body []byte, opts ...func(*http.Request)) *http.Request {

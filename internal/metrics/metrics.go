@@ -310,4 +310,31 @@ var (
 	},
 		[]string{"state"},
 	)
+	// LiveDetectQueued counts detections that were handed to the worker
+	// queue. Compared against LiveDetectDetections it shows whether
+	// liveDetect.queueIncoming is doing its job.
+	LiveDetectQueued = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "lt_livedetect_queued_total",
+		Help: "Detected live broadcasts queued for the worker, by channel and platform.",
+	},
+		[]string{"key", "platform"},
+	)
+	// LiveDetectVideoEvents counts the non-live observations (scheduled,
+	// upload, short) that won their ledger claim.
+	LiveDetectVideoEvents = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "lt_livedetect_video_events_total",
+		Help: "Non-live video observations first detected, by channel and kind (scheduled/upload/short).",
+	},
+		[]string{"key", "kind"},
+	)
+
+	// Announcements. A rising "failed" or "partial" count is a dead or
+	// rate-limited audience webhook; "suppressed" is the cooldown doing its
+	// job on a stream restart.
+	Announcements = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "lt_announcements_total",
+		Help: "Notification-event dispatches by channel, trigger and outcome (sent/partial/failed/suppressed).",
+	},
+		[]string{"key", "trigger", "status"},
+	)
 )

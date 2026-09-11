@@ -293,5 +293,120 @@ func createSchema(db *sql.DB) error {
 		return fmt.Errorf("error creating detected_broadcasts index: %w", err)
 	}
 
+	// detected_videos is the same write-once ledger idea for the non-live
+	// observations: a stream or premiere being scheduled, a video or a short
+	// being published. The poller re-derives these on every cycle and a
+	// restart re-derives them from scratch, so the INSERT OR IGNORE is what
+	// makes each one announce exactly once. Keyed on kind as well as id because
+	// one video is legitimately "scheduled" and then, later, live.
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS detected_videos (
+		platform TEXT NOT NULL,
+		video_id TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		channel_key TEXT NOT NULL,
+		url TEXT NOT NULL,
+		title TEXT NOT NULL DEFAULT '',
+		published_at INTEGER NOT NULL DEFAULT 0,
+		scheduled_at INTEGER NOT NULL DEFAULT 0,
+		detected_at INTEGER NOT NULL,
+		PRIMARY KEY (platform, video_id, kind)
+	);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating detected_videos table: %w", err)
+	}
+	_, err = db.Exec(`
+	CREATE INDEX IF NOT EXISTS idx_detected_videos_channel
+		ON detected_videos (channel_key, detected_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating detected_videos index: %w", err)
+	}
+
+	// notification_events are the admin-configured announcement rules. The
+	// list-valued columns (webhook_urls, triggers) and the embed template are
+	// stored as JSON: they are only ever read and written whole, and a rule has
+	// at most a handful of each.
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS notification_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		channel_key TEXT NOT NULL,
+		name TEXT NOT NULL,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		webhook_urls TEXT NOT NULL DEFAULT '[]',
+		triggers TEXT NOT NULL DEFAULT '[]',
+		content TEXT NOT NULL DEFAULT '',
+		embed_enabled INTEGER NOT NULL DEFAULT 1,
+		embed TEXT NOT NULL DEFAULT '{}',
+		cooldown_seconds INTEGER NOT NULL DEFAULT 0,
+		last_sent_at INTEGER NOT NULL DEFAULT 0,
+		sent_count INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT NOT NULL DEFAULT '',
+		last_error_at INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating notification_events table: %w", err)
+	}
+	_, err = db.Exec(`
+	CREATE INDEX IF NOT EXISTS idx_notification_events_channel
+		ON notification_events (channel_key, id);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating notification_events index: %w", err)
+	}
+
+	// notification_cooldowns holds the last send time of each (rule, trigger).
+	// The minimum gap is per TRIGGER, not per rule: it exists to swallow a
+	// stream restart (a second "live" minutes after the first), and a rule
+	// that announces both "scheduled" and "live" must not have its go-live
+	// ping eaten by the waiting-room ping that preceded it.
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS notification_cooldowns (
+		event_id INTEGER NOT NULL REFERENCES notification_events(id) ON DELETE CASCADE,
+		trigger TEXT NOT NULL,
+		last_sent_at INTEGER NOT NULL,
+		PRIMARY KEY (event_id, trigger)
+	);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating notification_cooldowns table: %w", err)
+	}
+
+	// notification_log is the per-channel delivery trail the admin page shows:
+	// what was announced, to how many webhooks, and why something was not
+	// (cooldown, failure). Trimmed to a fixed number of rows per channel.
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS notification_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		channel_key TEXT NOT NULL,
+		event_id INTEGER NOT NULL DEFAULT 0,
+		event_name TEXT NOT NULL DEFAULT '',
+		trigger TEXT NOT NULL DEFAULT '',
+		platform TEXT NOT NULL DEFAULT '',
+		broadcast_id TEXT NOT NULL DEFAULT '',
+		title TEXT NOT NULL DEFAULT '',
+		url TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL,
+		detail TEXT NOT NULL DEFAULT '',
+		webhooks INTEGER NOT NULL DEFAULT 0,
+		delivered INTEGER NOT NULL DEFAULT 0,
+		sent_at INTEGER NOT NULL
+	);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating notification_log table: %w", err)
+	}
+	_, err = db.Exec(`
+	CREATE INDEX IF NOT EXISTS idx_notification_log_channel
+		ON notification_log (channel_key, id);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating notification_log index: %w", err)
+	}
+
 	return nil
 }

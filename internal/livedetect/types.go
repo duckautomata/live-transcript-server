@@ -96,6 +96,35 @@ type Broadcast struct {
 	SawScheduled bool
 }
 
+// Kinds of non-live video observation, reported through Sink.ObserveVideo.
+// They are persisted in the detected_videos ledger key, so they are part of
+// the on-disk format.
+const (
+	// VideoScheduled is a YouTube stream waiting room or premiere page that
+	// has appeared with a scheduled start. The API does not reliably separate
+	// a scheduled premiere from a scheduled livestream, so they share a kind.
+	VideoScheduled = "scheduled"
+	// VideoUpload is an ordinary video (never a broadcast) being published.
+	VideoUpload = "upload"
+	// VideoShort is a YouTube short being published.
+	VideoShort = "short"
+)
+
+// VideoEvent is one non-live observation: something new appeared on a
+// channel that is not (yet) a live broadcast. Only YouTube produces these.
+type VideoEvent struct {
+	Kind       string
+	Platform   string
+	ChannelKey string
+	ID         string
+	URL        string
+	Title      string
+	// PublishedAt is the platform's publish time. Zero when not reported.
+	PublishedAt time.Time
+	// ScheduledAt is the announced start for VideoScheduled; zero otherwise.
+	ScheduledAt time.Time
+}
+
 // Sink receives observations. *server.App implements it.
 //
 // ObserveLive is called by EVERY mechanism on EVERY cycle it sees a broadcast
@@ -106,9 +135,16 @@ type Broadcast struct {
 // ObserveEnded is called when a mechanism sees a previously-live broadcast
 // stop. It is best-effort: nothing depends on an end being observed, and a
 // missed end costs only the accelerated restart re-poll.
+//
+// ObserveVideo is called when a scheduled frame, an upload or a short is
+// first noticed. The detector latches each (video, kind) in memory so a
+// level-triggered poll does not repeat itself every cycle, but the durable
+// once-only guarantee - across restarts, and across the whole uploads
+// playlist being re-read at boot - is the Sink's ledger.
 type Sink interface {
 	ObserveLive(ctx context.Context, b Broadcast, mechanism string) error
 	ObserveEnded(ctx context.Context, platform, broadcastID string) error
+	ObserveVideo(ctx context.Context, v VideoEvent) error
 	// ActiveBroadcasts returns what the ledger still believes is live, so a
 	// restart can resume watching a broadcast already in progress instead of
 	// waiting for the next discovery pass to rediscover it.

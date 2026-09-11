@@ -282,9 +282,9 @@ func (d *Detector) handleStreamOnline(ctx context.Context, ev TwitchStreamOnline
 
 	startedAt, _ := time.Parse(time.RFC3339, ev.StartedAt)
 	// The event carries no title. Enriching it here would mean a Helix call on
-	// the latency path, which is exactly what EventSub exists to avoid - the
-	// notification renders "(no title reported)" instead, and that is also a
-	// visible marker that EventSub won the race.
+	// the latency path, which is exactly what EventSub exists to avoid. The
+	// sink looks the title up AFTER it has claimed and queued the broadcast
+	// (LookupTwitchTitle), so the audience announcement still carries one.
 	d.observe(ctx, Broadcast{
 		Platform:   PlatformTwitch,
 		ChannelKey: key,
@@ -294,6 +294,44 @@ func (d *Detector) handleStreamOnline(ctx context.Context, ev TwitchStreamOnline
 	}, MechanismTwitchEventSub)
 
 	d.trackTwitchLive(login, ev.ID, time.Now())
+}
+
+// twitchTitleLookupTimeout bounds the after-the-fact title fetch. It runs off
+// the detection path, but it does sit between the claim and the audience
+// announcement, so it must not stall that for long either.
+const twitchTitleLookupTimeout = 5 * time.Second
+
+// LookupTwitchTitle asks Helix for the title of a channel's current stream.
+//
+// It exists because EventSub's stream.online payload has no title, and
+// EventSub wins the ledger claim for nearly every Twitch go-live. The sink
+// calls this after the claim and after the worker queue write, so the one
+// Helix round trip lands between detection and announcement rather than on
+// the latency path. Best-effort: any failure returns "" and the announcement
+// goes out without a title. Nil-receiver-safe.
+func (d *Detector) LookupTwitchTitle(ctx context.Context, channelKey string) string {
+	if d == nil || d.twitch == nil {
+		return ""
+	}
+	login := d.twitchLoginFor(channelKey)
+	if login == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, twitchTitleLookupTimeout)
+	defer cancel()
+
+	streams, err := d.twitch.GetStreams(ctx, []string{login})
+	if err != nil {
+		slog.Warn("could not look up the title of a detected twitch stream",
+			"func", "Detector.LookupTwitchTitle", "key", channelKey, "err", err)
+		return ""
+	}
+	for _, s := range streams {
+		if strings.ToLower(s.UserLogin) == login {
+			return s.Title
+		}
+	}
+	return ""
 }
 
 // trackTwitchLive records the broadcast currently believed live for a login.

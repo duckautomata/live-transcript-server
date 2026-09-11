@@ -12,7 +12,7 @@ import (
 // GetRecentStream returns the stream with the most recent activated_time.
 // Returns nil, nil if no stream is found.
 func (s *Store) GetRecentStream(ctx context.Context, channelID string) (*model.Stream, error) {
-	row := s.db.QueryRowContext(ctx, "SELECT channel_id, stream_id, stream_title, start_time, is_live, media_type, activated_time FROM streams WHERE channel_id = ? ORDER BY activated_time DESC LIMIT 1", channelID)
+	row := s.db.QueryRowContext(ctx, "SELECT channel_id, stream_id, stream_title, start_time, is_live, media_type, activated_time FROM streams WHERE channel_id = ? ORDER BY activated_time DESC, rowid DESC LIMIT 1", channelID)
 	var st model.Stream
 	err := row.Scan(&st.ChannelID, &st.StreamID, &st.StreamTitle, &st.StartTime, &st.IsLive, &st.MediaType, &st.ActivatedTime)
 	if err == sql.ErrNoRows {
@@ -42,7 +42,7 @@ func (s *Store) GetStreamByID(ctx context.Context, channelID string, streamID st
 
 // GetAllStreams retrieves all streams for a channel, ordered by activated_time descending.
 func (s *Store) GetAllStreams(ctx context.Context, channelID string) ([]model.Stream, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT channel_id, stream_id, stream_title, start_time, is_live, media_type, activated_time FROM streams WHERE channel_id = ? ORDER BY activated_time DESC", channelID)
+	rows, err := s.db.QueryContext(ctx, "SELECT channel_id, stream_id, stream_title, start_time, is_live, media_type, activated_time FROM streams WHERE channel_id = ? ORDER BY activated_time DESC, rowid DESC", channelID)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func (s *Store) GetAllStreams(ctx context.Context, channelID string) ([]model.St
 
 // GetPastStreams retrieves all inactive streams for a channel, ordered by activated_time descending.
 func (s *Store) GetPastStreams(ctx context.Context, channelID string, excludeStreamID string) ([]model.Stream, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT channel_id, stream_id, stream_title, start_time, is_live, media_type, activated_time FROM streams WHERE channel_id = ? AND is_live = 0 AND stream_id != ? ORDER BY activated_time DESC", channelID, excludeStreamID)
+	rows, err := s.db.QueryContext(ctx, "SELECT channel_id, stream_id, stream_title, start_time, is_live, media_type, activated_time FROM streams WHERE channel_id = ? AND is_live = 0 AND stream_id != ? ORDER BY activated_time DESC, rowid DESC", channelID, excludeStreamID)
 	if err != nil {
 		return nil, err
 	}

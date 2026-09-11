@@ -80,6 +80,9 @@ type Detector struct {
 	twitch  *TwitchClient
 	youtube *YouTubeClient
 	websub  *WebSubClient
+	// shorts classifies a new upload as a short or a video. Nil-safe: without
+	// it every upload is announced as a video.
+	shorts *ShortsProbe
 
 	// twitchTargets maps a lowercase Twitch login to the server channel key,
 	// and twitchUserIDs maps a numeric broadcaster id to the same. Both are
@@ -227,6 +230,7 @@ func New(cfg config.LiveDetectConfig, channels []config.ChannelConfig, sink Sink
 			d.cfg.YouTube.Enabled = false
 		default:
 			d.youtube = NewYouTubeClient(cfg.YouTube.ApiKey)
+			d.shorts = NewShortsProbe()
 			d.health[MechanismYouTubeState] = &legHealth{}
 			d.health[MechanismYouTubeDiscover] = &legHealth{}
 		}
@@ -319,6 +323,7 @@ func (d *Detector) Start() error {
 		d.logQuotaProjection()
 		slog.Info("live detection started",
 			"func", "Detector.Start",
+			"queue_incoming", d.cfg.QueueIncoming,
 			"twitch", d.cfg.Twitch.Enabled,
 			"twitch_eventsub", d.cfg.Twitch.EventSub,
 			"youtube", d.cfg.YouTube.Enabled,
@@ -555,7 +560,9 @@ type LegStatus struct {
 
 // Status is a point-in-time snapshot of live detection for the admin page.
 type Status struct {
-	Enabled       bool          `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// ShadowMode is true when detection only observes and announces. False
+	// means a detected live broadcast is also queued for the worker.
 	ShadowMode    bool          `json:"shadowMode"`
 	Legs          []LegStatus   `json:"legs"`
 	WatchlistSize int           `json:"watchlistSize"`
@@ -599,7 +606,7 @@ func (d *Detector) Status() Status {
 
 	return Status{
 		Enabled:       true,
-		ShadowMode:    true,
+		ShadowMode:    !d.cfg.QueueIncoming,
 		Legs:          legs,
 		WatchlistSize: d.watch.Size(),
 		Quota:         d.gov.Snapshot(now),

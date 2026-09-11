@@ -605,14 +605,17 @@ func TestStore_GetPastStreams(t *testing.T) {
 		t.Errorf("expected 0 streams, got %d", len(streams))
 	}
 
-	// 2. Insert Active Stream (Live)
+	// 2. Insert Active Stream (Live). Streams are ordered by activated_time,
+	// so each one gets an explicit, distinct value: newest first below means
+	// active1 > past1 > past2.
 	activeStream := &model.Stream{
-		ChannelID:   channelID,
-		StreamID:    "active1",
-		StreamTitle: "Active 1",
-		StartTime:   "1000",
-		IsLive:      true,
-		MediaType:   "audio",
+		ChannelID:     channelID,
+		StreamID:      "active1",
+		StreamTitle:   "Active 1",
+		StartTime:     "1000",
+		IsLive:        true,
+		MediaType:     "audio",
+		ActivatedTime: 1000,
 	}
 	if err := s.UpsertStream(ctx, activeStream); err != nil {
 		t.Fatalf("UpsertStream active failed: %v", err)
@@ -628,24 +631,26 @@ func TestStore_GetPastStreams(t *testing.T) {
 
 	// 3. Insert Past Stream (Not Live)
 	pastStream := &model.Stream{
-		ChannelID:   channelID,
-		StreamID:    "past1",
-		StreamTitle: "Past 1",
-		StartTime:   "900",
-		IsLive:      false,
-		MediaType:   "audio",
+		ChannelID:     channelID,
+		StreamID:      "past1",
+		StreamTitle:   "Past 1",
+		StartTime:     "900",
+		IsLive:        false,
+		MediaType:     "audio",
+		ActivatedTime: 900,
 	}
 	if err := s.UpsertStream(ctx, pastStream); err != nil {
 		t.Fatalf("UpsertStream past failed: %v", err)
 	}
 	// Also insert another past stream
 	pastStream2 := &model.Stream{
-		ChannelID:   channelID,
-		StreamID:    "past2",
-		StreamTitle: "Past 2",
-		StartTime:   "800", // Older
-		IsLive:      false,
-		MediaType:   "audio",
+		ChannelID:     channelID,
+		StreamID:      "past2",
+		StreamTitle:   "Past 2",
+		StartTime:     "800", // Older
+		IsLive:        false,
+		MediaType:     "audio",
+		ActivatedTime: 800,
 	}
 	if err := s.UpsertStream(ctx, pastStream2); err != nil {
 		t.Fatalf("UpsertStream past2 failed: %v", err)

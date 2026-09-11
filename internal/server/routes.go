@@ -61,6 +61,17 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{channel}/admin/membership", app.withAdminChannel(app.getAdminMembershipHandler))
 	mux.HandleFunc("POST /{channel}/admin/membership", app.withAdminChannel(app.postAdminMembershipHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/membership", app.withAdminChannel(app.deleteAdminMembershipHandler))
+	// Notification events: the admin-configured public Discord announcements
+	// driven by live detection. preview and test render a draft from the
+	// editor without saving it; test posts with every mention suppressed.
+	mux.HandleFunc("GET /{channel}/admin/notifications", app.withAdminChannel(app.getAdminNotificationsHandler))
+	mux.HandleFunc("POST /{channel}/admin/notifications", app.withAdminChannel(app.postAdminNotificationHandler))
+	mux.HandleFunc("POST /{channel}/admin/notifications/preview", app.withAdminChannel(app.postAdminNotificationPreviewHandler))
+	mux.HandleFunc("POST /{channel}/admin/notifications/test", app.withAdminChannel(app.postAdminNotificationTestHandler))
+	mux.HandleFunc("DELETE /{channel}/admin/notifications/log", app.withAdminChannel(app.deleteAdminNotificationLogHandler))
+	mux.HandleFunc("DELETE /{channel}/admin/notifications/detections", app.withAdminChannel(app.deleteAdminDetectionsHandler))
+	mux.HandleFunc("PUT /{channel}/admin/notifications/{id}", app.withAdminChannel(app.putAdminNotificationHandler))
+	mux.HandleFunc("DELETE /{channel}/admin/notifications/{id}", app.withAdminChannel(app.deleteAdminNotificationHandler))
 
 	// Live-detection push callbacks. Public and unauthenticated by necessity:
 	// the callers are Twitch and Google's WebSub hub, neither of which can send

@@ -142,6 +142,20 @@ func (d *Detector) youtubeStateOnce() {
 	}
 }
 
+// announceMaxAge bounds how long after its publish time a video still counts
+// as new. Discovery and WebSub notice a new video within minutes, so anything
+// older than this that has never been announced either predates the feature
+// or was published during an outage - and on the first run after enabling,
+// the entire uploads playlist arrives at once. Without this bound that first
+// discovery pass would announce every video on it.
+const announceMaxAge = 6 * time.Hour
+
+// recentlyPublished reports whether a publish time is inside announceMaxAge.
+// A zero time (not reported) is never recent.
+func recentlyPublished(published, now time.Time) bool {
+	return !published.IsZero() && now.Sub(published) <= announceMaxAge
+}
+
 // applyYouTubeVideo turns one videos.list item into an observation.
 func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Time) {
 	channelKey := d.watch.ChannelOf(v.ID)
@@ -162,6 +176,9 @@ func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Ti
 	}
 
 	switch state {
+	case StateUpcoming:
+		d.announceScheduled(ctx, v, channelKey, now)
+
 	case StateLive:
 		// Livestreams and premieres are indistinguishable here and both are in
 		// scope, so there is deliberately no discriminator between them.
@@ -176,6 +193,11 @@ func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Ti
 		}, MechanismYouTubeState)
 
 	case StateEnded:
+		// "Ended" with no broadcast details is not a stream that finished; it
+		// is an ordinary upload, which reads as "none" from its first poll.
+		if !v.IsBroadcast() {
+			d.announceUpload(v, channelKey, now)
+		}
 		// Only an entry we actually saw live, ending for the first time, is
 		// worth a database write and a restart boost. Every ordinary upload on
 		// the watchlist reads as "ended" on every cycle, and acting on those
@@ -192,6 +214,102 @@ func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Ti
 		// end is when discovery most needs to be looking.
 		d.watch.BoostChannel(channelKey, now)
 	}
+}
+
+// scheduledLead is how far ahead a scheduled start must be for the frame to
+// be announced as "scheduled". A creator who makes the waiting room and goes
+// live a few minutes later would otherwise ping the audience twice inside a
+// minute - once for the frame, once for the go-live that supersedes it - and
+// the second of those is the one that matters.
+const scheduledLead = 15 * time.Minute
+
+// announceScheduled reports a newly appeared waiting room or premiere page.
+//
+// The in-memory latch stops the poll repeating itself every cycle; the sink's
+// ledger is what makes it once-ever. The recency check is what stops the
+// first discovery pass after enabling from announcing every frame a channel
+// has scheduled for the coming week - those are not news.
+func (d *Detector) announceScheduled(ctx context.Context, v YTVideo, channelKey string, now time.Time) {
+	published := v.PublishedAt()
+	if !recentlyPublished(published, now) {
+		return
+	}
+	// A frame with no announced time, or one starting imminently (or already
+	// overdue), is not scheduling news: the go-live announcement covers it.
+	scheduled := v.ScheduledStartTime()
+	if scheduled.IsZero() || scheduled.Before(now.Add(scheduledLead)) {
+		return
+	}
+	if !d.watch.ClaimAnnounce(v.ID, VideoScheduled) {
+		return
+	}
+	err := d.sink.ObserveVideo(ctx, VideoEvent{
+		Kind:        VideoScheduled,
+		Platform:    PlatformYouTube,
+		ChannelKey:  channelKey,
+		ID:          v.ID,
+		URL:         YouTubeWatchURL(v.ID),
+		Title:       v.Title(),
+		PublishedAt: published,
+		ScheduledAt: scheduled,
+	})
+	if err != nil {
+		// Give the latch back so the next poll retries; the ledger makes a
+		// retry harmless.
+		d.watch.ReleaseAnnounce(v.ID, VideoScheduled)
+		slog.Error("failed to record a scheduled broadcast", "func", "Detector.announceScheduled",
+			"key", channelKey, "videoId", v.ID, "err", err)
+	}
+}
+
+// announceUpload reports a newly published ordinary video or short.
+//
+// Telling the two apart needs one request to youtube.com, so it runs off the
+// poll goroutine: the state poll is the latency path for going-live and must
+// not wait on a classification that is nice to have. An unknown answer is
+// announced as a video - the harmless direction.
+func (d *Detector) announceUpload(v YTVideo, channelKey string, now time.Time) {
+	published := v.PublishedAt()
+	if !recentlyPublished(published, now) {
+		return
+	}
+	// One latch covers both kinds: the classification decides which one this
+	// video is, and it is only ever one of them.
+	if !d.watch.ClaimAnnounce(v.ID, VideoUpload) {
+		return
+	}
+	videoID, title := v.ID, v.Title()
+	d.spawn(func() {
+		ctx, cancel := d.pollCtx(shortsProbeTimeout + 5*time.Second)
+		defer cancel()
+
+		kind, url := VideoUpload, YouTubeWatchURL(videoID)
+		if isShort, err := d.shorts.IsShort(ctx, videoID); err != nil {
+			if d.shuttingDown() {
+				d.watch.ReleaseAnnounce(videoID, VideoUpload)
+				return
+			}
+			slog.Warn("could not tell a short from a video; announcing it as a video",
+				"func", "Detector.announceUpload", "key", channelKey, "videoId", videoID, "err", err)
+		} else if isShort {
+			kind, url = VideoShort, YouTubeShortsURL(videoID)
+		}
+
+		err := d.sink.ObserveVideo(ctx, VideoEvent{
+			Kind:        kind,
+			Platform:    PlatformYouTube,
+			ChannelKey:  channelKey,
+			ID:          videoID,
+			URL:         url,
+			Title:       title,
+			PublishedAt: published,
+		})
+		if err != nil {
+			d.watch.ReleaseAnnounce(videoID, VideoUpload)
+			slog.Error("failed to record an upload", "func", "Detector.announceUpload",
+				"key", channelKey, "videoId", videoID, "kind", kind, "err", err)
+		}
+	})
 }
 
 // runYouTubeDiscovery scans each channel's uploads playlist for video ids we

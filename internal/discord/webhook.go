@@ -16,7 +16,6 @@ import (
 	"unicode"
 
 	"live-transcript-server/internal/config"
-	"live-transcript-server/internal/model"
 )
 
 // notify500Throttle is the minimum gap between 500-error webhook alerts. An
@@ -170,16 +169,7 @@ func (d *Client) NotifyStreamStart(channelKey, streamID, streamTitle, startTime 
 		imageUrl = fmt.Sprintf("https://i.ytimg.com/vi/%s/maxresdefault.jpg", streamID)
 	}
 
-	var transcriptLink string
-	if d.transcriptBaseURL != "" {
-		transcriptLink = d.transcriptBaseURL + "/" + channelKey + "/"
-	} else {
-		domain := "www.duck-automata.com"
-		if d.Version == "dev" {
-			domain = "dev.duck-automata.com"
-		}
-		transcriptLink = fmt.Sprintf("https://%s/live-transcript/%s/", domain, channelKey)
-	}
+	transcriptLink := TranscriptBaseURL(d.transcriptBaseURL, d.Version) + "/" + channelKey + "/"
 
 	embed := map[string]any{
 		"title":       fmt.Sprintf("%s's Stream Started", fullName),
@@ -199,6 +189,32 @@ func (d *Client) NotifyStreamStart(channelKey, streamID, streamTitle, startTime 
 		"embeds": []map[string]any{embed},
 	}
 	go d.send(payload)
+}
+
+// TranscriptBaseURL resolves the base URL for transcript links, without a
+// trailing slash: the configured value, or a default derived from the server
+// version (dev vs prod). Shared with the announcement dispatcher so a public
+// announcement and the server's own stream-start post link to the same place.
+func TranscriptBaseURL(configured, version string) string {
+	if configured != "" {
+		return strings.TrimRight(configured, "/")
+	}
+	domain := "www.duck-automata.com"
+	if version == "dev" {
+		domain = "dev.duck-automata.com"
+	}
+	return fmt.Sprintf("https://%s/live-transcript", domain)
+}
+
+// OperatorWebhookURL is where the operator's own live-detection feed goes:
+// the detection webhook, falling back to the admin webhook and then the main
+// one. It is exposed so the announcement dispatcher can post the default-look
+// rendering of every observation there. Nil-receiver-safe.
+func (d *Client) OperatorWebhookURL() string {
+	if d == nil {
+		return ""
+	}
+	return d.detectWebhookURL()
 }
 
 // NotifyWorkerOffline alerts that a channel's worker has stopped reporting.
@@ -406,107 +422,6 @@ func (d *Client) Notify500Error(err error, contextMsg string) {
 	go d.send(payload)
 }
 
-// NotifyStreamDetected reports that live detection observed a broadcast go
-// live. This is the entire output of shadow mode: detection runs, measures
-// itself, and tells the operator - it never queues anything for the worker.
-//
-// The numbers are the point. StartedAt is what the platform says; DetectedAt
-// is when we saw it; the delay between them is what decides whether this
-// approach is trustworthy enough to drive the worker. Mechanism names which
-// detection path won the race, so a soak shows not just whether detection
-// works but which half of it is carrying the result.
-//
-// Read the delay with the mechanism in mind: a push path (EventSub, WebSub)
-// measures close to true end-to-end latency, while a polling path also carries
-// the platform API's own cache lag, which can be tens of seconds and is not
-// something this server can shorten.
-//
-// Posts to the detection webhook, which falls back to the admin webhook and
-// then the main one - detection is high-volume during a soak and does not ping.
-// Nil-receiver-safe so a detector built without a Discord client still runs.
-// sawScheduled reports whether the broadcast was watched as a scheduled frame
-// before it started. It is deliberately a parameter rather than a field on
-// DetectedBroadcast: the ledger does not persist it (the schema has no
-// ALTER TABLE path), and a struct field that is only ever populated on the
-// notification path would read as durable when it is not.
-func (d *Client) NotifyStreamDetected(b model.DetectedBroadcast, sawScheduled bool) {
-	if d == nil || d.detectWebhookURL() == "" {
-		return
-	}
-
-	fullName := b.ChannelKey
-	if p, ok := d.channels[b.ChannelKey]; ok {
-		fullName = p.displayName
-	}
-
-	title := b.Title
-	if title == "" {
-		title = "(no title reported)"
-	}
-
-	fields := []map[string]any{
-		{"name": "Channel", "value": fmt.Sprintf("%s (`%s`)", fullName, b.ChannelKey), "inline": true},
-		{"name": "Platform", "value": b.Platform, "inline": true},
-		{"name": "Mechanism", "value": b.Mechanism, "inline": true},
-	}
-
-	// A platform that reported no start time makes the delay unknowable. Say
-	// so rather than rendering a delay measured against the epoch.
-	if b.StartedAt > 0 {
-		fields = append(fields,
-			map[string]any{"name": "Stream Started", "value": fmt.Sprintf("<t:%d:T> (<t:%d:R>)", b.StartedAt, b.StartedAt), "inline": true},
-			map[string]any{"name": "Detected", "value": fmt.Sprintf("<t:%d:T> (<t:%d:R>)", b.DetectedAt, b.DetectedAt), "inline": true},
-			map[string]any{"name": "Delay", "value": formatDetectionDelay(b.DetectedAt - b.StartedAt), "inline": true},
-		)
-	} else {
-		fields = append(fields,
-			map[string]any{"name": "Stream Started", "value": "not reported by platform", "inline": true},
-			map[string]any{"name": "Detected", "value": fmt.Sprintf("<t:%d:T>", b.DetectedAt), "inline": true},
-			map[string]any{"name": "Delay", "value": "unknown", "inline": true},
-		)
-	}
-
-	// Without this the operator cannot read the delay: a scheduled stream and a
-	// surprise go-live both arrive as "youtube-state-poll", and only the first
-	// is expected to be fast.
-	if b.Platform == "youtube" {
-		lead := "no - discovery found it already live, so this delay is the discovery gap"
-		if sawScheduled {
-			lead = "yes - watched as a scheduled frame, so this delay is the poll interval"
-		}
-		fields = append(fields, map[string]any{"name": "Seen before it started", "value": lead, "inline": false})
-	}
-
-	fields = append(fields, map[string]any{
-		"name": "Broadcast ID", "value": fmt.Sprintf("`%s`", b.BroadcastID), "inline": false,
-	})
-
-	embed := map[string]any{
-		"title":       fmt.Sprintf("Live Detected: %s", fullName),
-		"description": fmt.Sprintf("**%s**\n[%s](%s)", truncate(title, 240), b.URL, b.URL),
-		"url":         b.URL,
-		"color":       3447003, // Blue - informational, distinct from the green stream-start announce.
-		"fields":      fields,
-		"timestamp":   time.Unix(b.DetectedAt, 0).UTC().Format(time.RFC3339),
-		"footer": map[string]string{
-			"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
-		},
-	}
-
-	go d.sendTo(d.detectWebhookURL(), map[string]any{"embeds": []map[string]any{embed}})
-}
-
-// formatDetectionDelay renders a detection delay for the notification.
-// Negative values are possible and are not an error: a platform's reported
-// start time can be a second or two ahead of the clock we compare it against,
-// and a push notification can arrive before the API admits the stream exists.
-func formatDetectionDelay(seconds int64) string {
-	if seconds < 0 {
-		return fmt.Sprintf("%s (detected before reported start)", (time.Duration(-seconds) * time.Second).String())
-	}
-	return (time.Duration(seconds) * time.Second).String()
-}
-
 // detectWebhookURL resolves where detection notifications go: the dedicated
 // detection webhook if configured, otherwise the admin webhook (which itself
 // falls back to the main one). A soak produces a lot of these, so being able
@@ -544,7 +459,7 @@ func (d *Client) NotifyLiveDetectDown(mechanism string, err error, failures int)
 				"color":       15158332, // Red
 				"timestamp":   time.Now().Format(time.RFC3339),
 				"footer": map[string]string{
-					"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
+					"text": fmt.Sprintf("live detection · Version: %s", d.Version),
 				},
 			},
 		},
@@ -565,7 +480,7 @@ func (d *Client) NotifyLiveDetectRecovered(mechanism string) {
 				"color":       3066993, // Green
 				"timestamp":   time.Now().Format(time.RFC3339),
 				"footer": map[string]string{
-					"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
+					"text": fmt.Sprintf("live detection · Version: %s", d.Version),
 				},
 			},
 		},
@@ -592,7 +507,7 @@ func (d *Client) NotifyLiveDetectRevoked(subType, status, broadcasterID string) 
 				"color":     16744448, // Orange
 				"timestamp": time.Now().Format(time.RFC3339),
 				"footer": map[string]string{
-					"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
+					"text": fmt.Sprintf("live detection · Version: %s", d.Version),
 				},
 			},
 		},
@@ -625,7 +540,7 @@ func (d *Client) NotifyLiveDetectAuditMiss(channelKey, videoID string) {
 				"color":     15158332, // Red
 				"timestamp": time.Now().Format(time.RFC3339),
 				"footer": map[string]string{
-					"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
+					"text": fmt.Sprintf("live detection · Version: %s", d.Version),
 				},
 			},
 		},
@@ -660,7 +575,7 @@ func (d *Client) NotifyLiveDetectCallbackBlocked(blocked []string) {
 				"color":     15158332, // Red
 				"timestamp": time.Now().Format(time.RFC3339),
 				"footer": map[string]string{
-					"text": fmt.Sprintf("live detection (shadow mode) · Version: %s", d.Version),
+					"text": fmt.Sprintf("live detection · Version: %s", d.Version),
 				},
 			},
 		},

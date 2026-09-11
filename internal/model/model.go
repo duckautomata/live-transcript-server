@@ -105,6 +105,149 @@ type DetectedBroadcast struct {
 	EndedAt int64 `json:"endedAt"`
 }
 
+// DetectedVideo is the ledger row for a non-live YouTube observation: a
+// stream or premiere being scheduled, or a plain video or short being
+// published. Like DetectedBroadcast it exists so that an observation which the
+// poller re-derives on every cycle - and which a restart re-derives from
+// scratch - is announced exactly once. Keyed on the video id AND the kind: the
+// same id is legitimately "scheduled" first and then goes live, and the live
+// half lives in detected_broadcasts.
+type DetectedVideo struct {
+	Platform   string `json:"platform"`
+	VideoID    string `json:"videoId"`
+	Kind       string `json:"kind"` // "scheduled", "upload" or "short"
+	ChannelKey string `json:"channelKey"`
+	URL        string `json:"url"`
+	Title      string `json:"title"`
+	// PublishedAt is the platform's publish time in unix seconds; zero when
+	// not reported.
+	PublishedAt int64 `json:"publishedAt"`
+	// ScheduledAt is the announced start time of a scheduled stream or
+	// premiere, in unix seconds; zero for uploads and shorts.
+	ScheduledAt int64 `json:"scheduledAt"`
+	DetectedAt  int64 `json:"detectedAt"`
+}
+
+// EmbedTemplate is the admin-editable shape of a notification's Discord
+// embed. Every string field is a template: {placeholders} are expanded at send
+// time. Color is "#RRGGBB"; empty means Discord's default. Timestamp adds the
+// event's time (stream start, scheduled start, publish time) to the embed.
+type EmbedTemplate struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+	Color       string `json:"color"`
+	Image       string `json:"image"`
+	Thumbnail   string `json:"thumbnail"`
+	Footer      string `json:"footer"`
+	Timestamp   bool   `json:"timestamp"`
+}
+
+// Webhook is one Discord webhook a notification event posts to. Name is the
+// admin's label for it ("#announcements", "members server") so the list and
+// the delivery log can say where a post went without showing the URL; it may
+// be empty. URL is the sensitive part and is never logged.
+type Webhook struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// Label is how a webhook is referred to in logs and on the admin page: its
+// name when it has one, otherwise whatever masked form the caller supplies.
+func (w Webhook) Label(masked string) string {
+	if w.Name != "" {
+		return w.Name + " (" + masked + ")"
+	}
+	return masked
+}
+
+// WebhooksFromURLs builds unnamed webhooks from URLs. Mostly for tests and
+// for reading the older list-of-strings form back from the database.
+func WebhooksFromURLs(urls ...string) []Webhook {
+	out := make([]Webhook, 0, len(urls))
+	for _, u := range urls {
+		out = append(out, Webhook{URL: u})
+	}
+	return out
+}
+
+// NotificationEvent is one admin-configured announcement rule: when any of its
+// Triggers fires for its channel, the rendered Content and Embed are posted to
+// every one of its Webhooks.
+//
+// The webhook URLs are the sensitive part. A public announcement webhook pings
+// thousands of people, so nothing but a rendered announcement may ever be sent
+// through one - never an error, never a diagnostic - and the URLs are masked
+// in every log line and audit record.
+type NotificationEvent struct {
+	ID         int64     `json:"id"`
+	ChannelKey string    `json:"channelKey"`
+	Name       string    `json:"name"`
+	Enabled    bool      `json:"enabled"`
+	Webhooks   []Webhook `json:"webhooks"`
+	// Triggers is the set of event kinds this rule announces: "live",
+	// "scheduled", "upload", "short".
+	Triggers []string `json:"triggers"`
+	// Content is the message-body template. Role pings go here as <@&ROLE_ID>.
+	Content      string        `json:"content"`
+	EmbedEnabled bool          `json:"embedEnabled"`
+	Embed        EmbedTemplate `json:"embed"`
+	// CooldownSeconds is the minimum gap between two sends of this rule for
+	// the SAME trigger. Zero disables the limit. It is what stops a stream
+	// restart - a brand-new broadcast id minutes after the first - from
+	// pinging everyone twice, while a "scheduled" ping followed by the
+	// "live" ping it announced still goes out.
+	CooldownSeconds int64 `json:"cooldownSeconds"`
+
+	// Delivery trail, maintained by the dispatcher.
+	LastSentAt  int64  `json:"lastSentAt"`
+	SentCount   int64  `json:"sentCount"`
+	LastError   string `json:"lastError"`
+	LastErrorAt int64  `json:"lastErrorAt"`
+
+	CreatedAt int64 `json:"createdAt"`
+	UpdatedAt int64 `json:"updatedAt"`
+}
+
+// WebhookURLs returns the rule's webhook URLs in order.
+func (e NotificationEvent) WebhookURLs() []string {
+	out := make([]string, 0, len(e.Webhooks))
+	for _, w := range e.Webhooks {
+		out = append(out, w.URL)
+	}
+	return out
+}
+
+// Notification log statuses.
+const (
+	NotificationStatusSent       = "sent"       // every webhook accepted it
+	NotificationStatusPartial    = "partial"    // some webhooks failed
+	NotificationStatusFailed     = "failed"     // no webhook accepted it
+	NotificationStatusSuppressed = "suppressed" // inside the rule's cooldown
+	NotificationStatusTest       = "test"       // an admin-initiated test send
+)
+
+// NotificationLogEntry records one dispatch decision for the admin page, so an
+// operator can see what was announced, where, and why something was not.
+type NotificationLogEntry struct {
+	ID          int64  `json:"id"`
+	ChannelKey  string `json:"channelKey"`
+	EventID     int64  `json:"eventId"`
+	EventName   string `json:"eventName"`
+	Trigger     string `json:"trigger"`
+	Platform    string `json:"platform"`
+	BroadcastID string `json:"broadcastId"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	Status      string `json:"status"`
+	// Detail is a human-readable note: which webhooks failed and why (masked),
+	// or how long the cooldown had left.
+	Detail    string `json:"detail"`
+	Webhooks  int    `json:"webhooks"`
+	Delivered int    `json:"delivered"`
+	SentAt    int64  `json:"sentAt"`
+}
+
 // Worker cookie-auth states, mirroring the worker's cookieauth.CookieAuth.
 const (
 	CookieStateNA      = "na"

@@ -81,9 +81,16 @@ discord:
   # membership key create/delete). Empty falls back to webhookUrl; admin
   # audit posts are only disabled when both are empty.
   adminWebhookUrl: ""
-  # Optional separate webhook for live-detection observations. A soak posts one
-  # message per detected broadcast, so its own channel keeps the alert feed
-  # readable. Empty falls back to adminWebhookUrl, then webhookUrl.
+  # Optional separate webhook for the operator's own live-detection feed: every
+  # detection (stream live, stream scheduled, video or short published) is
+  # posted here in the default announcement look with no pings, plus any
+  # problem with detection itself (a leg down, a callback intercepted). Empty
+  # falls back to adminWebhookUrl, then webhookUrl.
+  #
+  # Audience-facing announcements - the ones that ping roles - are NOT
+  # configured here. They are "notification events", created per channel on
+  # the admin page's Notifications tab, each with its own webhooks, triggers,
+  # message template and minimum gap between pings.
   detectWebhookUrl: ""
   # both user and role id are optional. If none are set, no ping will be sent.
   # Only one will be used. If both are set, the role id will be used.
@@ -113,10 +120,11 @@ discord:
     # removes it. 0 falls back to 1440 (24h).
     streamTtlMinutes: 1440
 
-# Server-side live detection. OBSERVER ONLY in this build: it detects streams
-# going live and posts a Discord notification recording when the stream started,
-# when we detected it, the delay between them, and which mechanism won. It never
-# queues work for the worker and never touches the streams table.
+# Server-side live detection. Watches each channel's YouTube and Twitch for
+# streams going live (and, on YouTube, streams being scheduled and videos or
+# shorts being published), records every observation once, announces it through
+# the notification events configured on the admin page, and mirrors it to
+# discord.detectWebhookUrl.
 #
 # Latency comes from the PUSH paths; the polling paths are the safety net under
 # them. Push is edge-triggered (one dropped delivery and a stream is never seen)
@@ -124,6 +132,14 @@ discord:
 # whichever sees a broadcast first claims it.
 liveDetect:
   enabled: false
+
+  # Queue a detected live stream for the worker, exactly as a Pingcord
+  # announcement picked up by the Discord bot would be. Off means detection is
+  # an OBSERVER: it announces and records, but never puts work in front of the
+  # worker and never touches the streams table. Run a new deployment with this
+  # off first and read the detection delays on the admin page; once they are
+  # trustworthy, turn it on and the Discord listener bot becomes redundant.
+  queueIncoming: false
 
   # This server's externally reachable base URL, no trailing slash, e.g.
   # "https://api.example.com". REQUIRED for eventSub and webSub: both register

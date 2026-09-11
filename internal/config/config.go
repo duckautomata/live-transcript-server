@@ -139,12 +139,19 @@ type LiveDetectYouTubeConfig struct {
 
 // LiveDetectConfig configures server-side live detection.
 //
-// This is an OBSERVER: it detects streams and reports them to Discord with the
-// measured detection delay. It never queues work for the worker and never
-// touches the streams table. The point is to measure whether detection is
-// trustworthy before anything is allowed to depend on it.
+// Detection observes YouTube and Twitch for configured channels going live,
+// announces what it sees through the admin-configured notification events,
+// and - only when QueueIncoming is set - queues the stream for the worker.
+// Without QueueIncoming it is an observer: it never queues work and never
+// touches the streams table, which is how a new deployment proves detection
+// trustworthy before the worker is allowed to depend on it.
 type LiveDetectConfig struct {
 	Enabled bool `yaml:"enabled"`
+	// QueueIncoming makes a detected live broadcast queue its URL for the
+	// worker, exactly as a Pingcord announcement would. Off by default so an
+	// existing shadow-mode deployment keeps observing until the operator has
+	// read the soak results and opts in.
+	QueueIncoming bool `yaml:"queueIncoming"`
 	// PublicBaseURL is this server's externally reachable base URL, e.g.
 	// "https://api.example.com". Required for EventSub and WebSub, which
 	// register an absolute callback with a third party and therefore cannot

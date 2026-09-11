@@ -21,6 +21,7 @@ type recordingSink struct {
 	live   []Broadcast
 	mechs  []string
 	ended  []string
+	videos []VideoEvent
 	active []Broadcast
 }
 
@@ -39,10 +40,23 @@ func (s *recordingSink) ObserveEnded(_ context.Context, _, broadcastID string) e
 	return nil
 }
 
+func (s *recordingSink) ObserveVideo(_ context.Context, v VideoEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.videos = append(s.videos, v)
+	return nil
+}
+
 func (s *recordingSink) ActiveBroadcasts(context.Context) ([]Broadcast, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Broadcast(nil), s.active...), nil
+}
+
+func (s *recordingSink) videoEvents() []VideoEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]VideoEvent(nil), s.videos...)
 }
 
 func (s *recordingSink) endedIDs() []string {
@@ -345,6 +359,7 @@ type failingSink struct{}
 
 func (failingSink) ObserveLive(context.Context, Broadcast, string) error { return errFailingSink }
 func (failingSink) ObserveEnded(context.Context, string, string) error   { return errFailingSink }
+func (failingSink) ObserveVideo(context.Context, VideoEvent) error       { return errFailingSink }
 func (failingSink) ActiveBroadcasts(context.Context) ([]Broadcast, error) {
 	return nil, errFailingSink
 }

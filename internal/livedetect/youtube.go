@@ -133,6 +133,30 @@ func (v YTVideo) ScheduledStartTime() time.Time {
 	return t
 }
 
+// PublishedAt returns when the platform says the video became public: the
+// upload time for an ordinary video, the moment the frame went public for a
+// scheduled stream or premiere. Zero when not reported. It is what separates
+// "new" from "sitting on the uploads playlist for a year" when the whole
+// playlist is re-read at boot.
+func (v YTVideo) PublishedAt() time.Time {
+	if v.Snippet == nil || v.Snippet.PublishedAt == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, v.Snippet.PublishedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// IsBroadcast reports whether the video is, was, or will be a live broadcast
+// or premiere. The API attaches liveStreamingDetails to exactly those, so its
+// absence on a video that reports "none" is what identifies a plain upload:
+// a finished stream's VOD keeps the object and is never mistaken for one.
+func (v YTVideo) IsBroadcast() bool {
+	return v.LiveStreamingDetails != nil
+}
+
 // Title returns the video title, or "" when no snippet was returned.
 func (v YTVideo) Title() string {
 	if v.Snippet == nil {
@@ -329,6 +353,11 @@ func (c *YouTubeClient) SearchLive(ctx context.Context, channelID string) ([]str
 // is what internal/discord/webhook.go already builds for YouTube streams.
 func YouTubeWatchURL(videoID string) string {
 	return "https://www.youtube.com/watch?v=" + videoID
+}
+
+// YouTubeShortsURL is the canonical URL for a short.
+func YouTubeShortsURL(videoID string) string {
+	return "https://www.youtube.com/shorts/" + videoID
 }
 
 // TwitchChannelURL is the canonical URL for a Twitch channel. This exact form

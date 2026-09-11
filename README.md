@@ -10,6 +10,7 @@ _System_
 - **[Flows](#flows)**
 - **[Events](#events)**
 - **[Live Detection](#live-detection)**
+- **[Notification Events](#notification-events)**
 - **[Media Clipping](#media-clipping)**
 
 _Development_
@@ -105,13 +106,26 @@ The goal of this message structure is to minimize data being sent between the se
 
 The server can detect for itself when a configured channel goes live, so a
 stream is still noticed when the Discord bot is down or the worker misses it.
+It also notices, on YouTube, a stream or premiere being scheduled and a video
+or short being published.
 
-**It is an observer.** It never queues work for the worker, never writes the
-`streams` table, and never activates anything - the worker still owns
-activation. Its only output is a Discord notification recording when the stream
-started, when we detected it, the delay between them, and which mechanism won.
-That measurement is the point: it is what decides whether this is trustworthy
-enough to later drive the worker. Disabled by default (`liveDetect.enabled`).
+Every observation is recorded once in a ledger and then does three things:
+
+1. **Queues the stream for the worker** - only for a live broadcast, and only
+   when `liveDetect.queueIncoming` is on. This is the same queue a Pingcord
+   announcement picked up by the Discord bot feeds, so once detection is
+   trusted the bot becomes redundant. With `queueIncoming` off, detection is an
+   observer: it never queues work, never writes the `streams` table, and never
+   activates anything. A new deployment runs that way first and reads the
+   measured delays on the admin page before opting in.
+2. **Runs the channel's notification events** - the admin-configured public
+   announcements described under [Notification Events](#notification-events).
+3. **Mirrors it to the operator feed** (`discord.detectWebhookUrl`) in the
+   default announcement look, with no pings, and with the detection
+   diagnostics (which mechanism won, and the delay behind the platform's own
+   start time) in the footer. The same feed carries detection problems.
+
+Disabled by default (`liveDetect.enabled`).
 
 Six mechanisms run together, deliberately redundant:
 
@@ -182,6 +196,49 @@ invisible from both ends.
 
 See `liveDetect` in `config-example.yaml` for the full setup.
 
+Non-live observations (scheduled frames, uploads, shorts) come from the same
+YouTube state poll. A video that reports no broadcast details is an ordinary
+upload; one request to `youtube.com/shorts/{id}` then tells a short (200)
+from a video (redirect to `/watch`), and an answer that is neither is
+announced as a video - the harmless direction. Only a video published within
+the last six hours is announced, so the first discovery pass after enabling
+does not announce a channel's whole back catalogue.
+
+### Notification Events
+
+Notification events are the audience-facing half of live detection: the
+"Pingcord-like" rules on the admin page's **Notifications** tab. Each one says
+*when any of these triggers fires for this channel, post this message and
+embed to these Discord webhooks*.
+
+- **Triggers:** going live (Twitch stream, YouTube stream, or YouTube premiere
+  starting), stream or premiere scheduled, video uploaded, short uploaded.
+- **Webhooks:** one or many Discord webhooks, each with a name saying where
+  it posts. Only Discord webhook URLs are accepted, so a rule can never point
+  the server at an arbitrary host. The URLs are shown in full only in the
+  editor; every log line, error and audit record uses the name and a masked
+  form of the URL.
+- **Message and embed:** templates with `{placeholders}` (`{channel}`,
+  `{title}`, `{url}`, `{time}`, ...). Role pings go in the message as
+  `<@&ROLE_ID>`; the editor has a helper and a guide for finding role IDs.
+  The embed starts out looking like the server's own stream-start post and
+  can be edited or disabled.
+- **Minimum time between notifications:** a per-rule, per-trigger cooldown
+  claimed atomically in the database, so a stream restart (a brand-new
+  broadcast id) cannot ping everyone twice, while a "scheduled" ping never
+  swallows the "live" ping that follows it. Suppressed sends are logged.
+- **Mentions:** the pings a message can make are derived from the template,
+  never from the rendered text - a stream title containing `@everyone` is
+  shown but notifies nobody.
+- **Preview and test:** the editor renders the draft server-side from sample
+  data (the channel's most recent detection, when there is one), and can post
+  it to a webhook of the admin's choice with every mention suppressed.
+
+These webhooks reach thousands of people, so nothing but a rendered
+announcement of a real observation - or an explicit admin test - is ever
+posted through them. Detection errors and diagnostics go to the operator
+webhooks in `discord.*`, never here.
+
 ### Media Clipping
 
 Because we don't know what type of media the worker will send to us (MPEG-TS audio, DASH video, etc.), the server treats the media received from the worker as untrusted binary data (`.raw`) and uses the `mediaType` variable to denote what type of media it is. It can be
@@ -221,8 +278,9 @@ obvious home:
 | `internal/ws` | WebSocket hub: connection registry, broadcast, event payloads |
 | `internal/notify` | Long-poll signaling shared by `/events` and the admin poll |
 | `internal/media` | ffmpeg processing (`Processor` interface) and raw-audio merging |
-| `internal/discord` | Webhook notifier + Pingcord listener bot |
-| `internal/livedetect` | Live detection: watches YouTube and Twitch for channels going live (observer only) |
+| `internal/discord` | Operator webhook notifier (alerts, admin audit) + Pingcord listener bot |
+| `internal/announce` | Public Discord announcements: notification-event templates, rendering, webhook delivery with cooldowns |
+| `internal/livedetect` | Live detection: watches YouTube and Twitch for channels going live, scheduling streams, and publishing videos |
 | `internal/archive` | Archive-server client for membership keys |
 | `internal/config`, `internal/model`, `internal/metrics`, `internal/logging` | Leaf packages: config schema, shared data types, Prometheus metrics (single registration point), slog setup |
 

@@ -74,6 +74,14 @@ type Bot struct {
 	lastDisconnect time.Time
 	lastErr        string
 	lastErrAt      time.Time
+	// connectEpoch counts successful connects, and lastErrEpoch is the epoch
+	// the last error was recorded in. Whether an error predates the current
+	// connection is decided by comparing these, never the timestamps above:
+	// on a coarse clock (Windows) an error and a connect a few microseconds
+	// apart read as the same instant, and a stale error would be blamed for
+	// a fresh outage.
+	connectEpoch uint64
+	lastErrEpoch uint64
 }
 
 // Bot gateway states reported by Status.
@@ -119,9 +127,9 @@ func (b *Bot) Status(channelKey string) BotStatus {
 	b.mu.Lock()
 	connected := b.connected
 	// An error from before the most recent successful connect belongs to a
-	// previous outage and must not be blamed for the current one. Compared at
-	// full precision here because the snapshot only keeps unix seconds.
-	errPredatesConnect := b.lastErrAt.Before(b.lastConnect)
+	// previous outage and must not be blamed for the current one. Decided by
+	// connect epoch rather than by timestamp, which a coarse clock can tie.
+	errPredatesConnect := b.lastErrEpoch < b.connectEpoch
 	st := BotStatus{
 		LastHeartbeatAck:  unixOrZero(lastAck),
 		LastConnect:       unixOrZero(b.lastConnect),
@@ -171,6 +179,7 @@ func (b *Bot) recordGatewayError(err error) {
 	b.mu.Lock()
 	b.lastErr = err.Error()
 	b.lastErrAt = time.Now()
+	b.lastErrEpoch = b.connectEpoch
 	b.mu.Unlock()
 }
 
@@ -311,6 +320,7 @@ func (b *Bot) onConnect(_ *discordgo.Session, _ *discordgo.Connect) {
 	b.mu.Lock()
 	b.connected = true
 	b.lastConnect = time.Now()
+	b.connectEpoch++
 	b.mu.Unlock()
 	slog.Info("discord gateway connected", "func", "Bot.onConnect")
 }

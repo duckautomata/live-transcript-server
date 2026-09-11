@@ -42,6 +42,15 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, streamID s
 			}
 		}
 
+		// activated_time is what orders a channel's streams, so it must be
+		// strictly greater than the previous stream's. A coarse clock can hand
+		// two back-to-back activations the same microsecond, which would make
+		// "the most recent stream" a coin toss.
+		activatedTime := time.Now().UnixMicro()
+		if currentStream != nil && activatedTime <= currentStream.ActivatedTime {
+			activatedTime = currentStream.ActivatedTime + 1
+		}
+
 		newStream := &model.Stream{
 			ChannelID:     cs.Key,
 			StreamID:      streamID,
@@ -49,7 +58,7 @@ func (app *App) activateStream(ctx context.Context, cs *ChannelState, streamID s
 			StartTime:     startTime,
 			IsLive:        true,
 			MediaType:     mediaType,
-			ActivatedTime: time.Now().UnixMicro(),
+			ActivatedTime: activatedTime,
 		}
 
 		// Deactivate previous stream if it was live
