@@ -294,8 +294,10 @@ and refused by config validation.
   editor; every log line, error and audit record uses the name and a masked
   form of the URL.
 - **Message and embed:** templates with `{placeholders}` (`{channel}`,
-  `{title}`, `{url}`, `{time}`, ...). Role pings go in the message as
-  `<@&ROLE_ID>`; the editor has a helper and a guide for finding role IDs.
+  `{title}`, `{url}`, `{time}`, ...). Pings go in the message as
+  `<@&ROLE_ID>` for a role, `<@USER_ID>` for one person, and `<#CHANNEL_ID>`
+  for a channel link that pings nobody; the editor has a helper that inserts
+  each and explains where the ids come from.
   The embed starts out looking like the server's own stream-start post and
   can be edited or disabled.
 - **Minimum time between notifications:** a per-rule, per-trigger cooldown
