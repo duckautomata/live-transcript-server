@@ -8,6 +8,31 @@
 credentials:
   # credentials used to restrict the activate/deactive/update/upload endpoints
   apiKey: ""
+  # adminKey gates the site admin page (/admin/ui) and its API (/admin/*):
+  # the operator's view of every account and notification event, with the
+  # levers to stop abuse (disable or delete an account, drop its events,
+  # sign it out everywhere, unlock it, close sign-ups). It is for the
+  # operator alone and is separate from the per-channel adminKeys. Leave
+  # empty to turn the page off.
+  adminKey: ""
+
+# Accounts on the live-transcript site. Anyone can create one to run their
+# own notification events (public Discord announcements driven by live
+# detection); each account sees only its own events and webhooks. Passwords
+# are argon2id-hashed, sessions are bearer tokens stored hashed, and sign-in
+# is rate limited per address with a growing lockout per account.
+accounts:
+  # Refuse new sign-ups while leaving existing accounts working. The site
+  # admin page can also close and reopen sign-ups at runtime; this switch
+  # closes them regardless.
+  disableRegistration: false
+  # The reverse proxies in front of this server, as addresses or CIDR ranges
+  # (Cloudflare's published ranges, a local nginx). The per-address sign-in
+  # limits key on the client address the proxy reports (CF-Connecting-IP,
+  # then X-Forwarded-For), and that header is only believed when the
+  # connection comes from one of these. Empty believes it from any peer -
+  # fine when the server is only reachable through its proxy.
+  trustedProxies: []
 
 # Config for connecting the admin page to the archive server.
 # Used for managing the membership keys. Leave blank if you do not want this feature.
@@ -34,7 +59,9 @@ storage:
     publicUrl: ""
 
 channels:
-  # List of keys the server will work with.
+  # List of keys the server will work with. The names admin, auth, status,
+  # events, livedetect, metrics, health and version are reserved for the
+  # server's own routes and are refused.
   # numPastStreams is the number of past streams to keep.
   # If numPastStreams is 0, it will keep only the current stream.
   # Note: if using R2, numPastStreams is ignored and the bucket's lifecycle policy is used instead.
@@ -88,9 +115,10 @@ discord:
   # falls back to adminWebhookUrl, then webhookUrl.
   #
   # Audience-facing announcements - the ones that ping roles - are NOT
-  # configured here. They are "notification events", created per channel on
-  # the admin page's Notifications tab, each with its own webhooks, triggers,
-  # message template and minimum gap between pings.
+  # configured here. They are "notification events", created per channel by
+  # accounts on the live-transcript site, each with its own webhooks,
+  # triggers, message template and minimum gap between pings. The admin page
+  # lists them (owners named, webhooks masked) and can delete one.
   detectWebhookUrl: ""
   # both user and role id are optional. If none are set, no ping will be sent.
   # Only one will be used. If both are set, the role id will be used.
@@ -123,8 +151,8 @@ discord:
 # Server-side live detection. Watches each channel's YouTube and Twitch for
 # streams going live (and, on YouTube, streams being scheduled and videos or
 # shorts being published), records every observation once, announces it through
-# the notification events configured on the admin page, and mirrors it to
-# discord.detectWebhookUrl.
+# the notification events accounts have created on the live-transcript site,
+# and mirrors it to discord.detectWebhookUrl.
 #
 # Latency comes from the PUSH paths; the polling paths are the safety net under
 # them. Push is edge-triggered (one dropped delivery and a stream is never seen)

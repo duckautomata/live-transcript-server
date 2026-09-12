@@ -52,7 +52,10 @@ type ChannelState struct {
 
 // App holds the application-wide dependencies and configuration.
 type App struct {
-	ApiKey     string
+	ApiKey string
+	// AdminKey gates the site-wide admin page and API (handlers_site_admin.go);
+	// empty disables them.
+	AdminKey   string
 	Store      *store.Store
 	Storage    storage.Storage
 	Media      media.Processor
@@ -64,6 +67,11 @@ type App struct {
 	// Announcer turns detections into the admin-configured public Discord
 	// announcements (and the operator's own feed). Always constructed.
 	Announcer *announce.Dispatcher
+	// Accounts governs the self-service accounts behind notification events
+	// (see handlers_auth.go); authLimits are the request limiters on the
+	// account endpoints.
+	Accounts   config.AccountsConfig
+	authLimits authLimits
 	// QueueIncoming is liveDetect.queueIncoming: whether a detected live
 	// broadcast is queued for the worker, or only observed and announced.
 	QueueIncoming bool
@@ -122,11 +130,12 @@ func NewApp(cfg config.Config, st *store.Store, tempDir, version, buildTime stri
 	}
 
 	app := &App{
-		ApiKey:  cfg.Credentials.ApiKey,
-		Store:   st,
-		Media:   media.FFmpeg{},
-		Discord: discord.NewClient(cfg.Discord, version, cfg.Channels),
-		Archive: archive.NewClient(cfg.ArchiveURL, cfg.ArchiveKey),
+		ApiKey:   cfg.Credentials.ApiKey,
+		AdminKey: cfg.Credentials.AdminKey,
+		Store:    st,
+		Media:    media.FFmpeg{},
+		Discord:  discord.NewClient(cfg.Discord, version, cfg.Channels),
+		Archive:  archive.NewClient(cfg.ArchiveURL, cfg.ArchiveKey),
 		Upgrader: websocket.Upgrader{
 			ReadBufferSize:    1024,
 			WriteBufferSize:   1024,
@@ -143,6 +152,8 @@ func NewApp(cfg config.Config, st *store.Store, tempDir, version, buildTime stri
 		Version:           version,
 		BuildTime:         buildTime,
 		QueueIncoming:     cfg.LiveDetect.QueueIncoming,
+		Accounts:          cfg.Accounts,
+		authLimits:        newAuthLimits(cfg.Accounts),
 	}
 	app.ctx, app.cancel = context.WithCancel(context.Background())
 

@@ -180,11 +180,19 @@ func WebhooksFromURLs(urls ...string) []Webhook {
 // through one - never an error, never a diagnostic - and the URLs are masked
 // in every log line and audit record.
 type NotificationEvent struct {
-	ID         int64     `json:"id"`
-	ChannelKey string    `json:"channelKey"`
-	Name       string    `json:"name"`
-	Enabled    bool      `json:"enabled"`
-	Webhooks   []Webhook `json:"webhooks"`
+	ID         int64  `json:"id"`
+	ChannelKey string `json:"channelKey"`
+	// UserID is the account that owns the rule. Every read and write of a
+	// rule is scoped by it, so one account can never see or touch another's
+	// webhooks. Zero marks a rule created on the admin page before accounts
+	// existed; it keeps firing and can only be deleted, not edited.
+	UserID int64 `json:"userId"`
+	// Owner is the owning account's username, filled in only for the
+	// operator's view on the admin page.
+	Owner    string    `json:"owner,omitempty"`
+	Name     string    `json:"name"`
+	Enabled  bool      `json:"enabled"`
+	Webhooks []Webhook `json:"webhooks"`
 	// Triggers is the set of event kinds this rule announces: "live",
 	// "scheduled", "upload", "short".
 	Triggers []string `json:"triggers"`
@@ -230,9 +238,14 @@ const (
 // NotificationLogEntry records one dispatch decision for the admin page, so an
 // operator can see what was announced, where, and why something was not.
 type NotificationLogEntry struct {
-	ID          int64  `json:"id"`
-	ChannelKey  string `json:"channelKey"`
-	EventID     int64  `json:"eventId"`
+	ID         int64  `json:"id"`
+	ChannelKey string `json:"channelKey"`
+	EventID    int64  `json:"eventId"`
+	// UserID is the owner of the rule the entry is about, so an account sees
+	// its own delivery trail and nobody else's. Owner is the username, for
+	// the admin page only.
+	UserID      int64  `json:"userId"`
+	Owner       string `json:"owner,omitempty"`
 	EventName   string `json:"eventName"`
 	Trigger     string `json:"trigger"`
 	Platform    string `json:"platform"`
@@ -272,4 +285,41 @@ type CookieStatus struct {
 // a state this server does not know must not be able to page the operator.
 func CookieDegraded(state string) bool {
 	return state == CookieStateAbsent || state == CookieStateRotated
+}
+
+// User is an account on the live-transcript site. Accounts exist so that
+// anyone can run their own notification events, isolated from everyone
+// else's: a rule and its webhooks belong to exactly one user. The password
+// hash and the lockout state never serialize.
+type User struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
+	// PasswordHash is the argon2id PHC string; see internal/auth.
+	PasswordHash      string `json:"-"`
+	CreatedAt         int64  `json:"createdAt"`
+	PasswordChangedAt int64  `json:"-"`
+	LastLoginAt       int64  `json:"lastLoginAt"`
+	// DisabledAt is set when the operator disables the account for abuse:
+	// it cannot sign in, its sessions are refused and its rules stop firing,
+	// but nothing is deleted, so it can be enabled again. DisabledReason is
+	// the operator's note, shown to the account when it tries to sign in.
+	DisabledAt     int64  `json:"disabledAt"`
+	DisabledReason string `json:"disabledReason"`
+}
+
+// Session is one signed-in browser. Only the hash of its bearer token is
+// stored; the token itself is shown once, at sign-in.
+type Session struct {
+	ID         int64  `json:"id"`
+	UserID     int64  `json:"userId"`
+	TokenHash  string `json:"-"`
+	CreatedAt  int64  `json:"createdAt"`
+	LastSeenAt int64  `json:"lastSeenAt"`
+	ExpiresAt  int64  `json:"expiresAt"`
+	// Client is a short description of the browser that signed in, and
+	// Address where it signed in from, for the account's sessions list - an
+	// account can be shared by a whole mod team, and the list is how they
+	// see who is signed in. Neither is used for anything security-relevant.
+	Client  string `json:"client"`
+	Address string `json:"address"`
 }

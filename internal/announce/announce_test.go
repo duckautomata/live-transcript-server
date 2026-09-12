@@ -1090,15 +1090,19 @@ func TestNormalizeEmptyMessageRules(t *testing.T) {
 	ev.Content = "  \n "
 	notifAssertProblem(t, notifValidationError(t, Normalize(&ev)), "the message is empty: add message text or enable the embed")
 
-	// Embed disabled: its limits are not enforced and content alone is fine.
+	// Embed disabled: content alone is fine, but the embed fields are still
+	// bounded - what is stored must never exceed what could be sent.
 	ev = notifValidEvent()
 	ev.EmbedEnabled = false
 	ev.Content = "just text"
+	if err := Normalize(&ev); err != nil {
+		t.Errorf("a disabled embed with sane fields must pass: %v", err)
+	}
 	ev.Embed.Title = strings.Repeat("t", MaxEmbedTitle+100)
 	ev.Embed.Color = "blue"
-	if err := Normalize(&ev); err != nil {
-		t.Errorf("a disabled embed must not be validated: %v", err)
-	}
+	verr := notifValidationError(t, Normalize(&ev))
+	notifAssertProblem(t, verr, fmt.Sprintf("embed title must be at most %d characters", MaxEmbedTitle))
+	notifAssertProblem(t, verr, "embed color must look like #RRGGBB")
 
 	// A placeholder is accepted where a URL is expected.
 	ev = notifValidEvent()

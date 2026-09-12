@@ -32,7 +32,7 @@ func TestNotificationsPreviewOnDeployedBuildNeverShowsStandIn(t *testing.T) {
 	}
 	preview := func(t *testing.T, trigger string) NotificationPreviewResponse {
 		t.Helper()
-		rec := adminReq(t, mux, http.MethodPost, notifBase+"/preview", notifAdminKey,
+		rec := notifReq(t, mux, http.MethodPost, notifBase+"/preview",
 			notificationDraftRequest{Event: draft, Trigger: trigger})
 		if rec.Code != http.StatusOK {
 			t.Fatalf("preview %s: status=%d body=%s", trigger, rec.Code, rec.Body.String())
@@ -126,7 +126,7 @@ func TestNotificationsPreviewOnDeployedBuildNeverShowsStandIn(t *testing.T) {
 	})
 
 	t.Run("a test send of that offline stream carries neither example", func(t *testing.T) {
-		rec := adminReq(t, mux, http.MethodPost, notifBase+"/test", notifAdminKey,
+		rec := notifReq(t, mux, http.MethodPost, notifBase+"/test",
 			notificationDraftRequest{Event: draft, Trigger: "live", WebhookURL: notifWebhookURL})
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -171,7 +171,7 @@ func TestNotificationsPreviewOnDeployedBuildNeverShowsStandIn(t *testing.T) {
 	t.Run("only a local build falls back to the stand-in", func(t *testing.T) {
 		app.Version = LocalVersion
 		t.Cleanup(func() { app.Version = "test-version" })
-		rec := adminReq(t, mux, http.MethodPost, notifBase+"/preview", notifAdminKey,
+		rec := notifReq(t, mux, http.MethodPost, notifBase+"/preview",
 			notificationDraftRequest{Event: draft, Trigger: "upload"})
 		var resp NotificationPreviewResponse
 		notifDecode(t, rec, &resp)
@@ -179,7 +179,7 @@ func TestNotificationsPreviewOnDeployedBuildNeverShowsStandIn(t *testing.T) {
 			t.Errorf("local upload sample = %#v, want the stand-in", resp.Sample)
 		}
 		// A real detection still wins over the stand-in, blanks and all.
-		rec = adminReq(t, mux, http.MethodPost, notifBase+"/preview", notifAdminKey,
+		rec = notifReq(t, mux, http.MethodPost, notifBase+"/preview",
 			notificationDraftRequest{Event: draft, Trigger: "live"})
 		notifDecode(t, rec, &resp)
 		if sampleStr(resp, "source") != "recent" || sampleStr(resp, "id") != "s1" || sampleStr(resp, "title") != "" {

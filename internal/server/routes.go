@@ -61,17 +61,56 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{channel}/admin/membership", app.withAdminChannel(app.getAdminMembershipHandler))
 	mux.HandleFunc("POST /{channel}/admin/membership", app.withAdminChannel(app.postAdminMembershipHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/membership", app.withAdminChannel(app.deleteAdminMembershipHandler))
-	// Notification events: the admin-configured public Discord announcements
-	// driven by live detection. preview and test render a draft from the
-	// editor without saving it; test posts with every mention suppressed.
+	// The operator's read-only view of notification events (every account's,
+	// webhooks masked), the delivery log and detection history, plus the
+	// moderation delete. Editing happens on the live-transcript site, under
+	// each account's own login - see the account routes below.
 	mux.HandleFunc("GET /{channel}/admin/notifications", app.withAdminChannel(app.getAdminNotificationsHandler))
-	mux.HandleFunc("POST /{channel}/admin/notifications", app.withAdminChannel(app.postAdminNotificationHandler))
-	mux.HandleFunc("POST /{channel}/admin/notifications/preview", app.withAdminChannel(app.postAdminNotificationPreviewHandler))
-	mux.HandleFunc("POST /{channel}/admin/notifications/test", app.withAdminChannel(app.postAdminNotificationTestHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/notifications/log", app.withAdminChannel(app.deleteAdminNotificationLogHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/notifications/detections", app.withAdminChannel(app.deleteAdminDetectionsHandler))
-	mux.HandleFunc("PUT /{channel}/admin/notifications/{id}", app.withAdminChannel(app.putAdminNotificationHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/notifications/{id}", app.withAdminChannel(app.deleteAdminNotificationHandler))
+
+	// Site admin (credentials.adminKey; see handlers_site_admin.go): the
+	// operator's view of every account and rule, and the levers to stop
+	// abuse. Channel names cannot be "admin" (config.Validate), so these
+	// never collide with the per-channel routes.
+	mux.HandleFunc("GET /admin/ui", app.siteAdminUIHandler)
+	mux.HandleFunc("GET /admin/overview", app.withSiteAdmin(app.getSiteOverviewHandler))
+	mux.HandleFunc("GET /admin/accounts", app.withSiteAdmin(app.getSiteAccountsHandler))
+	mux.HandleFunc("GET /admin/accounts/{id}/events", app.withSiteAdmin(app.getSiteAccountEventsHandler))
+	mux.HandleFunc("POST /admin/accounts/{id}/disable", app.withSiteAdmin(app.postSiteAccountDisableHandler))
+	mux.HandleFunc("POST /admin/accounts/{id}/enable", app.withSiteAdmin(app.postSiteAccountEnableHandler))
+	mux.HandleFunc("DELETE /admin/accounts/{id}/sessions", app.withSiteAdmin(app.deleteSiteAccountSessionsHandler))
+	mux.HandleFunc("DELETE /admin/accounts/{id}/events", app.withSiteAdmin(app.deleteSiteAccountEventsHandler))
+	mux.HandleFunc("DELETE /admin/accounts/{id}/lockouts", app.withSiteAdmin(app.deleteSiteAccountLockoutsHandler))
+	mux.HandleFunc("DELETE /admin/accounts/{id}", app.withSiteAdmin(app.deleteSiteAccountHandler))
+	mux.HandleFunc("DELETE /admin/events/{id}", app.withSiteAdmin(app.deleteSiteEventHandler))
+	mux.HandleFunc("POST /admin/registration", app.withSiteAdmin(app.postSiteRegistrationHandler))
+
+	// Accounts (bearer token; see handlers_auth.go). Registration and sign-in
+	// are the only unauthenticated ones and are rate limited per address.
+	mux.HandleFunc("GET /auth/info", app.getAuthInfoHandler)
+	mux.HandleFunc("POST /auth/register", app.postRegisterHandler)
+	mux.HandleFunc("POST /auth/login", app.postLoginHandler)
+	mux.HandleFunc("GET /auth/me", app.withUser(app.getMeHandler))
+	mux.HandleFunc("POST /auth/logout", app.withUser(app.postLogoutHandler))
+	mux.HandleFunc("POST /auth/logout-all", app.withUser(app.postLogoutAllHandler))
+	mux.HandleFunc("GET /auth/sessions", app.withUser(app.getSessionsHandler))
+	mux.HandleFunc("DELETE /auth/sessions/{id}", app.withUser(app.deleteSessionHandler))
+	mux.HandleFunc("POST /auth/password", app.withUser(app.postPasswordHandler))
+	mux.HandleFunc("DELETE /auth/account", app.withUser(app.deleteAccountHandler))
+
+	// Notification events, per account and per channel: the "Pingcord-like"
+	// public Discord announcements driven by live detection. Every read and
+	// write is scoped to the signed-in account, so one account can never see
+	// another's webhooks. preview and test render a draft from the editor
+	// without saving it; test posts with every mention suppressed.
+	mux.HandleFunc("GET /{channel}/notifications", app.withUserChannel(app.getNotificationsHandler))
+	mux.HandleFunc("POST /{channel}/notifications", app.withUserChannel(app.postNotificationHandler))
+	mux.HandleFunc("POST /{channel}/notifications/preview", app.withUserChannel(app.postNotificationPreviewHandler))
+	mux.HandleFunc("POST /{channel}/notifications/test", app.withUserChannel(app.postNotificationTestHandler))
+	mux.HandleFunc("PUT /{channel}/notifications/{id}", app.withUserChannel(app.putNotificationHandler))
+	mux.HandleFunc("DELETE /{channel}/notifications/{id}", app.withUserChannel(app.deleteNotificationHandler))
 
 	// Live-detection push callbacks. Public and unauthenticated by necessity:
 	// the callers are Twitch and Google's WebSub hub, neither of which can send
@@ -83,6 +122,10 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 
 	// Public routes
 	mux.HandleFunc("GET /status", app.getStatusHandler)
+	// Live detection as the site shows it: whether the channel is watched
+	// and healthy, and what was recently detected. Stream titles and links
+	// are public already; leg error text is not included.
+	mux.HandleFunc("GET /{channel}/livedetect", app.withChannel(app.getLiveDetectHandler))
 	mux.HandleFunc("GET /{channel}/websocket", app.withChannel(app.wsHandler))
 	mux.HandleFunc("GET /{channel}/stream/{streamID}/{type}/{filename}", app.withChannel(app.streamHandler))
 	mux.HandleFunc("GET /{channel}/download/{streamID}/{type}/{filename}", app.withChannel(app.downloadHandler))

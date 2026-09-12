@@ -431,39 +431,40 @@ func Normalize(ev *model.NotificationEvent) error {
 	e.Image = strings.TrimSpace(e.Image)
 	e.Thumbnail = strings.TrimSpace(e.Thumbnail)
 	e.Footer = strings.TrimSpace(e.Footer)
-	if ev.EmbedEnabled {
-		if utf8.RuneCountInString(e.Title) > MaxEmbedTitle {
-			problems = append(problems, fmt.Sprintf("embed title must be at most %d characters", MaxEmbedTitle))
+	// The embed fields are bounded whether or not the embed is on: a rule
+	// keeps its embed template while the embed is disabled, and what is
+	// stored must never be more than what could be sent.
+	if utf8.RuneCountInString(e.Title) > MaxEmbedTitle {
+		problems = append(problems, fmt.Sprintf("embed title must be at most %d characters", MaxEmbedTitle))
+	}
+	if utf8.RuneCountInString(e.Description) > MaxEmbedDescription {
+		problems = append(problems, fmt.Sprintf("embed description must be at most %d characters", MaxEmbedDescription))
+	}
+	if utf8.RuneCountInString(e.Footer) > MaxEmbedFooter {
+		problems = append(problems, fmt.Sprintf("embed footer must be at most %d characters", MaxEmbedFooter))
+	}
+	if e.Color != "" {
+		if _, ok := ParseColor(e.Color); !ok {
+			problems = append(problems, "embed color must look like #RRGGBB")
+		} else if !strings.HasPrefix(e.Color, "#") {
+			e.Color = "#" + e.Color
 		}
-		if utf8.RuneCountInString(e.Description) > MaxEmbedDescription {
-			problems = append(problems, fmt.Sprintf("embed description must be at most %d characters", MaxEmbedDescription))
+		e.Color = strings.ToUpper(e.Color)
+	}
+	for _, f := range []struct{ name, value string }{{"link", e.URL}, {"image", e.Image}, {"thumbnail", e.Thumbnail}} {
+		if f.value == "" {
+			continue
 		}
-		if utf8.RuneCountInString(e.Footer) > MaxEmbedFooter {
-			problems = append(problems, fmt.Sprintf("embed footer must be at most %d characters", MaxEmbedFooter))
+		if len(f.value) > MaxTemplateURLLength {
+			problems = append(problems, fmt.Sprintf("embed %s URL is too long", f.name))
+			continue
 		}
-		if e.Color != "" {
-			if _, ok := ParseColor(e.Color); !ok {
-				problems = append(problems, "embed color must look like #RRGGBB")
-			} else if !strings.HasPrefix(e.Color, "#") {
-				e.Color = "#" + e.Color
-			}
-			e.Color = strings.ToUpper(e.Color)
+		if !strings.HasPrefix(f.value, "http://") && !strings.HasPrefix(f.value, "https://") && !strings.HasPrefix(f.value, "{") {
+			problems = append(problems, fmt.Sprintf("embed %s must be a URL or a placeholder like {url}", f.name))
 		}
-		for _, f := range []struct{ name, value string }{{"link", e.URL}, {"image", e.Image}, {"thumbnail", e.Thumbnail}} {
-			if f.value == "" {
-				continue
-			}
-			if len(f.value) > MaxTemplateURLLength {
-				problems = append(problems, fmt.Sprintf("embed %s URL is too long", f.name))
-				continue
-			}
-			if !strings.HasPrefix(f.value, "http://") && !strings.HasPrefix(f.value, "https://") && !strings.HasPrefix(f.value, "{") {
-				problems = append(problems, fmt.Sprintf("embed %s must be a URL or a placeholder like {url}", f.name))
-			}
-		}
-		if e.Title == "" && e.Description == "" && e.Image == "" && e.Thumbnail == "" && e.Footer == "" {
-			problems = append(problems, "the embed is enabled but empty - give it a title or description, or disable it")
-		}
+	}
+	if ev.EmbedEnabled && e.Title == "" && e.Description == "" && e.Image == "" && e.Thumbnail == "" && e.Footer == "" {
+		problems = append(problems, "the embed is enabled but empty - give it a title or description, or disable it")
 	}
 
 	if !ev.EmbedEnabled && strings.TrimSpace(ev.Content) == "" {

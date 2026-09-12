@@ -266,6 +266,29 @@ func (d *Detector) Enabled() bool {
 	return d != nil && (d.cfg.Twitch.Enabled || d.cfg.YouTube.Enabled)
 }
 
+// Watching lists the platforms a channel is being watched on, in a fixed
+// order, for the public detection status. Empty when the channel is not
+// watched at all. Nil-receiver-safe.
+func (d *Detector) Watching(channelKey string) []string {
+	if d == nil {
+		return nil
+	}
+	var out []string
+	for _, key := range d.twitchTargets {
+		if key == channelKey {
+			out = append(out, PlatformTwitch)
+			break
+		}
+	}
+	for _, key := range d.ytTargets {
+		if key == channelKey {
+			out = append(out, PlatformYouTube)
+			break
+		}
+	}
+	return out
+}
+
 // EventSubSecret exposes the callback signing secret to the HTTP handler.
 func (d *Detector) EventSubSecret() string {
 	if d == nil {

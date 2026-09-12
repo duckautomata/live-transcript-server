@@ -176,10 +176,39 @@ type DatabaseConfig struct {
 
 type Credentials struct {
 	ApiKey string `yaml:"apiKey"`
+	// AdminKey gates the site-wide admin page (/admin/ui) and its API: every
+	// account, every rule, and the levers to stop abuse. It belongs to the
+	// operator alone and is separate from the per-channel admin keys. Empty
+	// disables the page.
+	AdminKey string `yaml:"adminKey"`
+}
+
+// reservedChannelNames are path prefixes the server uses for itself; a
+// channel with one of these names would shadow those routes.
+var reservedChannelNames = map[string]bool{
+	"admin": true, "auth": true, "status": true, "events": true, "livedetect": true, "metrics": true, "health": true, "version": true,
+}
+
+// AccountsConfig governs the self-service accounts on the live-transcript
+// site, which exist so anyone can run their own notification events.
+type AccountsConfig struct {
+	// DisableRegistration refuses new sign-ups while leaving existing
+	// accounts working. Off by default: the site is meant to be open.
+	DisableRegistration bool `yaml:"disableRegistration"`
+	// TrustedProxies lists the addresses or CIDR ranges of the reverse
+	// proxies in front of this server (Cloudflare's published ranges, a local
+	// nginx). The per-address sign-in limits key on the client address the
+	// proxy reports (CF-Connecting-IP, then X-Forwarded-For), and that header
+	// is only believed when the connection comes from one of these. Empty
+	// means the forwarded address is believed from any peer - fine when the
+	// server is only reachable through its proxy, which is the usual
+	// deployment, and never a concern when there is no proxy at all.
+	TrustedProxies []string `yaml:"trustedProxies"`
 }
 
 type Config struct {
-	Credentials Credentials `yaml:"credentials"`
+	Credentials Credentials    `yaml:"credentials"`
+	Accounts    AccountsConfig `yaml:"accounts"`
 	// ArchiveURL and ArchiveKey connect the admin page to the archive server
 	// for membership-key management. Leave blank to disable the feature.
 	ArchiveURL string           `yaml:"archiveUrl"`
@@ -224,6 +253,9 @@ func (c Config) Validate() error {
 		}
 		if seen[ch.Name] {
 			return fmt.Errorf("duplicate channel name %q", ch.Name)
+		}
+		if reservedChannelNames[ch.Name] {
+			return fmt.Errorf("channel name %q is reserved for the server's own routes", ch.Name)
 		}
 		seen[ch.Name] = true
 	}

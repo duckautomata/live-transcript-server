@@ -250,6 +250,7 @@ func (d *Dispatcher) deliver(ctx context.Context, ev model.NotificationEvent, p 
 	entry := model.NotificationLogEntry{
 		ChannelKey:  p.ChannelKey,
 		EventID:     ev.ID,
+		UserID:      ev.UserID,
 		EventName:   ev.Name,
 		Trigger:     string(p.Trigger),
 		Platform:    p.Platform,
@@ -422,6 +423,7 @@ func (d *Dispatcher) SendTest(ctx context.Context, ev model.NotificationEvent, p
 	entry := model.NotificationLogEntry{
 		ChannelKey:  p.ChannelKey,
 		EventID:     ev.ID,
+		UserID:      ev.UserID,
 		EventName:   ev.Name,
 		Trigger:     string(p.Trigger),
 		Platform:    p.Platform,

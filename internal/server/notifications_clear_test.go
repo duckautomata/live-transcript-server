@@ -17,7 +17,7 @@ const clearTestWebhook = "https://discord.com/api/webhooks/123456789012345678/ab
 func TestAdminNotificationWebhookNames(t *testing.T) {
 	_, mux := setupTestApp(t, []string{"doki"})
 
-	rec := adminReq(t, mux, http.MethodPost, "/doki/admin/notifications", "admin-doki", map[string]any{
+	rec := notifReq(t, mux, http.MethodPost, "/doki/notifications", map[string]any{
 		"name": "Named", "enabled": true, "triggers": []string{"live"}, "content": "hi", "embedEnabled": false,
 		"webhooks": []map[string]string{
 			{"name": " #announcements ", "url": clearTestWebhook},
@@ -36,7 +36,7 @@ func TestAdminNotificationWebhookNames(t *testing.T) {
 	}
 
 	rec = adminReq(t, mux, http.MethodGet, "/doki/admin/notifications", "admin-doki", nil)
-	var listed NotificationsResponse
+	var listed AdminNotificationsResponse
 	if err := json.NewDecoder(rec.Body).Decode(&listed); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestAdminNotificationWebhookNames(t *testing.T) {
 	}
 
 	// The old field name is simply ignored: a body without "webhooks" has none.
-	rec = adminReq(t, mux, http.MethodPost, "/doki/admin/notifications", "admin-doki", map[string]any{
+	rec = notifReq(t, mux, http.MethodPost, "/doki/notifications", map[string]any{
 		"name": "Old shape", "triggers": []string{"live"}, "content": "hi", "webhookUrls": []string{clearTestWebhook},
 	})
 	if rec.Code != http.StatusBadRequest {

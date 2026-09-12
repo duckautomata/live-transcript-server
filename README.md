@@ -118,8 +118,9 @@ Every observation is recorded once in a ledger and then does three things:
    observer: it never queues work, never writes the `streams` table, and never
    activates anything. A new deployment runs that way first and reads the
    measured delays on the admin page before opting in.
-2. **Runs the channel's notification events** - the admin-configured public
-   announcements described under [Notification Events](#notification-events).
+2. **Runs the channel's notification events** - the public announcements
+   accounts set up on the live-transcript site, described under
+   [Notification Events](#notification-events).
 3. **Mirrors it to the operator feed** (`discord.detectWebhookUrl`) in the
    default announcement look, with no pings, and with the detection
    diagnostics (which mechanism won, and the delay behind the platform's own
@@ -207,9 +208,83 @@ does not announce a channel's whole back catalogue.
 ### Notification Events
 
 Notification events are the audience-facing half of live detection: the
-"Pingcord-like" rules on the admin page's **Notifications** tab. Each one says
-*when any of these triggers fires for this channel, post this message and
-embed to these Discord webhooks*.
+"Pingcord-like" rules anyone can set up for a channel. Each one says *when
+any of these triggers fires for this channel, post this message and embed to
+these Discord webhooks*.
+
+They are managed on the live-transcript site's **Notifications** page, under
+an account. Accounts exist so that everyone can run their own events and
+nobody can see anyone else's: a Discord webhook URL is a credential, and an
+event's webhooks belong to the account that created it alone - every read and
+write is scoped to the signed-in account, and an id that is not yours is
+simply not found. The admin page keeps a read-only view of every event on a
+channel (owner named, webhooks masked) with a moderation delete; events from
+before accounts existed show there as *legacy admin* and can only be deleted.
+
+**Accounts** (`accounts` in the config; `/auth/*` on the API):
+
+- Username and password; sign-ups are open unless `accounts.disableRegistration`
+  is set. Passwords are argon2id-hashed (OWASP parameters), 8 to 128
+  characters, and refused when they are the username or on the short list of
+  passwords everyone tries first.
+- Sessions are bearer tokens (`Authorization: Bearer ...`), 256 bits of
+  entropy, stored only as a SHA-256 hash, sliding 30-day expiry with a
+  180-day ceiling. A cookie was rejected on purpose: the API host serves the
+  production and dev servers under one origin, the site is developed against
+  the production API from localhost, and a bearer token carries no CSRF
+  surface. Changing the password ends every other session; deleting the
+  account removes its sessions, events, cooldowns and delivery log.
+- An account can be shared - a whole mod team signing in at once, from
+  wherever they are, is the intended use. `GET /auth/sessions` lists every
+  live session (browser, when it signed in and was last active, which one is
+  asking - never the address, so one member cannot see where the others
+  are); `DELETE /auth/sessions/{id}` ends one of them, and
+  `POST /auth/logout-all` ends every session but the caller's. Ids belong to
+  the account, so another account's session is simply not found.
+- There is no recovery path - no email, no reset link. The site says so
+  before an account is created or a password changed, and asks for a
+  checkbox that the credentials are saved. A lost password is a lost
+  account; the operator can delete it so the username is free again, but
+  cannot get into it.
+- Sign-in is limited per address, and after a few wrong passwords the
+  (username, address) pair waits a doubling interval (one minute up to an
+  hour) that is forgotten once it is left alone. The wait is per address and
+  per name typed - a stranger cannot lock a shared account's owners out from
+  somewhere else, and an unknown username waits exactly like a real one, so
+  neither the wait nor the answer says which usernames exist. A wrong
+  username and a wrong password get the same answer after the same work.
+  Password checks behind a session (change password, delete account) go
+  through the same limits, and the number of password hashes in flight is
+  capped process-wide so a flood cannot take the box's memory. Behind a
+  proxy, set `accounts.trustedProxies` so the forwarded client address is
+  believed only from it. A lock always expires on its own (the wait is at
+  most an hour, and the failure count is forgotten after an hour of quiet);
+  the operator can also clear it from the site admin page, and a restart
+  clears every lock since they live in memory.
+- What accounts do with their own events (create, edit, pause, delete, test
+  send) is written to the server log with the account named and the webhooks
+  masked, but not to the admin audit webhook: that log is for operator
+  actions, and these are open to every account.
+
+**Site admin** (`credentials.adminKey`; `/admin/ui` and `/admin/*`): the
+operator's page over the whole site, separate from the per-channel admin
+pages and gated by its own key (wrong keys are throttled per address; no key
+configured turns the page off). It shows every account with its event,
+webhook and session counts, the channels it posts on, when it signed up, last
+signed in and was last active, and its last delivery error; each account's
+events can be expanded (webhooks masked, as everywhere outside the owner's
+editor) and deleted one by one. Per account it can **unlock** (forget every
+address's failed attempts against the username), **sign out everywhere**,
+**disable** with a reason (sign-in and every session are refused with the
+reason, the account's events stop firing but are kept, and the channel admin
+pages label them *(disabled)*), **enable**, **delete events** and **delete the
+account**. Site-wide it shows totals, recent sign-ups, the last failed or
+partial deliveries across every account, live detection's legs, and can
+close and reopen sign-ups at runtime (`accounts.disableRegistration` in the
+config closes them regardless). Every action is posted to the admin audit
+webhook and logged. The channel names `admin`, `auth`, `status`, `events`,
+`livedetect`, `metrics`, `health` and `version` are reserved for these routes
+and refused by config validation.
 
 - **Triggers:** going live (Twitch stream, YouTube stream, or YouTube premiere
   starting), stream or premiere scheduled, video uploaded, short uploaded.
@@ -232,7 +307,7 @@ embed to these Discord webhooks*.
   shown but notifies nobody.
 - **Preview and test:** the editor renders the draft server-side from the
   channel's own most recent detection for the trigger - anything it lacked
-  is left blank - and can post it to a webhook of the admin's
+  is left blank - and can post it to a webhook of the account's
   choice with every mention suppressed. The one labelled exception is an
   offline Twitch stream, which is previewed as it will look live (Twitch has
   no preview frame for an offline channel) with the example image, and the
@@ -242,8 +317,8 @@ embed to these Discord webhooks*.
   deployment previews blank details instead.
 
 These webhooks reach thousands of people, so nothing but a rendered
-announcement of a real observation - or an explicit admin test - is ever
-posted through them. Detection errors and diagnostics go to the operator
+announcement of a real observation - or an explicit test by the account that
+owns the event - is ever posted through them. Detection errors and diagnostics go to the operator
 webhooks in `discord.*`, never here.
 
 ### Media Clipping

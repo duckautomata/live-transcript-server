@@ -27,6 +27,7 @@ func (app *App) StartMaintenanceLoop() {
 	app.runPeriodic(2*time.Hour, false, app.checkWorkerStatus)
 	app.runPeriodic(15*time.Minute, true, app.cleanupIncomingStreams)
 	app.runPeriodic(12*time.Hour, false, app.cleanupDetections)
+	app.runPeriodic(6*time.Hour, false, app.cleanupSessions)
 }
 
 // runPeriodic runs fn every interval until the app context is canceled. When

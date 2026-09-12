@@ -30,7 +30,8 @@ const (
 	notifWebhookToken = "SecretTokenAbcdefghijklmnopqrstuvwxyz012" // 40 alphanumerics
 	notifWebhookURL   = "https://discord.com/api/webhooks/" + notifWebhookID + "/" + notifWebhookToken
 	notifAdminKey     = "admin-doki"
-	notifBase         = "/doki/admin/notifications"
+	notifBase         = "/doki/notifications"
+	notifAdminBase    = "/doki/admin/notifications"
 	notifRoleMention  = "<@&111222333444555666>"
 )
 
@@ -155,9 +156,96 @@ func notifDecode(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	}
 }
 
+// notifErrorText is the message of a JSON {"error": ...} response, or the
+// raw body when it is not one.
+func notifErrorText(rec *httptest.ResponseRecorder) string {
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err == nil && body.Error != "" {
+		return body.Error
+	}
+	return rec.Body.String()
+}
+
+// Account helpers. The notification routes belong to a signed-in account, so
+// each test mux gets a default account signed up on first use and every
+// request carries its bearer token; a second account is signed up explicitly
+// where isolation between accounts is the point.
+var (
+	notifTokensMu sync.Mutex
+	notifTokens   = map[*http.ServeMux]string{}
+)
+
+const (
+	notifUsername = "doki-fan"
+	notifPassword = "correct horse battery"
+)
+
+// userReq sends a JSON request with a bearer token; "" sends none.
+func userReq(t *testing.T, mux *http.ServeMux, method, path, token string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		reader = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// notifSignUp registers an account and returns its bearer token.
+func notifSignUp(t *testing.T, mux *http.ServeMux, username, password string) string {
+	t.Helper()
+	rec := userReq(t, mux, http.MethodPost, "/auth/register", "", map[string]string{"username": username, "password": password})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register %s: status=%d body=%s", username, rec.Code, rec.Body.String())
+	}
+	var sess SessionResponse
+	notifDecode(t, rec, &sess)
+	if sess.Token == "" {
+		t.Fatalf("register %s: no token in %s", username, rec.Body.String())
+	}
+	return sess.Token
+}
+
+// notifToken is the default account's token for a mux, signed up on first
+// use.
+func notifToken(t *testing.T, mux *http.ServeMux) string {
+	t.Helper()
+	notifTokensMu.Lock()
+	tok, ok := notifTokens[mux]
+	notifTokensMu.Unlock()
+	if ok {
+		return tok
+	}
+	tok = notifSignUp(t, mux, notifUsername, notifPassword)
+	notifTokensMu.Lock()
+	notifTokens[mux] = tok
+	notifTokensMu.Unlock()
+	return tok
+}
+
+// notifReq is userReq as the default account.
+func notifReq(t *testing.T, mux *http.ServeMux, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	return userReq(t, mux, method, path, notifToken(t, mux), body)
+}
+
 func notifCreate(t *testing.T, mux *http.ServeMux, channel string, ev model.NotificationEvent) model.NotificationEvent {
 	t.Helper()
-	rec := adminReq(t, mux, http.MethodPost, "/"+channel+"/admin/notifications", "admin-"+channel, ev)
+	rec := notifReq(t, mux, http.MethodPost, "/"+channel+"/notifications", ev)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create %q: status=%d body=%s", ev.Name, rec.Code, rec.Body.String())
 	}
@@ -168,11 +256,23 @@ func notifCreate(t *testing.T, mux *http.ServeMux, channel string, ev model.Noti
 
 func notifGet(t *testing.T, mux *http.ServeMux, channel string) NotificationsResponse {
 	t.Helper()
-	rec := adminReq(t, mux, http.MethodGet, "/"+channel+"/admin/notifications", "admin-"+channel, nil)
+	rec := notifReq(t, mux, http.MethodGet, "/"+channel+"/notifications", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET notifications: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	var resp NotificationsResponse
+	notifDecode(t, rec, &resp)
+	return resp
+}
+
+// notifAdminGet is the operator's view of a channel's rules.
+func notifAdminGet(t *testing.T, mux *http.ServeMux, channel string) AdminNotificationsResponse {
+	t.Helper()
+	rec := adminReq(t, mux, http.MethodGet, "/"+channel+"/admin/notifications", "admin-"+channel, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin GET notifications: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp AdminNotificationsResponse
 	notifDecode(t, rec, &resp)
 	return resp
 }
@@ -189,13 +289,13 @@ func notifFind(t *testing.T, resp NotificationsResponse, id int64) model.Notific
 	return model.NotificationEvent{}
 }
 
-// notifRawReq sends a body verbatim, for malformed-JSON cases adminReq cannot
-// express.
+// notifRawReq sends a body verbatim as the default account, for
+// malformed-JSON cases userReq cannot express.
 func notifRawReq(t *testing.T, mux *http.ServeMux, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Admin-Key", notifAdminKey)
+	req.Header.Set("Authorization", "Bearer "+notifToken(t, mux))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	return rec
@@ -314,7 +414,7 @@ func notifCaptureLogs(t *testing.T) *notifLogBuffer {
 // Auth
 // ---------------------------------------------------------------------------
 
-func TestNotificationsRoutesRequireAdminKey(t *testing.T) {
+func TestNotificationsRoutesRequireSignIn(t *testing.T) {
 	app, mux := setupTestApp(t, []string{"doki", "mint"})
 	ws := newNotifWebhookServer(t, app)
 
@@ -333,14 +433,21 @@ func TestNotificationsRoutesRequireAdminKey(t *testing.T) {
 	}
 	for _, rt := range routes {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
-			for _, key := range []string{"", "wrong", "admin-mint"} {
-				rec := adminReq(t, mux, rt.method, rt.path, key, rt.body)
-				if rec.Code != http.StatusForbidden {
-					t.Errorf("key %q: status=%d want 403 (body %q)", key, rec.Code, rec.Body.String())
+			for _, token := range []string{"", "not-a-session"} {
+				rec := userReq(t, mux, rt.method, rt.path, token, rt.body)
+				if rec.Code != http.StatusUnauthorized {
+					t.Errorf("token %q: status=%d want 401 (body %q)", token, rec.Code, rec.Body.String())
+				}
+				if rec.Header().Get("WWW-Authenticate") == "" {
+					t.Errorf("token %q: no WWW-Authenticate challenge", token)
 				}
 			}
+			// The channel's admin key is not a session either.
+			if rec := adminReq(t, mux, rt.method, rt.path, notifAdminKey, rt.body); rec.Code != http.StatusUnauthorized {
+				t.Errorf("admin key: status=%d want 401", rec.Code)
+			}
 			other := strings.Replace(rt.path, "/doki/", "/nobody/", 1)
-			if rec := adminReq(t, mux, rt.method, other, notifAdminKey, rt.body); rec.Code != http.StatusNotFound {
+			if rec := notifReq(t, mux, rt.method, other, rt.body); rec.Code != http.StatusNotFound {
 				t.Errorf("unknown channel: status=%d want 404", rec.Code)
 			}
 		})
@@ -361,7 +468,7 @@ func TestNotificationsRoutesRequireAdminKey(t *testing.T) {
 func TestNotificationsGetReturnsVocabularyAndEmptyLists(t *testing.T) {
 	app, mux := setupTestApp(t, []string{"doki"})
 
-	rec := adminReq(t, mux, http.MethodGet, notifBase, notifAdminKey, nil)
+	rec := notifReq(t, mux, http.MethodGet, notifBase, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -372,7 +479,7 @@ func TestNotificationsGetReturnsVocabularyAndEmptyLists(t *testing.T) {
 	// The lists must be [] and never null: the page iterates them blindly.
 	var raw map[string]json.RawMessage
 	notifDecode(t, rec, &raw)
-	for _, key := range []string{"events", "log", "videos"} {
+	for _, key := range []string{"events", "log"} {
 		if got := strings.TrimSpace(string(raw[key])); got != "[]" {
 			t.Errorf("%s = %s, want []", key, got)
 		}
@@ -414,7 +521,7 @@ func TestNotificationsGetReturnsVocabularyAndEmptyLists(t *testing.T) {
 
 	wantLimits := NotificationLimits{
 		Name: 80, Content: 2000, EmbedTitle: 256, EmbedDescription: 4096, EmbedFooter: 2048,
-		Webhooks: 10, CooldownSeconds: 7 * 24 * 60 * 60,
+		Webhooks: 10, CooldownSeconds: 7 * 24 * 60 * 60, EventsPerChannel: maxEventsPerUserPerChannel,
 	}
 	if resp.Limits != wantLimits {
 		t.Errorf("limits = %+v, want %+v", resp.Limits, wantLimits)
@@ -429,11 +536,20 @@ func TestNotificationsGetReturnsVocabularyAndEmptyLists(t *testing.T) {
 	if resp.TranscriptURL != app.Announcer.TranscriptURL("doki") {
 		t.Errorf("transcriptUrl = %q, want %q", resp.TranscriptURL, app.Announcer.TranscriptURL("doki"))
 	}
-	if resp.OperatorFeed {
+	if resp.Limits.EventsPerChannel != maxEventsPerUserPerChannel {
+		t.Errorf("limits.eventsPerChannel = %d, want %d", resp.Limits.EventsPerChannel, maxEventsPerUserPerChannel)
+	}
+
+	// The operator's view carries the operator-only fields.
+	admin := notifAdminGet(t, mux, "doki")
+	if admin.OperatorFeed {
 		t.Error("operatorFeed must be false with no detectWebhookUrl configured")
 	}
-	if resp.QueueIncoming {
+	if admin.QueueIncoming {
 		t.Error("queueIncoming must be false by default")
+	}
+	if admin.Accounts != 1 {
+		t.Errorf("accounts = %d, want the one signed up by the test", admin.Accounts)
 	}
 }
 
@@ -446,7 +562,7 @@ func TestNotificationsCreateRule(t *testing.T) {
 
 	ev := notifRule("Go live", []string{"Live", " upload ", "live"}, notifWebhookURL, "  "+notifWebhookURL+"  ")
 	ev.Embed.Color = "2ecc71"
-	rec := adminReq(t, mux, http.MethodPost, notifBase, notifAdminKey, ev)
+	rec := notifReq(t, mux, http.MethodPost, notifBase, ev)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -598,8 +714,8 @@ func TestNotificationsCreateRejectsInvalidRules(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ev := notifRule("Bad", []string{"live"})
 			tc.mutate(&ev)
-			rec := adminReq(t, mux, http.MethodPost, notifBase, notifAdminKey, ev)
-			body := rec.Body.String()
+			rec := notifReq(t, mux, http.MethodPost, notifBase, ev)
+			body := notifErrorText(rec)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status=%d want 400 (body %q)", rec.Code, body)
 			}
@@ -617,7 +733,7 @@ func TestNotificationsCreateRejectsInvalidRules(t *testing.T) {
 	// Several problems are reported together, so the admin fixes them in one
 	// round trip.
 	multi := notifRule("", nil, evilURL)
-	rec := adminReq(t, mux, http.MethodPost, notifBase, notifAdminKey, multi)
+	rec := notifReq(t, mux, http.MethodPost, notifBase, multi)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("multi-problem rule: status=%d", rec.Code)
 	}
@@ -716,7 +832,7 @@ func TestNotificationsUpdateKeepsDeliveryTrail(t *testing.T) {
 	edit.ID = 424242
 	edit.CreatedAt = 7
 
-	rec := adminReq(t, mux, http.MethodPut, fmt.Sprintf("%s/%d", notifBase, created.ID), notifAdminKey, edit)
+	rec := notifReq(t, mux, http.MethodPut, fmt.Sprintf("%s/%d", notifBase, created.ID), edit)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -756,24 +872,24 @@ func TestNotificationsUpdateAndDeleteErrors(t *testing.T) {
 	created := notifCreate(t, mux, "doki", notifRule("Keep me", []string{"live"}))
 	valid := notifRule("Valid", []string{"live"})
 
-	if rec := adminReq(t, mux, http.MethodPut, notifBase+"/9999", notifAdminKey, valid); rec.Code != http.StatusNotFound {
+	if rec := notifReq(t, mux, http.MethodPut, notifBase+"/9999", valid); rec.Code != http.StatusNotFound {
 		t.Errorf("PUT unknown id: status=%d want 404", rec.Code)
 	}
 	for _, id := range []string{"abc", "0", "-5", "1.5", "1e3", " 1"} {
-		if rec := adminReq(t, mux, http.MethodPut, notifBase+"/"+url.PathEscape(id), notifAdminKey, valid); rec.Code != http.StatusBadRequest {
+		if rec := notifReq(t, mux, http.MethodPut, notifBase+"/"+url.PathEscape(id), valid); rec.Code != http.StatusBadRequest {
 			t.Errorf("PUT id %q: status=%d want 400", id, rec.Code)
 		}
-		if rec := adminReq(t, mux, http.MethodDelete, notifBase+"/"+url.PathEscape(id), notifAdminKey, nil); rec.Code != http.StatusBadRequest {
+		if rec := notifReq(t, mux, http.MethodDelete, notifBase+"/"+url.PathEscape(id), nil); rec.Code != http.StatusBadRequest {
 			t.Errorf("DELETE id %q: status=%d want 400", id, rec.Code)
 		}
 	}
-	if rec := adminReq(t, mux, http.MethodDelete, notifBase+"/9999", notifAdminKey, nil); rec.Code != http.StatusNotFound {
+	if rec := notifReq(t, mux, http.MethodDelete, notifBase+"/9999", nil); rec.Code != http.StatusNotFound {
 		t.Errorf("DELETE unknown id: status=%d want 404", rec.Code)
 	}
 
 	// An invalid edit of a real rule is refused and leaves the rule alone.
 	broken := notifRule("Broken", nil)
-	rec := adminReq(t, mux, http.MethodPut, fmt.Sprintf("%s/%d", notifBase, created.ID), notifAdminKey, broken)
+	rec := notifReq(t, mux, http.MethodPut, fmt.Sprintf("%s/%d", notifBase, created.ID), broken)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "pick at least one trigger") {
 		t.Errorf("PUT invalid rule: status=%d body=%q", rec.Code, rec.Body.String())
 	}
@@ -792,7 +908,7 @@ func TestNotificationsDeleteRule(t *testing.T) {
 	created := notifCreate(t, mux, "doki", notifRule("Doomed", []string{"live"}))
 	path := fmt.Sprintf("%s/%d", notifBase, created.ID)
 
-	rec := adminReq(t, mux, http.MethodDelete, path, notifAdminKey, nil)
+	rec := notifReq(t, mux, http.MethodDelete, path, nil)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -800,10 +916,10 @@ func TestNotificationsDeleteRule(t *testing.T) {
 		t.Errorf("204 with a body: %q", rec.Body.String())
 	}
 
-	if rec := adminReq(t, mux, http.MethodDelete, path, notifAdminKey, nil); rec.Code != http.StatusNotFound {
+	if rec := notifReq(t, mux, http.MethodDelete, path, nil); rec.Code != http.StatusNotFound {
 		t.Errorf("second DELETE: status=%d want 404", rec.Code)
 	}
-	if rec := adminReq(t, mux, http.MethodPut, path, notifAdminKey, notifRule("Ghost", []string{"live"})); rec.Code != http.StatusNotFound {
+	if rec := notifReq(t, mux, http.MethodPut, path, notifRule("Ghost", []string{"live"})); rec.Code != http.StatusNotFound {
 		t.Errorf("PUT after delete: status=%d want 404", rec.Code)
 	}
 	if resp := notifGet(t, mux, "doki"); len(resp.Events) != 0 {
@@ -814,7 +930,10 @@ func TestNotificationsDeleteRule(t *testing.T) {
 	}
 }
 
-func TestNotificationsRulesAreScopedToTheirChannel(t *testing.T) {
+// A rule belongs to one account on one channel. Neither another channel's
+// routes nor another account can reach it - and the answer is a plain 404
+// either way, with no hint that the id exists.
+func TestNotificationsRulesAreScopedToAccountAndChannel(t *testing.T) {
 	_, mux := setupTestApp(t, []string{"doki", "mint"})
 
 	dokiRule := notifCreate(t, mux, "doki", notifRule("Doki only", []string{"live"}))
@@ -833,22 +952,41 @@ func TestNotificationsRulesAreScopedToTheirChannel(t *testing.T) {
 		t.Errorf("mint sees %+v", resp.Events)
 	}
 
-	// mint's admin, on mint's own routes, cannot touch doki's rule by id.
-	crossPath := fmt.Sprintf("/mint/admin/notifications/%d", dokiRule.ID)
-	if rec := adminReq(t, mux, http.MethodPut, crossPath, "admin-mint", notifRule("Hijacked", []string{"live"})); rec.Code != http.StatusNotFound {
+	// The same account, on mint's routes, cannot touch its doki rule by id.
+	crossPath := fmt.Sprintf("/mint/notifications/%d", dokiRule.ID)
+	if rec := notifReq(t, mux, http.MethodPut, crossPath, notifRule("Hijacked", []string{"live"})); rec.Code != http.StatusNotFound {
 		t.Errorf("cross-channel PUT: status=%d want 404 (body %q)", rec.Code, rec.Body.String())
 	}
-	if rec := adminReq(t, mux, http.MethodDelete, crossPath, "admin-mint", nil); rec.Code != http.StatusNotFound {
+	if rec := notifReq(t, mux, http.MethodDelete, crossPath, nil); rec.Code != http.StatusNotFound {
 		t.Errorf("cross-channel DELETE: status=%d want 404", rec.Code)
 	}
-	// ...and mint's key on doki's routes is refused outright.
-	if rec := adminReq(t, mux, http.MethodGet, notifBase, "admin-mint", nil); rec.Code != http.StatusForbidden {
-		t.Errorf("mint key on doki route: status=%d want 403", rec.Code)
+
+	// Another account sees nothing of it and cannot edit or delete it: the
+	// webhooks in a rule are a credential, and they never cross accounts.
+	other := notifSignUp(t, mux, "someone-else", "a different passphrase")
+	rec := userReq(t, mux, http.MethodGet, notifBase, other, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("other account GET: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var theirs NotificationsResponse
+	notifDecode(t, rec, &theirs)
+	if len(theirs.Events) != 0 || len(theirs.Log) != 0 {
+		t.Errorf("another account sees %+v / %+v, want nothing", theirs.Events, theirs.Log)
+	}
+	ownPath := fmt.Sprintf("%s/%d", notifBase, dokiRule.ID)
+	if rec := userReq(t, mux, http.MethodPut, ownPath, other, notifRule("Hijacked", []string{"live"})); rec.Code != http.StatusNotFound {
+		t.Errorf("other account PUT: status=%d want 404 (body %q)", rec.Code, rec.Body.String())
+	}
+	if rec := userReq(t, mux, http.MethodDelete, ownPath, other, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("other account DELETE: status=%d want 404", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), notifWebhookToken) {
+		t.Errorf("a refused request leaked the webhook token: %s", rec.Body.String())
 	}
 
 	still := notifFind(t, notifGet(t, mux, "doki"), dokiRule.ID)
-	if still.Name != "Doki only" {
-		t.Errorf("doki's rule was altered from mint: %+v", still)
+	if still.Name != "Doki only" || still.Webhooks[0].URL != notifWebhookURL {
+		t.Errorf("the rule was altered: %+v", still)
 	}
 }
 
@@ -878,7 +1016,7 @@ func TestNotificationsPreviewRendersDraft(t *testing.T) {
 
 	preview := func(t *testing.T, req notificationDraftRequest) (NotificationPreviewResponse, *httptest.ResponseRecorder) {
 		t.Helper()
-		rec := adminReq(t, mux, http.MethodPost, notifBase+"/preview", notifAdminKey, req)
+		rec := notifReq(t, mux, http.MethodPost, notifBase+"/preview", req)
 		var resp NotificationPreviewResponse
 		if rec.Code == http.StatusOK {
 			notifDecode(t, rec, &resp)
@@ -1065,7 +1203,7 @@ func TestNotificationsTestSendRejectsNonDiscordURL(t *testing.T) {
 		"https://discord.com.evil.example/api/webhooks/" + notifWebhookID + "/" + notifWebhookToken,
 	}
 	for _, target := range bad {
-		rec := adminReq(t, mux, http.MethodPost, notifBase+"/test", notifAdminKey,
+		rec := notifReq(t, mux, http.MethodPost, notifBase+"/test",
 			notificationDraftRequest{Event: draft, Trigger: "live", WebhookURL: target})
 		body := rec.Body.String()
 		if rec.Code != http.StatusBadRequest {
@@ -1097,7 +1235,7 @@ func TestNotificationsTestSendDeliversWithMentionsSuppressed(t *testing.T) {
 	const targetID = "222222222222222222"
 	target := notifWebhookFor(targetID)
 
-	rec := adminReq(t, mux, http.MethodPost, notifBase+"/test", notifAdminKey,
+	rec := notifReq(t, mux, http.MethodPost, notifBase+"/test",
 		notificationDraftRequest{Event: draft, Trigger: "upload", WebhookURL: target})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -1155,19 +1293,9 @@ func TestNotificationsTestSendDeliversWithMentionsSuppressed(t *testing.T) {
 		t.Errorf("GET log = %+v", resp.Log)
 	}
 
-	title, fields := waitAdminAudit(t, audits)
-	if title != "Admin: Sent notification test" {
-		t.Errorf("audit title = %q", title)
-	}
-	if fields["Webhook"] != "webhook "+targetID+"/••••" || fields["Delivered"] != "yes" ||
-		fields["Trigger"] != "upload" || fields["Event"] != "Draft" || fields["Channel Key"] != "doki" {
-		t.Errorf("audit fields = %v", fields)
-	}
-	for name, v := range fields {
-		if strings.Contains(v, notifWebhookToken) {
-			t.Errorf("audit field %q leaks the token: %q", name, v)
-		}
-	}
+	// An account testing its own draft is not an operator action: nothing
+	// reaches the admin audit webhook.
+	expectNoAdminAudit(t, audits)
 }
 
 func TestNotificationsTestSendFailureNeverLeaksToken(t *testing.T) {
@@ -1176,7 +1304,7 @@ func TestNotificationsTestSendFailureNeverLeaksToken(t *testing.T) {
 	audits := captureAdminWebhook(t, app)
 	ws.status.Store(http.StatusNotFound)
 
-	rec := adminReq(t, mux, http.MethodPost, notifBase+"/test", notifAdminKey,
+	rec := notifReq(t, mux, http.MethodPost, notifBase+"/test",
 		notificationDraftRequest{Event: notifRule("Draft", []string{"live"}), Trigger: "live", WebhookURL: notifWebhookURL})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s (the request succeeded; only the delivery failed)", rec.Code, rec.Body.String())
@@ -1205,15 +1333,7 @@ func TestNotificationsTestSendFailureNeverLeaksToken(t *testing.T) {
 		t.Errorf("log detail = %q", e.Detail)
 	}
 
-	_, fields := waitAdminAudit(t, audits)
-	if fields["Delivered"] != "no" || !strings.Contains(fields["Result"], "HTTP 404") {
-		t.Errorf("audit fields = %v", fields)
-	}
-	for name, v := range fields {
-		if strings.Contains(v, notifWebhookToken) {
-			t.Errorf("audit field %q leaks the token: %q", name, v)
-		}
-	}
+	expectNoAdminAudit(t, audits)
 }
 
 func TestNotificationsTestSendEmptyTemplateIsRefusedBeforePosting(t *testing.T) {
@@ -1223,7 +1343,7 @@ func TestNotificationsTestSendEmptyTemplateIsRefusedBeforePosting(t *testing.T) 
 	draft := notifRule("Empty", []string{"live"})
 	draft.EmbedEnabled = false
 	draft.Content = "   "
-	rec := adminReq(t, mux, http.MethodPost, notifBase+"/test", notifAdminKey,
+	rec := notifReq(t, mux, http.MethodPost, notifBase+"/test",
 		notificationDraftRequest{Event: draft, Trigger: "live", WebhookURL: notifWebhookURL})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -1518,11 +1638,18 @@ func TestObserveVideoDedupesOnLedgerAndDispatches(t *testing.T) {
 		t.Errorf("ledger = %+v", rows)
 	}
 
-	resp := notifGet(t, mux, "doki")
-	if len(resp.Videos) != 2 {
-		t.Errorf("GET videos = %+v, want both observations", resp.Videos)
+	// Both observations show on the public detection feed...
+	pubRec := userReq(t, mux, http.MethodGet, "/doki/livedetect", "", nil)
+	if pubRec.Code != http.StatusOK {
+		t.Fatalf("GET livedetect: status=%d body=%s", pubRec.Code, pubRec.Body.String())
 	}
-	if got := notifFind(t, resp, created.ID); got.SentCount != 2 {
+	var pub LiveDetectResponse
+	notifDecode(t, pubRec, &pub)
+	if len(pub.Videos) != 2 {
+		t.Errorf("public videos = %+v, want both observations", pub.Videos)
+	}
+	// ...and the rule's own trail counts both sends.
+	if got := notifFind(t, notifGet(t, mux, "doki"), created.ID); got.SentCount != 2 {
 		t.Errorf("sentCount = %d, want 2", got.SentCount)
 	}
 }
@@ -1581,24 +1708,24 @@ func TestNotificationsNeverLogWebhookToken(t *testing.T) {
 	// Every path that handles a webhook URL, success and failure alike.
 	rule := notifRule("Secret", []string{"live"})
 	rule.CooldownSeconds = 0
-	created := notifCreate(t, mux, "doki", rule) // audit: created
+	created := notifCreate(t, mux, "doki", rule)
 
 	edit := created
 	edit.Name = "Secret (edited)"
-	if rec := adminReq(t, mux, http.MethodPut, fmt.Sprintf("%s/%d", notifBase, created.ID), notifAdminKey, edit); rec.Code != http.StatusOK {
+	if rec := notifReq(t, mux, http.MethodPut, fmt.Sprintf("%s/%d", notifBase, created.ID), edit); rec.Code != http.StatusOK {
 		t.Fatalf("PUT: status=%d body=%s", rec.Code, rec.Body.String())
-	} // audit: edited
+	}
 
 	testReq := notificationDraftRequest{Event: edit, Trigger: "live", WebhookURL: notifWebhookURL}
-	if rec := adminReq(t, mux, http.MethodPost, notifBase+"/test", notifAdminKey, testReq); rec.Code != http.StatusOK {
+	if rec := notifReq(t, mux, http.MethodPost, notifBase+"/test", testReq); rec.Code != http.StatusOK {
 		t.Fatalf("test: status=%d", rec.Code)
-	} // audit: test ok
+	}
 	ws.next(t)
 
 	ws.status.Store(http.StatusNotFound)
-	if rec := adminReq(t, mux, http.MethodPost, notifBase+"/test", notifAdminKey, testReq); rec.Code != http.StatusOK {
+	if rec := notifReq(t, mux, http.MethodPost, notifBase+"/test", testReq); rec.Code != http.StatusOK {
 		t.Fatalf("test (failing): status=%d", rec.Code)
-	} // audit: test failed
+	}
 	ws.next(t)
 	ws.status.Store(0)
 
@@ -1636,9 +1763,9 @@ func TestNotificationsNeverLogWebhookToken(t *testing.T) {
 		t.Errorf("sentCount = %d, want 1 (the failed send does not count)", got.SentCount)
 	}
 
-	if rec := adminReq(t, mux, http.MethodDelete, fmt.Sprintf("%s/%d", notifBase, created.ID), notifAdminKey, nil); rec.Code != http.StatusNoContent {
+	if rec := notifReq(t, mux, http.MethodDelete, fmt.Sprintf("%s/%d", notifBase, created.ID), nil); rec.Code != http.StatusNoContent {
 		t.Fatalf("DELETE: status=%d", rec.Code)
-	} // audit: deleted
+	}
 	ws.none(t)
 
 	for _, e := range entries {
@@ -1647,39 +1774,12 @@ func TestNotificationsNeverLogWebhookToken(t *testing.T) {
 		}
 	}
 
-	// Five audit records: created, edited, test, test, deleted. Each must carry
-	// the masked form and never the token.
-	titles := map[string]bool{}
-	for range 5 {
-		select {
-		case p := <-audits:
-			raw, _ := json.Marshal(p)
-			if strings.Contains(string(raw), notifWebhookToken) {
-				t.Errorf("audit record leaks the token: %s", raw)
-			}
-			embeds, _ := p["embeds"].([]any)
-			if len(embeds) == 1 {
-				if em, ok := embeds[0].(map[string]any); ok {
-					title, _ := em["title"].(string)
-					titles[title] = true
-				}
-			}
-			if !strings.Contains(string(raw), "webhook "+notifWebhookID+"/••••") {
-				t.Errorf("audit record does not identify the webhook by its masked form: %s", raw)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for admin audit records")
-		}
-	}
-	for _, want := range []string{"Admin: Created notification event", "Admin: Edited notification event",
-		"Admin: Sent notification test", "Admin: Deleted notification event"} {
-		if !titles[want] {
-			t.Errorf("no audit record titled %q (have %v)", want, titles)
-		}
-	}
+	// None of this is an operator action: the audit webhook stays quiet, so
+	// the only places the token could leak are the log and the responses.
+	expectNoAdminAudit(t, audits)
 
 	out := logs.String()
-	if !strings.Contains(out, "admin created notification event") || !strings.Contains(out, "announcement dispatched") {
+	if !strings.Contains(out, "notification event created") || !strings.Contains(out, "announcement dispatched") {
 		t.Fatalf("log capture did not see the notification code paths:\n%s", out)
 	}
 	if strings.Contains(out, notifWebhookToken) {

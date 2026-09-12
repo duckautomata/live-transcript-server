@@ -11,13 +11,17 @@ import (
 
 // notificationEventColumns is the SELECT list shared by every event read, in
 // scanNotificationEvent's order.
-const notificationEventColumns = `id, channel_key, name, enabled, webhook_urls, triggers, content,
+const notificationEventColumns = `id, channel_key, user_id, name, enabled, webhook_urls, triggers, content,
 	embed_enabled, embed, cooldown_seconds, last_sent_at, sent_count, last_error, last_error_at,
 	created_at, updated_at`
 
-// notificationLogKeep is how many log rows are retained per channel. The log
-// is a recent-activity view for the admin page, not an archive.
-const notificationLogKeep = 200
+// notificationLogKeep is how many log rows are retained per account per
+// channel, and notificationLogKeepPerChannel how many per channel across
+// every account. The log is a recent-activity view, not an archive.
+const (
+	notificationLogKeep           = 200
+	notificationLogKeepPerChannel = 2000
+)
 
 type notificationEventScanner interface {
 	Scan(dest ...any) error
@@ -26,7 +30,7 @@ type notificationEventScanner interface {
 func scanNotificationEvent(row notificationEventScanner) (*model.NotificationEvent, error) {
 	var ev model.NotificationEvent
 	var webhooks, triggers, embed string
-	if err := row.Scan(&ev.ID, &ev.ChannelKey, &ev.Name, &ev.Enabled, &webhooks, &triggers, &ev.Content,
+	if err := row.Scan(&ev.ID, &ev.ChannelKey, &ev.UserID, &ev.Name, &ev.Enabled, &webhooks, &triggers, &ev.Content,
 		&ev.EmbedEnabled, &embed, &ev.CooldownSeconds, &ev.LastSentAt, &ev.SentCount, &ev.LastError, &ev.LastErrorAt,
 		&ev.CreatedAt, &ev.UpdatedAt); err != nil {
 		return nil, err
@@ -92,11 +96,77 @@ func encodeNotificationEvent(ev model.NotificationEvent) (webhooks, triggers, em
 	return string(w), string(t), string(e), nil
 }
 
-// ListNotificationEvents returns every announcement rule for a channel in
-// creation order.
+// ListNotificationEvents returns the rules the dispatcher may fire for a
+// channel, in creation order: every owner's, except those of accounts the
+// operator has disabled. Legacy rules with no owner are included. The
+// operator's full view is ListChannelNotificationEvents; an account's own
+// view is ListNotificationEventsForUser.
 func (s *Store) ListNotificationEvents(ctx context.Context, channelKey string) ([]model.NotificationEvent, error) {
-	rows, err := s.db.QueryContext(ctx,
+	return s.listNotificationEvents(ctx, `
+	SELECT `+notificationEventColumns+` FROM notification_events
+	WHERE channel_key = ? AND (user_id = 0 OR user_id IN (SELECT id FROM users WHERE disabled_at = 0))
+	ORDER BY id ASC`, channelKey)
+}
+
+// ListChannelNotificationEvents returns every rule on a channel, disabled
+// owners included, for the operator's per-channel view.
+func (s *Store) ListChannelNotificationEvents(ctx context.Context, channelKey string) ([]model.NotificationEvent, error) {
+	return s.listNotificationEvents(ctx,
 		"SELECT "+notificationEventColumns+" FROM notification_events WHERE channel_key = ? ORDER BY id ASC", channelKey)
+}
+
+// ListAllNotificationEvents returns every rule on every channel, for the
+// site admin page.
+func (s *Store) ListAllNotificationEvents(ctx context.Context) ([]model.NotificationEvent, error) {
+	return s.listNotificationEvents(ctx,
+		"SELECT "+notificationEventColumns+" FROM notification_events ORDER BY user_id ASC, id ASC")
+}
+
+// DeleteNotificationEventByID removes one rule whatever its channel or
+// owner: the site admin's delete.
+func (s *Store) DeleteNotificationEventByID(ctx context.Context, id int64) (*model.NotificationEvent, error) {
+	ev, err := s.getNotificationEvent(ctx, "SELECT "+notificationEventColumns+" FROM notification_events WHERE id = ?", id)
+	if err != nil || ev == nil {
+		return nil, err
+	}
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM notification_events WHERE id = ?", id); err != nil {
+		return nil, err
+	}
+	return ev, nil
+}
+
+// DeleteNotificationEventsForUser removes every rule an account owns, on
+// every channel, returning how many went.
+func (s *Store) DeleteNotificationEventsForUser(ctx context.Context, userID int64) (int64, error) {
+	if userID == 0 {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, "DELETE FROM notification_events WHERE user_id = ?", userID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ListNotificationProblems returns the newest failed and partial deliveries
+// across every channel, for the site admin page.
+func (s *Store) ListNotificationProblems(ctx context.Context, limit int) ([]model.NotificationLogEntry, error) {
+	return s.listNotificationLog(ctx,
+		"SELECT "+notificationLogColumns+" FROM notification_log WHERE status IN ('failed', 'partial') ORDER BY id DESC LIMIT ?",
+		clampLogLimit(limit))
+}
+
+// ListNotificationEventsForUser returns one account's rules for a channel in
+// creation order. Every account-facing read goes through the user id: one
+// account can never see another's webhooks, whatever id it asks for.
+func (s *Store) ListNotificationEventsForUser(ctx context.Context, userID int64, channelKey string) ([]model.NotificationEvent, error) {
+	return s.listNotificationEvents(ctx,
+		"SELECT "+notificationEventColumns+" FROM notification_events WHERE user_id = ? AND channel_key = ? ORDER BY id ASC",
+		userID, channelKey)
+}
+
+func (s *Store) listNotificationEvents(ctx context.Context, query string, args ...any) ([]model.NotificationEvent, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -113,13 +183,34 @@ func (s *Store) ListNotificationEvents(ctx context.Context, channelKey string) (
 	return out, rows.Err()
 }
 
+// CountNotificationEventsForUser is how many rules an account has on a
+// channel, for the per-account limit.
+func (s *Store) CountNotificationEventsForUser(ctx context.Context, userID int64, channelKey string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM notification_events WHERE user_id = ? AND channel_key = ?", userID, channelKey).Scan(&n)
+	return n, err
+}
+
 // GetNotificationEvent returns one rule, or nil when no rule with that id
 // belongs to the channel. The channel is part of the lookup so one channel's
-// admin can never read another's webhooks by guessing an id.
+// operator can never read another's rules by guessing an id.
 func (s *Store) GetNotificationEvent(ctx context.Context, channelKey string, id int64) (*model.NotificationEvent, error) {
-	row := s.db.QueryRowContext(ctx,
+	return s.getNotificationEvent(ctx,
 		"SELECT "+notificationEventColumns+" FROM notification_events WHERE channel_key = ? AND id = ?", channelKey, id)
-	ev, err := scanNotificationEvent(row)
+}
+
+// GetNotificationEventForUser returns one of an account's rules, or nil when
+// the id is not one of theirs - which is indistinguishable, on purpose, from
+// the id not existing at all.
+func (s *Store) GetNotificationEventForUser(ctx context.Context, userID int64, channelKey string, id int64) (*model.NotificationEvent, error) {
+	return s.getNotificationEvent(ctx,
+		"SELECT "+notificationEventColumns+" FROM notification_events WHERE user_id = ? AND channel_key = ? AND id = ?",
+		userID, channelKey, id)
+}
+
+func (s *Store) getNotificationEvent(ctx context.Context, query string, args ...any) (*model.NotificationEvent, error) {
+	ev, err := scanNotificationEvent(s.db.QueryRowContext(ctx, query, args...))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -136,21 +227,35 @@ func (s *Store) CreateNotificationEvent(ctx context.Context, ev model.Notificati
 	if err != nil {
 		return 0, err
 	}
+	// An owned rule is inserted only while its owner exists: a session that
+	// passed authentication a moment before its account was deleted must
+	// not leave behind a rule nobody can edit. A rule with no owner (user 0)
+	// is a legacy, operator-created one and has no owner to check.
 	res, err := s.db.ExecContext(ctx, `
 	INSERT INTO notification_events
-		(channel_key, name, enabled, webhook_urls, triggers, content, embed_enabled, embed, cooldown_seconds, created_at, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-	`, ev.ChannelKey, ev.Name, ev.Enabled, webhooks, triggers, ev.Content, ev.EmbedEnabled, embed, ev.CooldownSeconds, now, now)
+		(channel_key, user_id, name, enabled, webhook_urls, triggers, content, embed_enabled, embed, cooldown_seconds, created_at, updated_at)
+	SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+	WHERE ? = 0 OR EXISTS (SELECT 1 FROM users WHERE id = ?);
+	`, ev.ChannelKey, ev.UserID, ev.Name, ev.Enabled, webhooks, triggers, ev.Content, ev.EmbedEnabled, embed, ev.CooldownSeconds, now, now,
+		ev.UserID, ev.UserID)
 	if err != nil {
 		return 0, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if rows == 0 {
+		return 0, fmt.Errorf("owner of notification event (user %d): %w", ev.UserID, ErrNotFound)
 	}
 	return res.LastInsertId()
 }
 
-// UpdateNotificationEvent replaces a rule's admin-editable fields. The
-// delivery trail (last sent, counts, last error) is left alone so an edit does
-// not erase history or reset a running cooldown. Returns ErrNotFound when the
-// id does not belong to the channel.
+// UpdateNotificationEvent replaces a rule's editable fields. The delivery
+// trail (last sent, counts, last error) is left alone so an edit does not
+// erase history or reset a running cooldown. The rule must belong to the
+// channel AND the account on ev, so an account can only ever rewrite its
+// own; anything else is ErrNotFound.
 func (s *Store) UpdateNotificationEvent(ctx context.Context, ev model.NotificationEvent, now int64) error {
 	webhooks, triggers, embed, err := encodeNotificationEvent(ev)
 	if err != nil {
@@ -160,9 +265,9 @@ func (s *Store) UpdateNotificationEvent(ctx context.Context, ev model.Notificati
 	UPDATE notification_events SET
 		name = ?, enabled = ?, webhook_urls = ?, triggers = ?, content = ?,
 		embed_enabled = ?, embed = ?, cooldown_seconds = ?, updated_at = ?
-	WHERE channel_key = ? AND id = ?;
+	WHERE channel_key = ? AND id = ? AND user_id = ?;
 	`, ev.Name, ev.Enabled, webhooks, triggers, ev.Content, ev.EmbedEnabled, embed, ev.CooldownSeconds, now,
-		ev.ChannelKey, ev.ID)
+		ev.ChannelKey, ev.ID, ev.UserID)
 	if err != nil {
 		return err
 	}
@@ -176,10 +281,22 @@ func (s *Store) UpdateNotificationEvent(ctx context.Context, ev model.Notificati
 	return nil
 }
 
-// DeleteNotificationEvent removes a rule. Returns the number of rows deleted
-// so the caller can answer 404 for an id that was not the channel's.
+// DeleteNotificationEvent removes any rule on a channel, whoever owns it. It
+// is the operator's moderation tool; an account deletes its own through
+// DeleteNotificationEventForUser. Returns the number of rows deleted so the
+// caller can answer 404 for an id that was not the channel's.
 func (s *Store) DeleteNotificationEvent(ctx context.Context, channelKey string, id int64) (int64, error) {
 	res, err := s.db.ExecContext(ctx, "DELETE FROM notification_events WHERE channel_key = ? AND id = ?", channelKey, id)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// DeleteNotificationEventForUser removes one of an account's own rules.
+func (s *Store) DeleteNotificationEventForUser(ctx context.Context, userID int64, channelKey string, id int64) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		"DELETE FROM notification_events WHERE user_id = ? AND channel_key = ? AND id = ?", userID, channelKey, id)
 	if err != nil {
 		return 0, err
 	}
@@ -280,17 +397,27 @@ func (s *Store) RecordNotificationResult(ctx context.Context, id int64, delivere
 func (s *Store) InsertNotificationLog(ctx context.Context, e model.NotificationLogEntry) error {
 	_, err := s.db.ExecContext(ctx, `
 	INSERT INTO notification_log
-		(channel_key, event_id, event_name, trigger, platform, broadcast_id, title, url, status, detail, webhooks, delivered, sent_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-	`, e.ChannelKey, e.EventID, e.EventName, e.Trigger, e.Platform, e.BroadcastID, e.Title, e.URL, e.Status, e.Detail,
+		(channel_key, event_id, user_id, event_name, trigger, platform, broadcast_id, title, url, status, detail, webhooks, delivered, sent_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+	`, e.ChannelKey, e.EventID, e.UserID, e.EventName, e.Trigger, e.Platform, e.BroadcastID, e.Title, e.URL, e.Status, e.Detail,
 		e.Webhooks, e.Delivered, e.SentAt)
 	if err != nil {
+		return err
+	}
+	// Trim per account, so one account's activity (thirty test sends an
+	// hour, say) can never push another account's delivery trail out of its
+	// own view; then cap the channel as a whole for the operator's view and
+	// the table's size.
+	if _, err := s.db.ExecContext(ctx, `
+	DELETE FROM notification_log WHERE channel_key = ? AND user_id = ? AND id NOT IN (
+		SELECT id FROM notification_log WHERE channel_key = ? AND user_id = ? ORDER BY id DESC LIMIT ?
+	);`, e.ChannelKey, e.UserID, e.ChannelKey, e.UserID, notificationLogKeep); err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `
 	DELETE FROM notification_log WHERE channel_key = ? AND id NOT IN (
 		SELECT id FROM notification_log WHERE channel_key = ? ORDER BY id DESC LIMIT ?
-	);`, e.ChannelKey, e.ChannelKey, notificationLogKeep)
+	);`, e.ChannelKey, e.ChannelKey, notificationLogKeepPerChannel)
 	return err
 }
 
@@ -305,15 +432,33 @@ func (s *Store) ClearNotificationLog(ctx context.Context, channelKey string) (in
 	return res.RowsAffected()
 }
 
-// ListNotificationLog returns a channel's newest log entries, most recent
-// first.
+const notificationLogColumns = "id, channel_key, event_id, user_id, event_name, trigger, platform, broadcast_id, title, url, status, detail, webhooks, delivered, sent_at"
+
+// ListNotificationLog returns a channel's newest log entries across every
+// account, most recent first: the operator's view.
 func (s *Store) ListNotificationLog(ctx context.Context, channelKey string, limit int) ([]model.NotificationLogEntry, error) {
+	return s.listNotificationLog(ctx,
+		"SELECT "+notificationLogColumns+" FROM notification_log WHERE channel_key = ? ORDER BY id DESC LIMIT ?",
+		channelKey, clampLogLimit(limit))
+}
+
+// ListNotificationLogForUser returns one account's newest entries on a
+// channel: what its own rules did, and nothing about anyone else's.
+func (s *Store) ListNotificationLogForUser(ctx context.Context, userID int64, channelKey string, limit int) ([]model.NotificationLogEntry, error) {
+	return s.listNotificationLog(ctx,
+		"SELECT "+notificationLogColumns+" FROM notification_log WHERE user_id = ? AND channel_key = ? ORDER BY id DESC LIMIT ?",
+		userID, channelKey, clampLogLimit(limit))
+}
+
+func clampLogLimit(limit int) int {
 	if limit <= 0 || limit > notificationLogKeep {
-		limit = 50
+		return 50
 	}
-	rows, err := s.db.QueryContext(ctx, `
-	SELECT id, channel_key, event_id, event_name, trigger, platform, broadcast_id, title, url, status, detail, webhooks, delivered, sent_at
-	FROM notification_log WHERE channel_key = ? ORDER BY id DESC LIMIT ?;`, channelKey, limit)
+	return limit
+}
+
+func (s *Store) listNotificationLog(ctx context.Context, query string, args ...any) ([]model.NotificationLogEntry, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +467,7 @@ func (s *Store) ListNotificationLog(ctx context.Context, channelKey string, limi
 	var out []model.NotificationLogEntry
 	for rows.Next() {
 		var e model.NotificationLogEntry
-		if err := rows.Scan(&e.ID, &e.ChannelKey, &e.EventID, &e.EventName, &e.Trigger, &e.Platform, &e.BroadcastID,
+		if err := rows.Scan(&e.ID, &e.ChannelKey, &e.EventID, &e.UserID, &e.EventName, &e.Trigger, &e.Platform, &e.BroadcastID,
 			&e.Title, &e.URL, &e.Status, &e.Detail, &e.Webhooks, &e.Delivered, &e.SentAt); err != nil {
 			return nil, err
 		}

@@ -408,5 +408,131 @@ func createSchema(db *sql.DB) error {
 		return fmt.Errorf("error creating notification_log index: %w", err)
 	}
 
+	// users are the self-service accounts on the live-transcript site. The
+	// password is an argon2id hash (internal/auth); username_key is the
+	// lowercased form that uniqueness and login go by, so "Doki" and "doki"
+	// cannot both exist while the owner keeps their own capitalisation.
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS users (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		username TEXT NOT NULL,
+		username_key TEXT NOT NULL UNIQUE,
+		password_hash TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		password_changed_at INTEGER NOT NULL,
+		last_login_at INTEGER NOT NULL DEFAULT 0,
+		disabled_at INTEGER NOT NULL DEFAULT 0,
+		disabled_reason TEXT NOT NULL DEFAULT ''
+	);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating users table: %w", err)
+	}
+
+	// site_settings holds the few operator switches that can be flipped at
+	// runtime from the site admin page (closing registration during abuse)
+	// without a config change and restart.
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS site_settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at INTEGER NOT NULL
+	);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating site_settings table: %w", err)
+	}
+
+	// sessions hold only the SHA-256 of each bearer token. The token itself
+	// is handed to the browser once and never stored, so this table is
+	// worthless to anyone who copies the database.
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS sessions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		token_hash TEXT NOT NULL UNIQUE,
+		created_at INTEGER NOT NULL,
+		last_seen_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		client TEXT NOT NULL DEFAULT '',
+		address TEXT NOT NULL DEFAULT ''
+	);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating sessions table: %w", err)
+	}
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id);`)
+	if err != nil {
+		return fmt.Errorf("error creating sessions index: %w", err)
+	}
+	// Columns the accounts tables grew after they were first created.
+	for _, c := range []struct{ table, column, ddl string }{
+		{"users", "disabled_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"users", "disabled_reason", "TEXT NOT NULL DEFAULT ''"},
+		{"sessions", "client", "TEXT NOT NULL DEFAULT ''"},
+		{"sessions", "address", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureColumn(db, c.table, c.column, c.ddl); err != nil {
+			return err
+		}
+	}
+
+	// Notification events and their log became per-account after the tables
+	// first shipped. Rules from before that carry user_id 0: they keep firing
+	// and the admin page can delete them, but nobody can edit them.
+	if err := ensureColumn(db, "notification_events", "user_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "notification_log", "user_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	_, err = db.Exec(`
+	CREATE INDEX IF NOT EXISTS idx_notification_events_user
+		ON notification_events (user_id, channel_key, id);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating notification_events user index: %w", err)
+	}
+	_, err = db.Exec(`
+	CREATE INDEX IF NOT EXISTS idx_notification_log_user
+		ON notification_log (user_id, channel_key, id);
+	`)
+	if err != nil {
+		return fmt.Errorf("error creating notification_log user index: %w", err)
+	}
+
+	return nil
+}
+
+// ensureColumn adds a column to an existing table when it is missing. It is
+// the whole migration story for a column added after a table shipped: SQLite
+// has no ADD COLUMN IF NOT EXISTS, so the table's columns are read first.
+func ensureColumn(db *sql.DB, table, column, ddl string) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return fmt.Errorf("reading %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			name, typ  string
+			notNull    int
+			dflt       sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &primaryKey); err != nil {
+			return fmt.Errorf("reading %s columns: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading %s columns: %w", table, err)
+	}
+	if _, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + ddl); err != nil {
+		return fmt.Errorf("adding %s.%s: %w", table, column, err)
+	}
 	return nil
 }

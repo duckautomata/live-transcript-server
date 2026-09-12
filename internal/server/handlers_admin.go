@@ -21,7 +21,7 @@ import (
 	"live-transcript-server/internal/ws"
 )
 
-//go:embed admin_ui.html
+//go:embed admin_ui.html admin_site_ui.html
 var adminUIFS embed.FS
 
 // adminUIHandler serves the embedded admin UI page. The page itself is static
