@@ -84,6 +84,15 @@ type Broadcast struct {
 	ID    string
 	URL   string
 	Title string
+	// Description is the platform's description of the video at the moment of
+	// this observation. YouTube only: a Twitch stream has no description, so
+	// it is always empty there.
+	Description string
+	// Game is the Twitch category being streamed at the moment of this
+	// observation ("Minecraft", "Just Chatting"). Twitch only: YouTube has no
+	// equivalent, so it is always empty there. EventSub's payload carries none,
+	// so it is also empty on the observation that usually wins the claim.
+	Game string
 	// StartedAt is the PLATFORM's start time (Helix started_at,
 	// liveStreamingDetails.actualStartTime), not our first sighting. Zero when
 	// the platform reported none, in which case the delay is unknowable and
@@ -119,6 +128,10 @@ type VideoEvent struct {
 	ID         string
 	URL        string
 	Title      string
+	// Description is the platform's description of the video at the moment of
+	// this observation. Only YouTube produces video events, so it is the
+	// YouTube description; it would always be empty for Twitch.
+	Description string
 	// PublishedAt is the platform's publish time. Zero when not reported.
 	PublishedAt time.Time
 	// ScheduledAt is the announced start for VideoScheduled; zero otherwise.

@@ -111,6 +111,7 @@ func (d *Detector) twitchPollOnce() {
 			ID:         s.ID,
 			URL:        TwitchChannelURL(login),
 			Title:      s.Title,
+			Game:       strings.TrimSpace(s.GameName),
 			StartedAt:  startedAt,
 		}, MechanismTwitchPoll)
 	}
@@ -281,10 +282,11 @@ func (d *Detector) handleStreamOnline(ctx context.Context, ev TwitchStreamOnline
 	d.recordSuccess(MechanismTwitchEventSub)
 
 	startedAt, _ := time.Parse(time.RFC3339, ev.StartedAt)
-	// The event carries no title. Enriching it here would mean a Helix call on
-	// the latency path, which is exactly what EventSub exists to avoid. The
-	// sink looks the title up AFTER it has claimed and queued the broadcast
-	// (LookupTwitchTitle), so the audience announcement still carries one.
+	// The event carries no title and no category. Enriching it here would mean
+	// a Helix call on the latency path, which is exactly what EventSub exists to
+	// avoid. The sink looks both up AFTER it has claimed and queued the
+	// broadcast (LookupTwitchStream), so the audience announcement still
+	// carries them.
 	d.observe(ctx, Broadcast{
 		Platform:   PlatformTwitch,
 		ChannelKey: key,
@@ -296,14 +298,24 @@ func (d *Detector) handleStreamOnline(ctx context.Context, ev TwitchStreamOnline
 	d.trackTwitchLive(login, ev.ID, time.Now())
 }
 
-// twitchTitleLookupTimeout bounds the after-the-fact title fetch. It runs off
-// the detection path, but it does sit between the claim and the audience
+// twitchStreamLookupTimeout bounds the after-the-fact stream lookup. It runs
+// off the detection path, but it does sit between the claim and the audience
 // announcement, so it must not stall that for long either.
-const twitchTitleLookupTimeout = 5 * time.Second
+const twitchStreamLookupTimeout = 5 * time.Second
 
-// LookupTwitchTitle asks Helix for the title of a channel's current stream.
+// TwitchStreamInfo is what LookupTwitchStream learned about a channel's
+// current stream: the two details EventSub's stream.online payload lacks.
+// Either may be empty.
+type TwitchStreamInfo struct {
+	Title string
+	// Game is the category being streamed, e.g. "Just Chatting".
+	Game string
+}
+
+// LookupTwitchStream asks Helix for the title and category of a channel's
+// current stream.
 //
-// It exists because EventSub's stream.online payload has no title, and
+// It exists because EventSub's stream.online payload has neither, and
 // EventSub wins the ledger claim for nearly every Twitch go-live. The sink
 // calls this after the claim and after the worker queue write, so the one
 // Helix round trip lands between detection and announcement rather than on
@@ -314,43 +326,58 @@ const twitchTitleLookupTimeout = 5 * time.Second
 // streams endpoint can still say "offline" for a few seconds - which used to
 // come back as no title at all. The streams endpoint is the fallback for a
 // broadcaster whose id was never resolved (no EventSub configured, in which
-// case the poll leg supplies titles itself anyway). Best-effort: any failure
-// returns "" and the announcement goes out without a title. Nil-receiver-safe.
-func (d *Detector) LookupTwitchTitle(ctx context.Context, channelKey string) string {
+// case the poll leg supplies titles itself anyway).
+//
+// The category rides along on whichever answer supplies the title; it never
+// costs a request of its own. A channel that answered with a category but a
+// blank title is remembered, so the stream's title can still be paired with
+// it when the streams endpoint has no category to offer. Best-effort: whatever
+// could not be learned comes back empty and the announcement goes out without
+// it. Nil-receiver-safe.
+func (d *Detector) LookupTwitchStream(ctx context.Context, channelKey string) TwitchStreamInfo {
+	var info TwitchStreamInfo
 	if d == nil || d.twitch == nil {
-		return ""
+		return info
 	}
 	login := d.twitchLoginFor(channelKey)
 	if login == "" {
-		return ""
+		return info
 	}
-	ctx, cancel := context.WithTimeout(ctx, twitchTitleLookupTimeout)
+	ctx, cancel := context.WithTimeout(ctx, twitchStreamLookupTimeout)
 	defer cancel()
 
 	if id := d.twitchUserIDFor(channelKey); id != "" {
 		ch, err := d.twitch.GetChannel(ctx, id)
 		if err != nil {
 			slog.Warn("could not look up the title of a detected twitch stream from its channel; trying the stream",
-				"func", "Detector.LookupTwitchTitle", "key", channelKey, "broadcasterId", id, "err", err)
-		} else if ch != nil && strings.TrimSpace(ch.Title) != "" {
-			return strings.TrimSpace(ch.Title)
+				"func", "Detector.LookupTwitchStream", "key", channelKey, "broadcasterId", id, "err", err)
+		} else if ch != nil {
+			info.Game = strings.TrimSpace(ch.GameName)
+			if title := strings.TrimSpace(ch.Title); title != "" {
+				info.Title = title
+				return info
+			}
 		}
 	}
 
 	streams, err := d.twitch.GetStreams(ctx, []string{login})
 	if err != nil {
 		slog.Warn("could not look up the title of a detected twitch stream",
-			"func", "Detector.LookupTwitchTitle", "key", channelKey, "err", err)
-		return ""
+			"func", "Detector.LookupTwitchStream", "key", channelKey, "err", err)
+		return info
 	}
 	for _, s := range streams {
 		if strings.ToLower(s.UserLogin) == login {
-			return strings.TrimSpace(s.Title)
+			info.Title = strings.TrimSpace(s.Title)
+			if game := strings.TrimSpace(s.GameName); game != "" {
+				info.Game = game
+			}
+			return info
 		}
 	}
 	slog.Warn("helix reports no live stream for a channel that just went live; announcing without a title",
-		"func", "Detector.LookupTwitchTitle", "key", channelKey, "login", login)
-	return ""
+		"func", "Detector.LookupTwitchStream", "key", channelKey, "login", login)
+	return info
 }
 
 // twitchUserIDFor is the numeric broadcaster id resolved for a channel key,

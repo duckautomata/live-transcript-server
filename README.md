@@ -294,10 +294,25 @@ and refused by config validation.
   editor; every log line, error and audit record uses the name and a masked
   form of the URL.
 - **Message and embed:** templates with `{placeholders}` (`{channel}`,
-  `{title}`, `{url}`, `{time}`, ...). Pings go in the message as
-  `<@&ROLE_ID>` for a role, `<@USER_ID>` for one person, and `<#CHANNEL_ID>`
-  for a channel link that pings nobody; the editor has a helper that inserts
-  each and explains where the ids come from.
+  `{title}`, `{url}`, `{time}`, `{timeShort}` for just the clock time, ...).
+  `{description}` is the YouTube video's description in three forms:
+  `{description}` is all of it, `{description:1}` the first line, and
+  `{description:3}` the first 3 lines of text (any count from 1 to 99; blank
+  lines don't count). It is blank on Twitch, which has no descriptions.
+  `{game}` is the other way round: the Twitch category being streamed
+  (Minecraft, Just Chatting), blank on YouTube. A line whose placeholders
+  all came up blank, and that has no words left on it (an emoji or a quote
+  mark does not count), is removed, so the same template reads well on both
+  platforms; and when a message would be too long for Discord, the
+  description is what gets shortened, not the text written around it. In the
+  message text the description's links are written as `<https://...>`, so
+  Discord does not add a preview card for each one. A scheduled announcement
+  carries the description as it read when the waiting room was first seen,
+  while the go-live announcement carries the text at go-live; the detection
+  ledger is write-once, so later edits to a description are not picked up.
+  Pings go in the message as `<@&ROLE_ID>` for a role, `<@USER_ID>` for one
+  person, and `<#CHANNEL_ID>` for a channel link that pings nobody; the
+  editor has a helper that inserts each and explains where the ids come from.
   The embed starts out looking like the server's own stream-start post and
   can be edited or disabled.
 - **Minimum time between notifications:** a per-rule, per-trigger cooldown

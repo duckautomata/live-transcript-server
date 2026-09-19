@@ -71,7 +71,7 @@ func setupDetectApp(tb testing.TB) (*App, *http.ServeMux) {
 	}
 	// The real lookup would call Helix for a title-less Twitch detection.
 	// Tests that want it install a stub.
-	app.TwitchTitleLookup = nil
+	app.TwitchStreamLookup = nil
 	tb.Cleanup(func() { app.Close() })
 
 	mux := http.NewServeMux()
@@ -123,9 +123,9 @@ func TestObserveLiveLooksUpMissingTwitchTitle(t *testing.T) {
 	ctx := context.Background()
 
 	var asked []string
-	app.TwitchTitleLookup = func(_ context.Context, channelKey string) string {
+	app.TwitchStreamLookup = func(_ context.Context, channelKey string) livedetect.TwitchStreamInfo {
 		asked = append(asked, channelKey)
-		return "looked-up title"
+		return livedetect.TwitchStreamInfo{Title: "looked-up title", Game: "looked-up game"}
 	}
 
 	if err := app.ObserveLive(ctx, livedetect.Broadcast{
@@ -144,8 +144,14 @@ func TestObserveLiveLooksUpMissingTwitchTitle(t *testing.T) {
 	if det.Title != "looked-up title" {
 		t.Errorf("ledger title = %q, want the looked-up one", det.Title)
 	}
+	// The category rides along on the same answer.
+	if det.Game != "looked-up game" {
+		t.Errorf("ledger game = %q, want the looked-up one", det.Game)
+	}
 
-	// A broadcast that already has a title, or a YouTube one, is never looked up.
+	// A broadcast that already has a title, or a YouTube one, is never looked
+	// up - not even for a category it lacks: the announcement is never held up
+	// for a Helix round trip just to learn that.
 	if err := app.ObserveLive(ctx, livedetect.Broadcast{
 		Platform: livedetect.PlatformTwitch, ChannelKey: "doki", ID: "titled",
 		URL: "https://twitch.tv/dokibird", Title: "already titled", StartedAt: time.Now(),
@@ -160,6 +166,9 @@ func TestObserveLiveLooksUpMissingTwitchTitle(t *testing.T) {
 	}
 	if len(asked) != 1 {
 		t.Errorf("lookup calls = %v, want no further calls", asked)
+	}
+	if det, _ := app.Store.GetDetection(ctx, "twitch", "titled"); det == nil || det.Game != "" {
+		t.Errorf("titled broadcast = %+v, want it recorded without a game", det)
 	}
 }
 

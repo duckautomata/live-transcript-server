@@ -28,12 +28,14 @@ func liveDetails(actualStart, actualEnd, scheduled string) *struct {
 func snippet(lbc string) *struct {
 	ChannelID            string `json:"channelId"`
 	Title                string `json:"title"`
+	Description          string `json:"description"`
 	LiveBroadcastContent string `json:"liveBroadcastContent"`
 	PublishedAt          string `json:"publishedAt"`
 } {
 	return &struct {
 		ChannelID            string `json:"channelId"`
 		Title                string `json:"title"`
+		Description          string `json:"description"`
 		LiveBroadcastContent string `json:"liveBroadcastContent"`
 		PublishedAt          string `json:"publishedAt"`
 	}{ChannelID: "UC0123456789012345678901", Title: "a stream", LiveBroadcastContent: lbc}

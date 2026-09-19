@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"live-transcript-server/internal/announce"
@@ -21,6 +22,24 @@ import (
 // detector's announcement recency window by a wide margin for the same
 // reason: a pruned row is a row that can be claimed again.
 const detectionRetention = 30 * 24 * time.Hour
+
+// maxStoredDescription is YouTube's documented maximum for a video
+// description, in characters.
+const maxStoredDescription = 5000
+
+// clampDescription bounds a platform-supplied description before it reaches
+// the ledger. YouTube promises at most 5000 characters, but the ledger keeps
+// every row for detectionRetention and a promise is not a guarantee: a
+// misbehaving response must never be able to bloat the database. Cut here, at
+// the one place every observation passes through, so the row and the
+// announcement built from it always agree.
+func clampDescription(s string) string {
+	s = strings.TrimSpace(s)
+	if runes := []rune(s); len(runes) > maxStoredDescription {
+		s = string(runes[:maxStoredDescription])
+	}
+	return s
+}
 
 // ObserveLive implements livedetect.Sink.
 //
@@ -54,6 +73,8 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 		ChannelKey:  b.ChannelKey,
 		URL:         b.URL,
 		Title:       b.Title,
+		Description: clampDescription(b.Description),
+		Game:        b.Game,
 		DetectedAt:  time.Now().Unix(),
 		Mechanism:   mechanism,
 	}
@@ -71,9 +92,11 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 	}
 	if !won {
 		// The claim was lost, but this observation may know something the
-		// winner did not: the Twitch poll leg carries a title where EventSub
-		// carries none. Fill it in so the admin page shows the stream by
-		// name. The announcement is already out, so nothing else changes.
+		// winner did not: the Twitch poll leg carries a title and a category
+		// where EventSub carries neither. Fill them in so the admin page shows
+		// the stream by name and a later preview can render {game}. The
+		// announcement is already out, so nothing else changes.
+		backfilled := false
 		if b.Title != "" {
 			filled, err := app.Store.FillDetectionTitle(context.WithoutCancel(ctx), b.Platform, b.ID, b.Title)
 			if err != nil {
@@ -82,8 +105,22 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 			} else if filled {
 				slog.Info("backfilled a detected stream's title", "func", "App.ObserveLive",
 					"key", b.ChannelKey, "platform", b.Platform, "broadcastId", b.ID, "mechanism", mechanism)
-				app.bumpAdminChange(b.ChannelKey)
+				backfilled = true
 			}
+		}
+		if b.Game != "" {
+			filled, err := app.Store.FillDetectionGame(context.WithoutCancel(ctx), b.Platform, b.ID, b.Game)
+			if err != nil {
+				slog.Warn("failed to backfill a detected stream's game", "func", "App.ObserveLive",
+					"key", b.ChannelKey, "broadcastId", b.ID, "err", err)
+			} else if filled {
+				slog.Info("backfilled a detected stream's game", "func", "App.ObserveLive",
+					"key", b.ChannelKey, "platform", b.Platform, "broadcastId", b.ID, "mechanism", mechanism)
+				backfilled = true
+			}
+		}
+		if backfilled {
+			app.bumpAdminChange(b.ChannelKey)
 		}
 		return nil
 	}
@@ -137,13 +174,29 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 	// Helix round trip here - after the claim and the queue write, so it sits
 	// between detection and announcement rather than on the latency path -
 	// is what keeps the audience embed's title line from going out blank.
-	title := b.Title
-	if title == "" && b.Platform == livedetect.PlatformTwitch && app.TwitchTitleLookup != nil {
-		if looked := app.TwitchTitleLookup(context.WithoutCancel(ctx), b.ChannelKey); looked != "" {
-			title = looked
-			det.Title = looked
-			if err := app.Store.UpdateDetectionTitle(context.WithoutCancel(ctx), b.Platform, b.ID, looked); err != nil {
+	//
+	// The category comes back on the same answer, so {game} is filled from it
+	// too. The missing TITLE stays the only thing that triggers the lookup
+	// though: an announcement is never held up for a Helix round trip just to
+	// learn the category.
+	title, game := b.Title, b.Game
+	if title == "" && b.Platform == livedetect.PlatformTwitch && app.TwitchStreamLookup != nil {
+		info := app.TwitchStreamLookup(context.WithoutCancel(ctx), b.ChannelKey)
+		if info.Title != "" {
+			title = info.Title
+			det.Title = info.Title
+			if err := app.Store.UpdateDetectionTitle(context.WithoutCancel(ctx), b.Platform, b.ID, info.Title); err != nil {
 				slog.Warn("failed to record a looked-up stream title", "func", "App.ObserveLive",
+					"key", b.ChannelKey, "broadcastId", b.ID, "err", err)
+			}
+		}
+		if game == "" && info.Game != "" {
+			game = info.Game
+			det.Game = info.Game
+			// Guarded, unlike the title: the poll leg may have backfilled the
+			// category while the lookup was in flight, and the first one stays.
+			if _, err := app.Store.FillDetectionGame(context.WithoutCancel(ctx), b.Platform, b.ID, info.Game); err != nil {
+				slog.Warn("failed to record a looked-up stream game", "func", "App.ObserveLive",
 					"key", b.ChannelKey, "broadcastId", b.ID, "err", err)
 			}
 		}
@@ -156,6 +209,8 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 		ID:           b.ID,
 		URL:          b.URL,
 		Title:        title,
+		Description:  det.Description,
+		Game:         game,
 		EventTime:    b.StartedAt,
 		DetectedAt:   time.Unix(det.DetectedAt, 0),
 		Mechanism:    mechanism,
@@ -202,13 +257,14 @@ func (app *App) ObserveVideo(ctx context.Context, v livedetect.VideoEvent) error
 
 	now := time.Now()
 	det := model.DetectedVideo{
-		Platform:   v.Platform,
-		VideoID:    v.ID,
-		Kind:       v.Kind,
-		ChannelKey: v.ChannelKey,
-		URL:        v.URL,
-		Title:      v.Title,
-		DetectedAt: now.Unix(),
+		Platform:    v.Platform,
+		VideoID:     v.ID,
+		Kind:        v.Kind,
+		ChannelKey:  v.ChannelKey,
+		URL:         v.URL,
+		Title:       v.Title,
+		Description: clampDescription(v.Description),
+		DetectedAt:  now.Unix(),
 	}
 	if !v.PublishedAt.IsZero() {
 		det.PublishedAt = v.PublishedAt.Unix()
@@ -243,14 +299,15 @@ func (app *App) ObserveVideo(ctx context.Context, v livedetect.VideoEvent) error
 		eventTime = v.ScheduledAt
 	}
 	app.Announcer.Dispatch(announce.Payload{
-		Trigger:    announce.Trigger(v.Kind),
-		Platform:   v.Platform,
-		ChannelKey: v.ChannelKey,
-		ID:         v.ID,
-		URL:        v.URL,
-		Title:      v.Title,
-		EventTime:  eventTime,
-		DetectedAt: now,
+		Trigger:     announce.Trigger(v.Kind),
+		Platform:    v.Platform,
+		ChannelKey:  v.ChannelKey,
+		ID:          v.ID,
+		URL:         v.URL,
+		Title:       v.Title,
+		Description: det.Description,
+		EventTime:   eventTime,
+		DetectedAt:  now,
 	})
 	app.bumpAdminChange(v.ChannelKey)
 	return nil

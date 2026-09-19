@@ -188,6 +188,7 @@ func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Ti
 			ID:           v.ID,
 			URL:          YouTubeWatchURL(v.ID),
 			Title:        v.Title(),
+			Description:  v.Description(),
 			StartedAt:    v.StartedAt(),
 			SawScheduled: sawScheduled,
 		}, MechanismYouTubeState)
@@ -250,6 +251,7 @@ func (d *Detector) announceScheduled(ctx context.Context, v YTVideo, channelKey 
 		ID:          v.ID,
 		URL:         YouTubeWatchURL(v.ID),
 		Title:       v.Title(),
+		Description: v.Description(),
 		PublishedAt: published,
 		ScheduledAt: scheduled,
 	})
@@ -278,7 +280,7 @@ func (d *Detector) announceUpload(v YTVideo, channelKey string, now time.Time) {
 	if !d.watch.ClaimAnnounce(v.ID, VideoUpload) {
 		return
 	}
-	videoID, title := v.ID, v.Title()
+	videoID, title, desc := v.ID, v.Title(), v.Description()
 	d.spawn(func() {
 		ctx, cancel := d.pollCtx(shortsProbeTimeout + 5*time.Second)
 		defer cancel()
@@ -302,6 +304,7 @@ func (d *Detector) announceUpload(v YTVideo, channelKey string, now time.Time) {
 			ID:          videoID,
 			URL:         url,
 			Title:       title,
+			Description: desc,
 			PublishedAt: published,
 		})
 		if err != nil {

@@ -75,18 +75,19 @@ type App struct {
 	// QueueIncoming is liveDetect.queueIncoming: whether a detected live
 	// broadcast is queued for the worker, or only observed and announced.
 	QueueIncoming bool
-	// TwitchTitleLookup fills in the title of a Twitch broadcast that was
-	// detected without one (EventSub carries none). Called after the ledger
-	// claim and the queue write, before the announcement. Nil disables it;
-	// tests set it to a stub so nothing reaches Helix.
-	TwitchTitleLookup func(ctx context.Context, channelKey string) string
-	Archive           *archive.Client
-	Notifier          *notify.Notifier
-	Upgrader          websocket.Upgrader
-	Channels          map[string]*ChannelState
-	MaxConn           int
-	MaxClipSize       int
-	TempDir           string
+	// TwitchStreamLookup fills in the title of a Twitch broadcast that was
+	// detected without one (EventSub carries none), and its category along
+	// with it. Called after the ledger claim and the queue write, before the
+	// announcement. Nil disables it; tests set it to a stub so nothing reaches
+	// Helix.
+	TwitchStreamLookup func(ctx context.Context, channelKey string) livedetect.TwitchStreamInfo
+	Archive            *archive.Client
+	Notifier           *notify.Notifier
+	Upgrader           websocket.Upgrader
+	Channels           map[string]*ChannelState
+	MaxConn            int
+	MaxClipSize        int
+	TempDir            string
 	// Vods tracks in-flight full-VOD builds so concurrent admin requests for
 	// the same stream collapse into a single build. See vod.go.
 	Vods *vodRegistry
@@ -204,7 +205,7 @@ func NewApp(cfg config.Config, st *store.Store, tempDir, version, buildTime stri
 		slog.Error("live detection is degraded or disabled", "func", "NewApp", "err", err)
 	}
 	app.LiveDetect = detector
-	app.TwitchTitleLookup = detector.LookupTwitchTitle
+	app.TwitchStreamLookup = detector.LookupTwitchStream
 
 	return app, nil
 }

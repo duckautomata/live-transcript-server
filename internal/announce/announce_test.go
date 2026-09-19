@@ -61,6 +61,7 @@ func notifLivePayload() Payload {
 		ID:           "vid123",
 		URL:          "https://www.youtube.com/watch?v=vid123",
 		Title:        "Big stream <today>",
+		Description:  "Come hang out while we play something new",
 		EventTime:    notifNow.Add(-30 * time.Second),
 		DetectedAt:   notifNow,
 		Mechanism:    "youtube-state-poll",
@@ -521,17 +522,20 @@ func TestRenderContextValuesEveryPlaceholder(t *testing.T) {
 	rc := notifRenderContext()
 	unix := rc.Payload.EventTime.Unix()
 	want := map[string]string{
-		"{channel}":    "Dokibird",
-		"{title}":      "Big stream <today>",
-		"{url}":        "https://www.youtube.com/watch?v=vid123",
-		"{platform}":   "YouTube",
-		"{headline}":   "Stream Started",
-		"{time}":       fmt.Sprintf("<t:%d:R>", unix),
-		"{timeFull}":   fmt.Sprintf("<t:%d:F>", unix),
-		"{transcript}": "https://lt.example/doki/",
-		"{thumbnail}":  "https://i.ytimg.com/vi/vid123/maxresdefault.jpg",
-		"{trigger}":    "live",
-		"{id}":         "vid123",
+		"{channel}":     "Dokibird",
+		"{title}":       "Big stream <today>",
+		"{description}": "Come hang out while we play something new",
+		"{game}":        "", // the payload is a YouTube one; see TestGameIsTheTwitchCategory
+		"{url}":         "https://www.youtube.com/watch?v=vid123",
+		"{platform}":    "YouTube",
+		"{headline}":    "Stream Started",
+		"{time}":        fmt.Sprintf("<t:%d:R>", unix),
+		"{timeShort}":   fmt.Sprintf("<t:%d:t>", unix),
+		"{timeFull}":    fmt.Sprintf("<t:%d:F>", unix),
+		"{transcript}":  "https://lt.example/doki/",
+		"{thumbnail}":   "https://i.ytimg.com/vi/vid123/maxresdefault.jpg",
+		"{trigger}":     "live",
+		"{id}":          "vid123",
 	}
 	got := rc.values()
 	for name, w := range want {
@@ -590,10 +594,10 @@ func TestRenderZeroEventTime(t *testing.T) {
 	rc := notifRenderContext()
 	rc.Payload.EventTime = time.Time{}
 	ev := DefaultEvent()
-	ev.Content = "[{time}][{timeFull}]"
+	ev.Content = "at [{time}][{timeFull}]"
 	ev.Embed.Timestamp = true
 	msg := Render(ev, rc)
-	if msg.Content != "[][]" {
+	if msg.Content != "at [][]" {
 		t.Errorf("time placeholders with zero EventTime = %q, want empty", msg.Content)
 	}
 	if msg.Embed == nil {
@@ -2439,5 +2443,864 @@ func TestSenderKeepsThreadIDOnForumWebhooks(t *testing.T) {
 	c := discord.allCalls()[0]
 	if c.Query.Get("thread_id") != "123456789012345678" || c.Query.Get("wait") != "true" {
 		t.Errorf("query = %v, want both thread_id and wait=true", c.Query)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// {description}: cleaning, line counts, line removal, the elastic fit
+// ---------------------------------------------------------------------------
+
+// {timeShort} is the same moment as {time}, as a clock time, and like the
+// other time placeholders it renders empty when the platform reported none.
+func TestTimeShortPlaceholder(t *testing.T) {
+	rc := notifRenderContext()
+	want := fmt.Sprintf("<t:%d:t>", rc.Payload.EventTime.Unix())
+	if got := Render(model.NotificationEvent{Content: "at {timeShort}"}, rc).Content; got != "at "+want {
+		t.Errorf("content = %q, want %q", got, "at "+want)
+	}
+	rc.Payload.EventTime = time.Time{}
+	if got := Render(model.NotificationEvent{Content: "at [{timeShort}]"}, rc).Content; got != "at []" {
+		t.Errorf("content with zero EventTime = %q, want the placeholder empty", got)
+	}
+}
+
+// A description is the creator's text, not the author's, and arrives in every
+// shape. It is normalised once so that lines can be counted, "the first line"
+// is never an invisible one, and none of its markdown can reach past it into
+// the author's own message.
+func TestCleanDescription(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"empty", "", ""},
+		{"only whitespace", "   \n\t\n", ""},
+		{"CRLF is one break", "a\r\nb", "a\nb"},
+		{"lone CR", "a\rb", "a\nb"},
+		{"unicode line and paragraph separators", "a\u2028b\u2029c", "a\nb\nc"},
+		{"tab becomes a space", "a\tb", "a b"},
+		{"NUL and other control characters go", "a\x00b\x07c\x1bd", "abcd"},
+		{"trailing space trimmed", "a   \nb \t", "a\nb"},
+		{"indentation kept", "intro\n   indented", "intro\n   indented"},
+		{"a zero-width-space line is blank", "a\n\u200B\nb", "a\n\nb"},
+		{"a hangul-filler first line is not the first line", "\u3164\nfirst", "first"},
+		{"every invisible at once", "\u200B\u200C\u200D\u2060\uFEFF\u2800\u3164 \nreal", "real"},
+		{"leading and trailing blanks dropped", "\n\n a\n\n", " a"},
+		{"a run of blanks becomes one", "a\n\n\n\nb", "a\n\nb"},
+		{"a run of mixed blanks becomes one", "a\n \n\u200B\n\nb", "a\n\nb"},
+		{"block quote guarded", ">>> the rest", "\u200B>>> the rest"},
+		{"indented block quote guarded after the indent", "  >>>x", "  \u200B>>>x"},
+		{"heading guarded", "# Big", "\u200B# Big"},
+		{"second-level heading guarded", "## Big", "\u200B## Big"},
+		{"third-level heading guarded", "### Big", "\u200B### Big"},
+		{"subtext guarded", "-# small", "\u200B-# small"},
+		{"four hashes is not a heading", "#### nope", "#### nope"},
+		{"a hashtag is left alone", "#hashtag #another", "#hashtag #another"},
+		{"a one-line quote is harmless", "> quote", "> quote"},
+		{"two angle brackets are not a block quote", ">> x", ">> x"},
+		{"a dash-hash without the space is nothing", "-#x", "-#x"},
+		{"a guarded line mid-way", "intro\n# Links\nhttps://example.test", "intro\n\u200B# Links\nhttps://example.test"},
+	}
+	for _, c := range cases {
+		if got := cleanDescription(c.in); got != c.want {
+			t.Errorf("%s: cleanDescription(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+		// Cleaning what is already clean changes nothing.
+		if again := cleanDescription(c.want); again != c.want {
+			t.Errorf("%s: cleaning twice = %q, want %q", c.name, again, c.want)
+		}
+	}
+
+	// And it is what {description} expands to.
+	rc := notifRenderContext()
+	rc.Payload.Description = "\r\n  pitch  \r\n\r\n\r\n>>> quoted\r\n"
+	if got := rc.values()["{description}"]; got != "  pitch\n\n\u200B>>> quoted" {
+		t.Errorf("{description} = %q, want the cleaned text", got)
+	}
+}
+
+// The number is how many lines of TEXT: a blank line between two kept lines is
+// kept but never counted, never left dangling at the end, and a cut between
+// lines gets no ellipsis because nothing was cut mid-way.
+func TestFirstLines(t *testing.T) {
+	cases := []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"A\n\nB\nC", 1, "A"},
+		{"A\n\nB\nC", 2, "A\n\nB"},
+		{"A\n\nB\nC", 3, "A\n\nB\nC"},
+		{"A\n\nB\nC", 9, "A\n\nB\nC"},
+		{"A\nB\n\nC", 2, "A\nB"},
+		{"only", 1, "only"},
+		{"only", 99, "only"},
+		{"", 3, ""},
+	}
+	for _, c := range cases {
+		if got := firstLines(c.in, c.n); got != c.want {
+			t.Errorf("firstLines(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
+		}
+	}
+}
+
+// "First line" of a description written as one enormous paragraph must be a
+// teaser, not a wall: a line over the cap is cut at a word, and nothing
+// follows the ellipsis. Bare {description} has no such cap.
+func TestFirstLinesCapsALongLine(t *testing.T) {
+	long := strings.TrimSpace(strings.Repeat("word ", 100)) // 499 runes
+	got := firstLines(long+"\nnext", 2)
+	if n := utf8.RuneCountInString(got); n > MaxDescriptionLineRunes || n < MaxDescriptionLineRunes-5 {
+		t.Errorf("capped line is %d runes, want just under %d", n, MaxDescriptionLineRunes)
+	}
+	if !strings.HasSuffix(got, "word…") || strings.Contains(got, "next") || strings.Contains(got, "\n") {
+		t.Errorf("firstLines = %q, want it to end at the cut, on a whole word", got)
+	}
+
+	// The cap stops the output wherever the long line falls.
+	got = firstLines("short\n"+long+"\nthird", 3)
+	if !strings.HasPrefix(got, "short\nword ") || !strings.HasSuffix(got, "…") || strings.Contains(got, "third") {
+		t.Errorf("firstLines = %q, want the short line, the cut line, and nothing after it", got)
+	}
+
+	// A long line that is one enormous link cuts down to nothing, and a bare
+	// ellipsis is not a line: the output ends on the line before it.
+	hugeLink := "https://example.com/" + strings.Repeat("a", 400)
+	if got := firstLines("short\n"+hugeLink+"\nthird", 3); got != "short" {
+		t.Errorf("firstLines = %q, want just the short line", got)
+	}
+	if got := firstLines(hugeLink+"\nnext", 1); got != "" {
+		t.Errorf("firstLines = %q, want nothing rather than a lone ellipsis", got)
+	}
+
+	// A line exactly at the cap is left alone, and the count goes on.
+	exact := strings.Repeat("x", MaxDescriptionLineRunes)
+	if got := firstLines(exact+"\nnext", 2); got != exact+"\nnext" {
+		t.Errorf("a line exactly at the cap was altered: %d runes", utf8.RuneCountInString(got))
+	}
+
+	// All of it means all of it.
+	if got := Expand("{description}", map[string]string{"{description}": long}); got != long {
+		t.Errorf("bare {description} was shortened to %d runes", utf8.RuneCountInString(got))
+	}
+}
+
+// {description:N} is the first N lines, {description} all of it. Anything
+// else with a colon in it is a typo, and a typo is left exactly as written so
+// that it shows in the preview.
+func TestExpandLineCounts(t *testing.T) {
+	values := map[string]string{
+		"{description}": "L1\nL2\n\nL3\nL4\nL5\nL6\nL7\nL8\nL9",
+		"{title}":       "T",
+		"{url}":         "https://x.example",
+	}
+	cases := map[string]string{
+		"{description}":        values["{description}"],
+		"{description:1}":      "L1",
+		"{description:3}":      "L1\nL2\n\nL3",
+		"{description:07}":     "L1\nL2\n\nL3\nL4\nL5\nL6\nL7",
+		"{description:99}":     values["{description}"],
+		"a {description:1} b":  "a L1 b",
+		"**{description:1}**":  "**L1**",
+		"{description:1}{url}": "L1https://x.example",
+
+		// Left as written.
+		"{description:0}":     "{description:0}",
+		"{description:00}":    "{description:00}",
+		"{description:}":      "{description:}",
+		"{description:abc}":   "{description:abc}",
+		"{description:100}":   "{description:100}",
+		"{description:-1}":    "{description:-1}",
+		"{description:1.5}":   "{description:1.5}",
+		"{Description:1}":     "{Description:1}",
+		"{description :1}":    "{description :1}",
+		"{description: 1}":    "{description: 1}",
+		"{description:1:2}":   "{description:1:2}",
+		"**{description:0}**": "**{description:0}**",
+
+		// Only a placeholder that declares lines takes a count.
+		"{title:2}": "{title:2}",
+		"{url:1}":   "{url:1}",
+		"{nope:3}":  "{nope:3}",
+	}
+	for in, want := range cases {
+		if got := Expand(in, values); got != want {
+			t.Errorf("Expand(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// With no description the emphasis goes with it, whichever form was used;
+	// Expand itself never removes a line of the template.
+	values["{description}"] = ""
+	for in, want := range map[string]string{
+		"**{description:1}**":         "",
+		"__{description}__":           "",
+		"x\n{description:1}\n\ny":     "x\n\n\ny",
+		"x\n**{description:3}**\n\ny": "x\n\n\ny",
+	} {
+		if got := Expand(in, values); got != want {
+			t.Errorf("Expand(%q) with no description = %q, want %q", in, got, want)
+		}
+	}
+	if got := Expand("{description:1} {title}", nil); got != "{description:1} {title}" {
+		t.Errorf("Expand with a nil table = %q, want the template back", got)
+	}
+}
+
+// The editor builds {name:N} from the vocabulary it is served, so what is
+// served and what the parser accepts must be the same thing: every placeholder
+// that offers a line chooser expands in every form the chooser can write.
+func TestLineAwarePlaceholdersMatchTheParser(t *testing.T) {
+	count := 0
+	for _, p := range Placeholders {
+		if p.Lines == nil {
+			continue
+		}
+		count++
+		if p.Lines.Default < 1 || p.Lines.Default > p.Lines.Max || p.Lines.Max > 99 {
+			t.Errorf("%s: lines = %+v, want 1 <= default <= max <= 99", p.Name, *p.Lines)
+		}
+		values := map[string]string{p.Name: "one\ntwo\nthree"}
+		stem := strings.TrimSuffix(p.Name, "}")
+		for _, token := range []string{
+			p.Name,
+			stem + ":1}",
+			fmt.Sprintf("%s:%d}", stem, p.Lines.Default),
+			fmt.Sprintf("%s:%d}", stem, p.Lines.Max),
+		} {
+			if got := Expand(token, values); got == token {
+				t.Errorf("%s is offered by the editor but does not expand", token)
+			}
+		}
+		for _, token := range []string{stem + ":0}", stem + ":100}"} {
+			if got := Expand(token, values); got != token {
+				t.Errorf("Expand(%q) = %q, want it left as written", token, got)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("%d placeholders take a line count, want exactly 1 ({description})", count)
+	}
+}
+
+// A line whose placeholders all came up blank, and that has no words left on
+// it, is removed - so one template reads well on the platform that lacks the
+// value. A line that still says something stays, and so does everything the
+// author typed without a placeholder.
+func TestExpandLinesRemovesBlankPlaceholderLines(t *testing.T) {
+	x := expander{values: map[string]string{"{title}": "T", "{description}": "", "{channel}": "Dokibird"}, descCap: noCap}
+	cases := []struct{ name, in, want string }{
+		{"the twitch case", "**{title}**\n\n{description:1}\n\n[Open]", "**T**\n\n[Open]"},
+		{"emoji prefix", "🎬 {description:1}\nnext", "next"},
+		{"bullet prefix", "- {description:1}\nnext", "next"},
+		{"quote prefix", "> {description:1}\nnext", "next"},
+		{"custom emoji prefix", "<:yt:123456> {description:1}\nnext", "next"},
+		{"animated emoji prefix", "<a:live:99> {description:1}\nnext", "next"},
+		{"shortcode prefix", ":video_game: {description:1}\nnext", "next"},
+		{"a time is not a shortcode", "10:30:45 {description:1}\nnext", "10:30:45 \nnext"},
+		{"emphasis", "**{description}**\nnext", "next"},
+		{"the last line", "first\n{description:3}", "first"},
+		{"every line", "{description:1}\n\n{description:3}\n\nend", "end"},
+		{"all of it gone", "{description}", ""},
+		{"words keep the line", "About: {description:1}\nnext", "About: \nnext"},
+		{"digits keep the line", "<@&123> {description:1}\nnext", "<@&123> \nnext"},
+		{"a filled placeholder keeps the line", "{title} {description:1}", "T "},
+		{"an unknown placeholder is not a blank one", "{nope}\nnext", "{nope}\nnext"},
+		{"a typo is not a blank one", "{description:0}\nnext", "{description:0}\nnext"},
+		{"a separator without placeholders stays", "---\n{title}\n***", "---\nT\n***"},
+		{"author blank lines untouched", "a\n\n\nb\n", "a\n\n\nb\n"},
+		{"one gap absorbed below", "top\n\n{description:1}\n\nend", "top\n\nend"},
+		{"no gap to absorb: text above", "top\n{description:1}\n\nend", "top\n\nend"},
+		{"no gap to absorb: text below", "top\n\n{description:1}\nend", "top\n\nend"},
+		{"only one gap per removed line", "top\n\n{description:1}\n\n\nend", "top\n\n\nend"},
+	}
+	for _, c := range cases {
+		if got := x.expandLines(c.in); got != c.want {
+			t.Errorf("%s: expandLines(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+// End to end, the same rule on both platforms: the description line is there
+// for a YouTube video and simply is not for a Twitch stream, in the message
+// and in the embed alike.
+func TestRenderDropsTheDescriptionLineOnTwitch(t *testing.T) {
+	ev := DefaultEvent()
+	ev.Content = "{channel} is live!\n> {description:1}\n{url}"
+	ev.Embed.Description = "**{title}**\n\n{description:1}\n\n[Open on {platform}]({url})"
+
+	yt := notifRenderContext()
+	yt.Payload.Description = "The pitch.\nMore."
+	msg := Render(ev, yt)
+	if want := "Dokibird is live!\n> The pitch.\nhttps://www.youtube.com/watch?v=vid123"; msg.Content != want {
+		t.Errorf("youtube content = %q, want %q", msg.Content, want)
+	}
+	if want := "**Big stream <today>**\n\nThe pitch.\n\n[Open on YouTube](https://www.youtube.com/watch?v=vid123)"; msg.Embed["description"] != want {
+		t.Errorf("youtube embed description = %q, want %q", msg.Embed["description"], want)
+	}
+
+	tw := notifRenderContext()
+	tw.Payload.Platform = PlatformTwitch
+	tw.Payload.Description = ""
+	tw.Payload.URL = "https://twitch.tv/dokibird"
+	msg = Render(ev, tw)
+	if want := "Dokibird is live!\nhttps://twitch.tv/dokibird"; msg.Content != want {
+		t.Errorf("twitch content = %q, want %q", msg.Content, want)
+	}
+	if want := "**Big stream <today>**\n\n[Open on Twitch](https://twitch.tv/dokibird)"; msg.Embed["description"] != want {
+		t.Errorf("twitch embed description = %q, want %q", msg.Embed["description"], want)
+	}
+	if msg.Shortened {
+		t.Error("a removed line is not a shortened description")
+	}
+}
+
+// A role ping next to a title that came up blank keeps its line - it has
+// digits on it - and keeps pinging: the policy is read from the template.
+func TestRenderKeepsAMentionLineWhoseTitleIsBlank(t *testing.T) {
+	ev := notifEvent(1, "rule", []Trigger{TriggerLive}, notifWebhookURL(notifWebhookA))
+	ev.Content = "<@&1> {title}\n{url}"
+	p := notifLivePayload()
+	p.Title = ""
+	msg := Render(ev, RenderContext{Payload: p, Channel: notifChannel()})
+	if want := "<@&1> \nhttps://www.youtube.com/watch?v=vid123"; msg.Content != want {
+		t.Errorf("content = %q, want %q", msg.Content, want)
+	}
+	if got := notifIDListFromPolicy(msg.Mentions, "roles"); !slices.Equal(got, []string{"1"}) {
+		t.Errorf("roles = %v, want the template's role", got)
+	}
+}
+
+// cutAtWord ends on a whole word where it reasonably can, and never inside a
+// link: a cut URL is still clickable, and goes somewhere else.
+func TestCutAtWord(t *testing.T) {
+	longURL := "https://example.com/" + strings.Repeat("a", 100)
+	cases := []struct {
+		in   string
+		max  int
+		want string
+	}{
+		{"hello world", 0, ""},
+		{"hello world", -3, ""},
+		{"hello world", 1, "…"},
+		{"hello", 5, "hello"},
+		{"hello world", 11, "hello world"},
+		{"hello world", 10, "hello…"},
+		{"hello world", 8, "hello…"},
+		{"hello world", 6, "hello…"},
+		{"hello world", 3, "…"},
+		{"one\ntwo three", 9, "one\ntwo…"},
+		// Text without spaces is one enormous word; dropping all of it would
+		// keep nothing, so past 40 runes the cut falls inside it.
+		{strings.Repeat("あ", 100), 50, strings.Repeat("あ", 49) + "…"},
+		{"see " + strings.Repeat("あ", 30) + " end", 20, "see…"},
+		// A link is never cut into, whatever its length.
+		{"see " + longURL + " end", 60, "see…"},
+		{"see <" + longURL + "> end", 60, "see…"},
+		{"see [link](" + longURL + ") end", 80, "see…"},
+		{longURL, 60, "…"},
+		// Nor does the ellipsis touch one: "https://x…" is a working link to
+		// somewhere else. It gets a space, or the link goes when there is no
+		// room for that space.
+		{"Twitter: https://twitter.com/x Merch store", 35, "Twitter: https://twitter.com/x …"},
+		{"Twitter: https://twitter.com/x\nMerch store", 35, "Twitter: https://twitter.com/x …"},
+		{"Twitter: https://twitter.com/x Merch", 32, "Twitter: https://twitter.com/x …"},
+		{"Twitter: https://twitter.com/x Merch", 31, "Twitter:…"},
+		{"Twitter: <https://twitter.com/x> Merch store", 37, "Twitter: <https://twitter.com/x> …"},
+	}
+	for _, c := range cases {
+		if got := cutAtWord(c.in, c.max); got != c.want {
+			t.Errorf("cutAtWord(%.30q, %d) = %q, want %q", c.in, c.max, got, c.want)
+		}
+	}
+}
+
+// The elastic fit binary-searches on the cap, which is only valid if a larger
+// cap never produces a shorter result. Checked at every cap over a text with
+// long links, a wrapped link, a long plain word and a long word that turns
+// into a link part-way through - together with the promises that the result
+// fits and that no link is ever left half-cut.
+func TestCutAtWordIsMonotoneAndNeverCutsALink(t *testing.T) {
+	urls := []string{
+		"https://example.com/a/very/long/path/that/goes/on/and/on/for/more/than/forty/runes/easily?q=1",
+		"https://example.org/another/really/long/wrapped/link/that/also/exceeds/forty/runes",
+		"https://example.net/glued/to/a/long/prefix",
+	}
+	text := "Intro words here " + urls[0] + " then <" + urls[1] + "> and a " +
+		strings.Repeat("verylongword", 8) + " and " + strings.Repeat("prefix", 9) + urls[2] + " end\nsecond line"
+	total := utf8.RuneCountInString(text)
+
+	prev := 0
+	for max := 0; max <= total+3; max++ {
+		out := cutAtWord(text, max)
+		n := utf8.RuneCountInString(out)
+		if n > max {
+			t.Fatalf("max %d: result is %d runes", max, n)
+		}
+		if n < prev {
+			t.Fatalf("max %d: result shrank from %d to %d runes: %q", max, prev, n, out)
+		}
+		prev = n
+
+		if fusedEllipsis.MatchString(out) {
+			t.Fatalf("max %d: the ellipsis is part of a link: %q", max, out)
+		}
+		body := strings.TrimSuffix(out, "…")
+		if !strings.HasPrefix(text, body) {
+			t.Fatalf("max %d: %q is not a prefix of the text", max, out)
+		}
+		for _, u := range urls {
+			at := strings.Index(text, u)
+			if len(body) > at && len(body) < at+len(u) {
+				t.Fatalf("max %d: cut inside %s: %q", max, u, out)
+			}
+		}
+	}
+	if cutAtWord(text, total) != text {
+		t.Error("a text that fits must come back unchanged")
+	}
+}
+
+// fusedEllipsis matches a link that runs straight into an ellipsis.
+var fusedEllipsis = regexp.MustCompile(`https?://\S*…`)
+
+// notifLongDescription is a description of about n runes of ordinary words.
+func notifLongDescription(n int) string {
+	return strings.TrimSpace(strings.Repeat("lorem ipsum dolor ", n/18+1))[:n]
+}
+
+// The description is the elastic part of a message; the author's text is not.
+// With the usual "title, description, links" layout a 5000-character
+// description must not push the links off the end: the description is what is
+// shortened, as far as needed and no further.
+func TestRenderShortensTheDescriptionNotTheAuthorsText(t *testing.T) {
+	const links = "[Open on YouTube](https://www.youtube.com/watch?v=vid123) | [Transcript](https://lt.example/doki/)"
+	ev := DefaultEvent()
+	ev.Embed.Description = "**{title}**\n\n{description}\n\n[Open on {platform}]({url}) | [Transcript]({transcript})"
+	rc := notifRenderContext()
+	rc.Payload.Description = notifLongDescription(5000)
+
+	msg := Render(ev, rc)
+	desc, _ := msg.Embed["description"].(string)
+	n := utf8.RuneCountInString(desc)
+	if n > MaxEmbedDescription || n < MaxEmbedDescription-20 {
+		t.Errorf("description is %d runes, want it to fill the %d available", n, MaxEmbedDescription)
+	}
+	if !strings.HasPrefix(desc, "**Big stream <today>**\n\nlorem ipsum") {
+		t.Errorf("description starts %.60q, want the title line then the description", desc)
+	}
+	if !strings.HasSuffix(desc, "…\n\n"+links) {
+		t.Errorf("description ends %q, want the shortened description and then the links intact", desc[len(desc)-140:])
+	}
+	if !msg.Shortened {
+		t.Error("Shortened = false, want the preview to be told")
+	}
+
+	// A description that fits is not touched, and nobody is told anything.
+	rc.Payload.Description = notifLongDescription(500)
+	msg = Render(ev, rc)
+	if desc, _ := msg.Embed["description"].(string); msg.Shortened || strings.Contains(desc, "…") || !strings.HasSuffix(desc, links) {
+		t.Errorf("a fitting description was shortened: shortened=%v, %q", msg.Shortened, desc)
+	}
+}
+
+// A field that overflows with no description to give is cut at its end,
+// exactly as it always was: this is not the description's doing, so the
+// preview is not told it was.
+func TestRenderOverflowWithoutADescriptionIsUnchanged(t *testing.T) {
+	rc := notifRenderContext()
+	rc.Payload.Description = notifLongDescription(5000)
+	ev := DefaultEvent()
+
+	// The template does not use the placeholder.
+	ev.Embed.Description = strings.Repeat("d", 5000) + " {title}"
+	msg := Render(ev, rc)
+	want := truncate(strings.TrimSpace(Expand(ev.Embed.Description, rc.values())), MaxEmbedDescription)
+	if msg.Embed["description"] != want {
+		t.Error("an overflowing template without {description} must render as before")
+	}
+	if msg.Shortened {
+		t.Error("Shortened = true for a template that does not use the description")
+	}
+
+	// It does, but there is nothing in it.
+	rc.Payload.Description = ""
+	ev.Embed.Description = "{description}\n" + strings.Repeat("d", 5000)
+	msg = Render(ev, rc)
+	if desc, _ := msg.Embed["description"].(string); utf8.RuneCountInString(desc) != MaxEmbedDescription || !strings.HasSuffix(desc, "d…") {
+		t.Errorf("description = %d runes, want the old tail cut at %d", utf8.RuneCountInString(desc), MaxEmbedDescription)
+	}
+	if msg.Shortened {
+		t.Error("Shortened = true with no description to shorten")
+	}
+}
+
+// Every use of the description gives way by the same amount.
+func TestRenderShortensEveryUseOfTheDescription(t *testing.T) {
+	ev := DefaultEvent()
+	ev.Embed.Description = "{description}\n--\n{description}\n\nEND"
+	rc := notifRenderContext()
+	rc.Payload.Description = notifLongDescription(3000)
+
+	msg := Render(ev, rc)
+	desc, _ := msg.Embed["description"].(string)
+	n := utf8.RuneCountInString(desc)
+	if n > MaxEmbedDescription || n < MaxEmbedDescription-40 {
+		t.Errorf("description is %d runes, want it to fill the %d available", n, MaxEmbedDescription)
+	}
+	first, second, ok := strings.Cut(strings.TrimSuffix(desc, "\n\nEND"), "\n--\n")
+	if !ok || first != second || !strings.HasSuffix(first, "…") {
+		t.Errorf("the two uses differ or are not shortened: %d and %d runes", utf8.RuneCountInString(first), utf8.RuneCountInString(second))
+	}
+	if !strings.HasSuffix(desc, "\n\nEND") || !msg.Shortened {
+		t.Errorf("want the author's END kept and Shortened set; shortened=%v, tail %q", msg.Shortened, desc[len(desc)-20:])
+	}
+}
+
+// The same in the message body, whose limit is 2000.
+func TestRenderShortensTheDescriptionInContent(t *testing.T) {
+	ev := model.NotificationEvent{Content: "{channel} is live!\n{description}\nWatch: {url}"}
+	rc := notifRenderContext()
+	rc.Payload.Description = notifLongDescription(5000)
+
+	msg := Render(ev, rc)
+	n := utf8.RuneCountInString(msg.Content)
+	if n > MaxContentLength || n < MaxContentLength-20 {
+		t.Errorf("content is %d runes, want it to fill the %d available", n, MaxContentLength)
+	}
+	if !strings.HasPrefix(msg.Content, "Dokibird is live!\nlorem") || !strings.HasSuffix(msg.Content, "…\nWatch: https://www.youtube.com/watch?v=vid123") {
+		t.Errorf("content = %.40q ... %q", msg.Content, msg.Content[len(msg.Content)-60:])
+	}
+	if !msg.Shortened {
+		t.Error("Shortened = false")
+	}
+}
+
+// The embed's combined limit is tighter than the sum of its fields. That
+// squeeze comes out of the video description too, never out of the author's
+// closing line.
+func TestRenderFitsTheDescriptionIntoTheEmbedTotal(t *testing.T) {
+	ev := DefaultEvent()
+	ev.Embed.Title = strings.Repeat("t", MaxEmbedTitle)
+	ev.Embed.Footer = strings.Repeat("f", MaxEmbedFooter)
+	ev.Embed.Description = "{description}\n\nEND"
+	rc := notifRenderContext()
+	rc.Payload.Description = notifLongDescription(5000)
+
+	msg := Render(ev, rc)
+	desc, _ := msg.Embed["description"].(string)
+	room := MaxEmbedTotal - MaxEmbedTitle - MaxEmbedFooter
+	if n := utf8.RuneCountInString(desc); n > room || n < room-20 {
+		t.Errorf("description is %d runes, want it to fill the %d the title and footer left", n, room)
+	}
+	if !strings.HasSuffix(desc, "…\n\nEND") || !msg.Shortened {
+		t.Errorf("want the description shortened and END kept; shortened=%v, tail %q", msg.Shortened, desc[len(desc)-20:])
+	}
+}
+
+// When there is room for less than a phrase, a stub of description is noise:
+// it goes altogether, and its line with it. And when the author's own text
+// does not fit even then, the old tail cut is all that is left.
+func TestRenderDropsADescriptionThereIsNoRoomFor(t *testing.T) {
+	rc := notifRenderContext()
+	rc.Payload.Description = notifLongDescription(5000)
+	ev := DefaultEvent()
+
+	// Room for ten runes of description.
+	filler := strings.Repeat("x", MaxEmbedDescription-len("\n\nEND")-10)
+	ev.Embed.Description = filler + "\n{description}\nEND"
+	msg := Render(ev, rc)
+	if want := filler + "\nEND"; msg.Embed["description"] != want {
+		desc, _ := msg.Embed["description"].(string)
+		t.Errorf("description = %d runes ending %q, want the filler and END with no description stub", utf8.RuneCountInString(desc), desc[len(desc)-30:])
+	}
+	if !msg.DescriptionDropped || msg.Shortened {
+		t.Errorf("dropped=%v shortened=%v, want the description reported as dropped, not as shortened", msg.DescriptionDropped, msg.Shortened)
+	}
+
+	// Room for exactly the minimum keeps it.
+	filler = strings.Repeat("x", MaxEmbedDescription-len("\n\nEND")-minDescriptionCap)
+	ev.Embed.Description = filler + "\n{description}\nEND"
+	msg = Render(ev, rc)
+	if desc, _ := msg.Embed["description"].(string); !strings.Contains(desc, "\nlorem ipsum") || !strings.HasSuffix(desc, "…\nEND") {
+		t.Errorf("description ends %q, want a short description kept", desc[len(desc)-40:])
+	}
+
+	// No room even without it.
+	ev.Embed.Description = strings.Repeat("x", 5000) + "\n{description}"
+	msg = Render(ev, rc)
+	if want := truncate(strings.Repeat("x", 5000), MaxEmbedDescription); msg.Embed["description"] != want {
+		t.Error("an author's text that overflows on its own must be cut at the limit")
+	}
+	if !msg.DescriptionDropped || msg.Shortened {
+		t.Errorf("dropped=%v shortened=%v, want dropped: the author's own text was cut, and the editor must not claim it was kept", msg.DescriptionDropped, msg.Shortened)
+	}
+
+	// A description that opens with a link longer than the room there is cuts
+	// down to a bare ellipsis at every cap. That is no description either: it
+	// goes, line and all, rather than leaving a stray "…" between the author's
+	// lines.
+	rc.Payload.Description = "https://example.com/" + strings.Repeat("a", 200) + " and the rest of it"
+	filler = strings.Repeat("x", MaxEmbedDescription-len("\n\nEND")-100)
+	ev.Embed.Description = filler + "\n{description}\nEND"
+	msg = Render(ev, rc)
+	if want := filler + "\nEND"; msg.Embed["description"] != want {
+		desc, _ := msg.Embed["description"].(string)
+		t.Errorf("description ends %q, want no stray ellipsis line", desc[len(desc)-30:])
+	}
+	if !msg.DescriptionDropped || msg.Shortened {
+		t.Errorf("dropped=%v shortened=%v, want dropped", msg.DescriptionDropped, msg.Shortened)
+	}
+}
+
+// Discord unfurls every bare link in a message body into a preview card, and
+// the author cannot edit the creator's links - so in the content, and only
+// there, they are wrapped in <>. Embed text does not unfurl and stays raw.
+func TestRenderWrapsDescriptionLinksInContentOnly(t *testing.T) {
+	const raw = "Merch: https://example.com/merch, and (https://x.example/a). " +
+		"Wiki https://en.wikipedia.org/wiki/Foo_(bar) done <https://already.example/w> [site](https://site.example/p)"
+	const wrapped = "Merch: <https://example.com/merch>, and (<https://x.example/a>). " +
+		"Wiki <https://en.wikipedia.org/wiki/Foo_(bar)> done <https://already.example/w> [site](<https://site.example/p>)"
+	ev := DefaultEvent()
+	ev.Content = "{description}"
+	ev.Embed.Description = "{description}"
+	rc := notifRenderContext()
+	rc.Payload.Description = raw
+
+	msg := Render(ev, rc)
+	if msg.Content != wrapped {
+		t.Errorf("content = %q\nwant      %q", msg.Content, wrapped)
+	}
+	if msg.Embed["description"] != raw {
+		t.Errorf("embed description = %q, want the links untouched", msg.Embed["description"])
+	}
+
+	// The first-lines form is wrapped the same way, and the author's own
+	// links are never touched.
+	ev.Content = "{description:1} https://mine.example/x {url}"
+	rc.Payload.Description = "Watch https://example.com/live now!\nsecond line"
+	if got, want := Render(ev, rc).Content, "Watch <https://example.com/live> now! https://mine.example/x https://www.youtube.com/watch?v=vid123"; got != want {
+		t.Errorf("content = %q, want %q", got, want)
+	}
+}
+
+// What counts as the link, and what is the sentence around it.
+func TestAngleWrapURLs(t *testing.T) {
+	cases := map[string]string{
+		"":                                        "",
+		"no links here":                           "no links here",
+		"https://a.example/x":                     "<https://a.example/x>",
+		"http://plain.example":                    "<http://plain.example>",
+		"Go to https://a.example/x.":              "Go to <https://a.example/x>.",
+		"Really https://a.example/x!?":            "Really <https://a.example/x>!?",
+		"a https://a.example/x, b":                "a <https://a.example/x>, b",
+		"a https://a.example/x; b":                "a <https://a.example/x>; b",
+		"see: https://a.example/x:":               "see: <https://a.example/x>:",
+		`"https://a.example/q"`:                   `"<https://a.example/q>"`,
+		"'https://a.example/q'":                   "'<https://a.example/q>'",
+		"(https://a.example/x)":                   "(<https://a.example/x>)",
+		"(see https://a.example/x).":              "(see <https://a.example/x>).",
+		"https://a.example/x)":                    "<https://a.example/x>)",
+		"https://a.example/wiki/Foo_(bar)":        "<https://a.example/wiki/Foo_(bar)>",
+		"(https://a.example/wiki/Foo_(bar))":      "(<https://a.example/wiki/Foo_(bar)>)",
+		"[label](https://a.example/x)":            "[label](<https://a.example/x>)",
+		"<https://a.example/x>":                   "<https://a.example/x>",
+		"[label](<https://a.example/x>)":          "[label](<https://a.example/x>)",
+		"https://a.example/1 https://a.example/2": "<https://a.example/1> <https://a.example/2>",
+		"one\nhttps://a.example/x\ntwo":           "one\n<https://a.example/x>\ntwo",
+		"ftp://a.example/x":                       "ftp://a.example/x",
+		// Every kind of space ends a link, not only the ASCII ones: Japanese
+		// text follows a link with U+3000, and pasted text with a no-break one.
+		"https://a.example/x　フォローしてね": "<https://a.example/x>　フォローしてね",
+		"https://a.example/x next":    "<https://a.example/x> next",
+		"https://...":                 "https://...",
+	}
+	for in, want := range cases {
+		if got := angleWrapURLs(in); got != want {
+			t.Errorf("angleWrapURLs(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A description is platform text like a title: whatever mention syntax it
+// carries is shown and pings nobody.
+func TestMentionPolicyIgnoresTheDescription(t *testing.T) {
+	ev := notifEvent(1, "rule", []Trigger{TriggerLive}, notifWebhookURL(notifWebhookA))
+	ev.Content = "<@&555555555555555555> {description}"
+	ev.Embed.Description = "{description:1}"
+	p := notifLivePayload()
+	p.Description = "@everyone <@&5> <@77> come watch\n@here too"
+	msg := Render(ev, RenderContext{Payload: p, Channel: notifChannel()})
+	if !strings.Contains(msg.Content, "@everyone <@&5> <@77> come watch\n@here too") {
+		t.Fatalf("content = %q, the description must still be rendered verbatim", msg.Content)
+	}
+	if got := notifIDListFromPolicy(msg.Mentions, "roles"); !slices.Equal(got, []string{"555555555555555555"}) {
+		t.Errorf("roles = %v, want only the template's role", got)
+	}
+	if got := notifIDListFromPolicy(msg.Mentions, "users"); len(got) != 0 {
+		t.Errorf("users = %v, want none - the user mention came from the description", got)
+	}
+	if parse, _ := msg.Mentions["parse"].([]string); len(parse) != 0 {
+		t.Errorf("parse = %v, want [] - the @everyone came from the description", parse)
+	}
+}
+
+// Previews and test sends render the description the ledger recorded, from
+// whichever row stands in for the trigger - and never an invented one.
+func TestPreviewPayloadCarriesTheDescription(t *testing.T) {
+	ch := notifChannel()
+	yt := &model.DetectedBroadcast{Platform: PlatformYouTube, BroadcastID: "real1", URL: "https://www.youtube.com/watch?v=real1", Title: "Real title", Description: "live pitch\n\nlive links"}
+
+	if got := PreviewPayload(TriggerLive, ch, yt, nil, notifNow); got.Description != yt.Description {
+		t.Errorf("live preview description = %q, want the broadcast's", got.Description)
+	}
+	for _, tr := range []Trigger{TriggerScheduled, TriggerUpload, TriggerShort} {
+		v := &model.DetectedVideo{Platform: PlatformYouTube, VideoID: "v-" + string(tr), Kind: string(tr), URL: "x", Description: "about the " + string(tr)}
+		if got := PreviewPayload(tr, ch, yt, v, notifNow); got.Description != v.Description {
+			t.Errorf("%s preview description = %q, want the video's", tr, got.Description)
+		}
+		// With no video of that kind the YouTube broadcast stands in, and
+		// brings its own description.
+		if got := PreviewPayload(tr, ch, yt, nil, notifNow); got.ID != "real1" || got.Description != yt.Description {
+			t.Errorf("%s preview borrowed from a broadcast = %+v, want its description too", tr, got)
+		}
+	}
+
+	// A Twitch stream has none, and the preview that dresses an ended Twitch
+	// stream up as live gets no example description to go with its title.
+	tw := &model.DetectedBroadcast{Platform: PlatformTwitch, BroadcastID: "42", URL: "https://twitch.tv/dokibird", EndedAt: notifNow.Unix()}
+	if got := PreviewPayload(TriggerLive, ch, tw, nil, notifNow); got.Description != "" {
+		t.Errorf("twitch preview description = %q, want none", got.Description)
+	}
+	if got := PreviewPayload(TriggerLive, ch, nil, nil, notifNow); got.Description != "" {
+		t.Errorf("preview with nothing detected has description %q", got.Description)
+	}
+}
+
+// The stand-in video has a description shaped like a real one, so the three
+// ways of including it look different while working on the editor offline.
+func TestSamplePayloadCarriesADescription(t *testing.T) {
+	for _, tr := range []Trigger{TriggerLive, TriggerScheduled, TriggerUpload, TriggerShort} {
+		if got := SamplePayload(tr, notifChannel(), notifNow).Description; got != SampleVideoDescription {
+			t.Errorf("%s sample description = %q", tr, got)
+		}
+	}
+	if cleanDescription(SampleVideoDescription) != SampleVideoDescription {
+		t.Error("the sample description should already be clean, so what the editor shows is what was written")
+	}
+	values := map[string]string{"{description}": SampleVideoDescription}
+	one, three, all := Expand("{description:1}", values), Expand("{description:3}", values), Expand("{description}", values)
+	if one == three || three == all || strings.Contains(one, "\n") {
+		t.Errorf("first line, first three lines and all of it must differ:\n%q\n%q\n%q", one, three, all)
+	}
+	if !strings.Contains(all, "\n\n") || strings.Count(all, "https://") < 2 {
+		t.Error("the sample description needs a blank line and a couple of bare links")
+	}
+}
+
+// UsesPlaceholder answers "would this rule show that placeholder" with the
+// parser's own grammar, so the preview handler never has to know it.
+func TestUsesPlaceholder(t *testing.T) {
+	content := func(s string) model.NotificationEvent { return model.NotificationEvent{Content: s} }
+	embed := func(enabled bool, e model.EmbedTemplate) model.NotificationEvent {
+		return model.NotificationEvent{EmbedEnabled: enabled, Embed: e}
+	}
+	cases := []struct {
+		what string
+		ev   model.NotificationEvent
+		name string
+		want bool
+	}{
+		{"bare", content("x {description} y"), "{description}", true},
+		{"with a count", content("{description:3}"), "{description}", true},
+		{"two digits", content("{description:12}"), "{description}", true},
+		{"inside emphasis", content("**{description:1}**"), "{description}", true},
+		{"among others", content("{title}\n> {description:1}\n{url}"), "{description}", true},
+		{"a count of zero is a typo", content("{description:0}"), "{description}", false},
+		{"three digits is a typo", content("{description:100}"), "{description}", false},
+		{"wrong case", content("{Description}"), "{description}", false},
+		{"a longer name", content("{descriptions}"), "{description}", false},
+		{"no braces", content("description"), "{description}", false},
+		{"absent", content("{title} {url}"), "{description}", false},
+		{"empty rule", model.NotificationEvent{}, "{description}", false},
+		{"embed title", embed(true, model.EmbedTemplate{Title: "{description:1}"}), "{description}", true},
+		{"embed description", embed(true, model.EmbedTemplate{Description: "a\n{description}"}), "{description}", true},
+		{"embed footer", embed(true, model.EmbedTemplate{Footer: "{description:2}"}), "{description}", true},
+		{"embed off", embed(false, model.EmbedTemplate{Title: "{description}", Description: "{description}", Footer: "{description}"}), "{description}", false},
+		{"url fields are not text", embed(true, model.EmbedTemplate{URL: "{description}", Image: "{description}", Thumbnail: "{description}"}), "{description}", false},
+		{"another placeholder", content("{title}"), "{title}", true},
+		{"a count on one that takes none", content("{title:2}"), "{title}", false},
+		{"the default rule has no description", DefaultEvent(), "{description}", false},
+		{"the default rule has a title", DefaultEvent(), "{title}", true},
+	}
+	for _, c := range cases {
+		if got := UsesPlaceholder(c.ev, c.name); got != c.want {
+			t.Errorf("%s: UsesPlaceholder(%s) = %v, want %v", c.what, c.name, got, c.want)
+		}
+	}
+}
+
+// {game} is the Twitch category and nothing else. It renders on a Twitch
+// payload, takes no line count, and on YouTube it is blank - so a line it
+// stood alone on goes, the way a {description} line does on Twitch.
+func TestGameIsTheTwitchCategory(t *testing.T) {
+	rc := notifRenderContext()
+	rc.Payload.Platform = PlatformTwitch
+	rc.Payload.Description = ""
+	rc.Payload.Game = "  Just Chatting "
+	if got := rc.values()["{game}"]; got != "Just Chatting" {
+		t.Errorf("{game} = %q, want the category, trimmed", got)
+	}
+
+	ev := model.NotificationEvent{Content: "{channel} is live\n🎮 {game}\n- {game:1}"}
+	if got, want := Render(ev, rc).Content, "Dokibird is live\n🎮 Just Chatting\n- {game:1}"; got != want {
+		t.Errorf("twitch content = %q, want %q", got, want)
+	}
+	if !UsesPlaceholder(ev, "{game}") {
+		t.Error("UsesPlaceholder does not see {game}")
+	}
+
+	// The same template on YouTube: no category, and nothing stands in for it.
+	ev.Content = "{channel} is live\n🎮 {game}\n**{game}**\nPlaying: {game}"
+	if got, want := Render(ev, notifRenderContext()).Content, "Dokibird is live\nPlaying:"; got != want {
+		t.Errorf("youtube content = %q, want %q", got, want)
+	}
+
+	// A category that reads like a ping pings nobody.
+	rc.Payload.Game = "@everyone <@&5>"
+	msg := Render(model.NotificationEvent{Content: "{game}"}, rc)
+	if parse, _ := msg.Mentions["parse"].([]string); len(parse) != 0 || len(notifIDListFromPolicy(msg.Mentions, "roles")) != 0 {
+		t.Errorf("mentions = %v, want none - they came from the category", msg.Mentions)
+	}
+}
+
+// Previews and test sends render the category the ledger recorded for a live
+// Twitch broadcast. The video triggers are YouTube-only and never get one,
+// whichever row stands in for them.
+func TestPreviewPayloadCarriesTheGame(t *testing.T) {
+	ch := notifChannel()
+	tw := &model.DetectedBroadcast{Platform: PlatformTwitch, BroadcastID: "42", URL: "https://twitch.tv/dokibird", Title: "Real title", Game: "Minecraft"}
+	if got := PreviewPayload(TriggerLive, ch, tw, nil, notifNow); got.Game != "Minecraft" {
+		t.Errorf("live preview game = %q, want the broadcast's", got.Game)
+	}
+
+	// An ended Twitch stream claimed without one gets no example to go with
+	// its example title.
+	bare := &model.DetectedBroadcast{Platform: PlatformTwitch, BroadcastID: "43", URL: "https://twitch.tv/dokibird", EndedAt: notifNow.Unix()}
+	if got := PreviewPayload(TriggerLive, ch, bare, nil, notifNow); got.Game != "" {
+		t.Errorf("preview game for a row without one = %q, want none", got.Game)
+	}
+
+	yt := &model.DetectedBroadcast{Platform: PlatformYouTube, BroadcastID: "real1", URL: "https://www.youtube.com/watch?v=real1", Game: "must never appear"}
+	for _, tr := range []Trigger{TriggerScheduled, TriggerUpload, TriggerShort} {
+		v := &model.DetectedVideo{Platform: PlatformYouTube, VideoID: "v1", Kind: string(tr), URL: "x"}
+		if got := PreviewPayload(tr, ch, yt, v, notifNow); got.Game != "" {
+			t.Errorf("%s preview game = %q, want none", tr, got.Game)
+		}
+		if got := PreviewPayload(tr, ch, yt, nil, notifNow); got.Game != "" {
+			t.Errorf("%s preview borrowed from a broadcast has game %q, want none", tr, got.Game)
+		}
+	}
+	for _, tr := range []Trigger{TriggerLive, TriggerScheduled, TriggerUpload, TriggerShort} {
+		if got := SamplePayload(tr, ch, notifNow).Game; got != "" {
+			t.Errorf("%s sample game = %q; the stand-in is a YouTube video", tr, got)
+		}
 	}
 }

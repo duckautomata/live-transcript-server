@@ -88,6 +88,17 @@ type DetectedBroadcast struct {
 	ChannelKey  string `json:"channelKey"`
 	URL         string `json:"url"`
 	Title       string `json:"title"`
+	// Description is the platform's description of the video as it read when
+	// the row was claimed (YouTube only; Twitch has none). It exists so previews
+	// and test sends can render {description}. It never serializes: these
+	// structs are encoded verbatim by the public livedetect endpoint and the
+	// admin page, and a description is up to 5000 characters of pure bloat there.
+	Description string `json:"-"`
+	// Game is the Twitch category the stream was in when it was detected
+	// ("Minecraft", "Just Chatting"); always empty for YouTube. It exists so
+	// previews and test sends can render {game}. Unlike the description it is a
+	// few words, so it serializes like the title does.
+	Game string `json:"game,omitempty"`
 	// StartedAt is the platform's own start time (Helix started_at,
 	// liveStreamingDetails.actualStartTime) in unix seconds, NOT our first
 	// sighting. Zero when the platform did not report one.
@@ -119,6 +130,12 @@ type DetectedVideo struct {
 	ChannelKey string `json:"channelKey"`
 	URL        string `json:"url"`
 	Title      string `json:"title"`
+	// Description is the platform's description of the video as it read when
+	// the row was claimed (YouTube only; Twitch has none). It exists so previews
+	// and test sends can render {description}. It never serializes: these
+	// structs are encoded verbatim by the public livedetect endpoint and the
+	// admin page, and a description is up to 5000 characters of pure bloat there.
+	Description string `json:"-"`
 	// PublishedAt is the platform's publish time in unix seconds; zero when
 	// not reported.
 	PublishedAt int64 `json:"publishedAt"`

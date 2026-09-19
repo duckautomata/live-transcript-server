@@ -20,10 +20,15 @@
 //     dispatcher matches payloads to rules; the rule's cooldown is claimed
 //     atomically in the store so two racing detections cannot both pass.
 //
-//   - Templates are plain strings with {placeholders}. Rendering is pure and
-//     total: any template renders to something, unknown placeholders are left
-//     as written, and Discord's length limits are enforced by truncation
-//     rather than by failing at send time.
+//   - Templates are plain strings with {placeholders}; a multi-line one also
+//     takes a line count, so {description:1} is the first line of the video
+//     description. Rendering is pure and total: any template renders to
+//     something, unknown placeholders (and malformed counts) are left as
+//     written, and Discord's length limits are enforced by shortening - the
+//     platform's description first, the author's own text only as a last
+//     resort - rather than by failing at send time. A template line whose
+//     placeholders all came up blank, and that has no words left on it, is
+//     removed, so one template reads well on a platform that lacks a value.
 package announce
 
 import (
@@ -156,6 +161,13 @@ type Payload struct {
 	ID    string
 	URL   string
 	Title string
+	// Description is the platform's own description of the video. YouTube
+	// only: Twitch streams have none. It is whatever the creator typed - long,
+	// multi-line, full of links - and is carried raw; rendering cleans it.
+	Description string
+	// Game is the Twitch category being streamed, e.g. "Minecraft". Twitch
+	// live only: YouTube has nothing like it, so it is empty there.
+	Game string
 	// EventTime is the moment the announcement is about: the stream's start,
 	// the scheduled start, or the publish time. Zero when the platform did not
 	// report one, in which case the time placeholders render empty and the

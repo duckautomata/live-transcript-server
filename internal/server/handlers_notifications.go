@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"live-transcript-server/internal/announce"
 	"live-transcript-server/internal/discord"
@@ -433,7 +434,11 @@ type notificationDraftRequest struct {
 
 // NotificationPreviewResponse is what a rule would send: the rendered content
 // and embed exactly as they would go to Discord, plus the sample the
-// placeholders were filled from.
+// placeholders were filled from. Besides where the details came from, the
+// sample always says whether the video description had to be shortened to fit
+// ("shortened") and which platform-limited placeholders the draft uses came up
+// blank, and why ("blanks"), so the editor can explain a gap instead of
+// leaving the author to guess.
 type NotificationPreviewResponse struct {
 	Trigger string         `json:"trigger"`
 	Content string         `json:"content"`
@@ -455,6 +460,7 @@ func decodeNotificationDraft(w http.ResponseWriter, r *http.Request, cs *Channel
 		writeJSONError(w, http.StatusBadRequest, "Invalid notification event")
 		return nil, "", false
 	}
+	clipDraftTemplates(&req.Event)
 
 	trigger := announce.Trigger(strings.ToLower(strings.TrimSpace(req.Trigger)))
 	if trigger == "" {
@@ -469,6 +475,35 @@ func decodeNotificationDraft(w http.ResponseWriter, r *http.Request, cs *Channel
 		return nil, "", false
 	}
 	return &req, trigger, true
+}
+
+// clipDraftTemplates bounds a draft's templates to what a rule may store. A
+// draft is rendered even when it does not validate, and one {description} can
+// expand to 5000 characters: a body of nothing but that placeholder, repeated
+// up to the request limit, would be rendered in full - hundreds of megabytes,
+// a dozen times over for the fit - only to be cut to Discord's limits
+// afterwards, and previews are not rate limited. Nothing longer than this can
+// be saved, so clipping loses nothing real; the editor reports the length
+// problem itself.
+func clipDraftTemplates(ev *model.NotificationEvent) {
+	clip := func(s string, max int) string {
+		if utf8.RuneCountInString(s) <= max {
+			return s
+		}
+		return string([]rune(s)[:max])
+	}
+	ev.Content = clip(ev.Content, announce.MaxContentLength)
+	e := &ev.Embed
+	e.Title = clip(e.Title, announce.MaxEmbedTitle)
+	e.Description = clip(e.Description, announce.MaxEmbedDescription)
+	e.Footer = clip(e.Footer, announce.MaxEmbedFooter)
+	// A URL field holds one address; an over-long one is never a usable
+	// template, and Normalize already refuses to store it.
+	for _, u := range []*string{&e.URL, &e.Image, &e.Thumbnail} {
+		if len(*u) > announce.MaxTemplateURLLength {
+			*u = ""
+		}
+	}
 }
 
 // previewPayload builds the payload previews and tests are rendered from: the
@@ -508,11 +543,13 @@ func (app *App) previewPayload(ctx context.Context, cs *ChannelState, trigger an
 	return p
 }
 
-// sampleDescription tells the editor where a preview's details came from, so
+// describeSample tells the editor where a preview's details came from, so
 // it can say why a field is blank: "recent" is the channel's own detection,
 // "sample" the stand-in video a local build falls back to, and "none" means
-// the channel has nothing for this trigger yet.
-func sampleDescription(p announce.Payload) map[string]any {
+// the channel has nothing for this trigger yet. The video's description is
+// deliberately not among the details: it can be 5000 characters, and the
+// editor only ever needs it rendered.
+func describeSample(p announce.Payload) map[string]any {
 	source := "recent"
 	switch {
 	case p.IsSample():
@@ -535,6 +572,49 @@ func sampleDescription(p announce.Payload) map[string]any {
 	}
 }
 
+// previewBlank names a placeholder the draft uses that came up blank in a
+// preview. Why is "platform" when this platform never has the value (a Twitch
+// stream has no description), "missing" when it could have had one and the
+// detection carries none, and "room" when the value is there but the author's
+// own text left Discord's limit no room for it.
+type previewBlank struct {
+	Name string `json:"name"`
+	Why  string `json:"why"`
+}
+
+// previewBlanks lists the platform-limited placeholders a draft uses that are
+// blank for this payload. A blank line in a preview is otherwise
+// indistinguishable from a broken template, and the honest answer - "this is
+// a Twitch stream, it will fill in on YouTube" - is one only the server knows.
+// With no detection at all every detail is blank and the editor already says
+// why, so nothing is listed. Never nil: the editor reads it as an array.
+func previewBlanks(ev model.NotificationEvent, p announce.Payload) []previewBlank {
+	blanks := []previewBlank{}
+	if p.ID == "" {
+		return blanks
+	}
+	for _, c := range []struct {
+		name string
+		// blank is whether the value is empty for this payload; platform is the
+		// only platform that ever supplies it.
+		blank    bool
+		platform string
+	}{
+		{"{description}", !p.HasDescription(), announce.PlatformYouTube},
+		{"{game}", strings.TrimSpace(p.Game) == "", announce.PlatformTwitch},
+	} {
+		if !c.blank || !announce.UsesPlaceholder(ev, c.name) {
+			continue
+		}
+		why := "missing"
+		if p.Platform != c.platform {
+			why = "platform"
+		}
+		blanks = append(blanks, previewBlank{Name: c.name, Why: why})
+	}
+	return blanks
+}
+
 // postNotificationPreviewHandler renders a draft without sending it.
 // Read-only: no audit record, no change counter bump.
 //
@@ -551,7 +631,7 @@ func (app *App) postNotificationPreviewHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 	payload := app.previewPayload(r.Context(), cs, trigger)
-	sample := sampleDescription(payload)
+	sample := describeSample(payload)
 	if payload.Platform == announce.PlatformTwitch && payload.Ended {
 		if payload.Title == "" {
 			payload.Title = announce.ExampleTitle
@@ -561,6 +641,12 @@ func (app *App) postNotificationPreviewHandler(w http.ResponseWriter, r *http.Re
 		sample["exampleImage"] = true
 	}
 	msg := app.Announcer.Preview(req.Event, payload)
+	sample["shortened"] = msg.Shortened
+	blanks := previewBlanks(req.Event, payload)
+	if msg.DescriptionDropped {
+		blanks = append(blanks, previewBlank{Name: "{description}", Why: "room"})
+	}
+	sample["blanks"] = blanks
 	writeJSON(w, NotificationPreviewResponse{
 		Trigger: string(trigger),
 		Content: msg.Content,

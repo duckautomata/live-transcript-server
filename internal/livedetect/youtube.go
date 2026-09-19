@@ -54,6 +54,9 @@ type YTVideo struct {
 	Snippet *struct {
 		ChannelID string `json:"channelId"`
 		Title     string `json:"title"`
+		// Description rides along in the snippet part that is requested
+		// anyway, so carrying it to announcements costs no extra quota.
+		Description string `json:"description"`
 		// LiveBroadcastContent is "live", "upcoming" or "none". Livestreams and
 		// premieres are INDISTINGUISHABLE here - both report "live" while
 		// running - which is exactly what we want, since both are in scope.
@@ -163,6 +166,16 @@ func (v YTVideo) Title() string {
 		return ""
 	}
 	return v.Snippet.Title
+}
+
+// Description returns the video description, or "" when no snippet was
+// returned. It is whatever the creator typed: up to 5000 characters, usually
+// multi-line, and the consumer's job to clean up.
+func (v YTVideo) Description() string {
+	if v.Snippet == nil {
+		return ""
+	}
+	return v.Snippet.Description
 }
 
 // ChannelID returns the owning channel, or "" when no snippet was returned.

@@ -2,6 +2,7 @@ package livedetect
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -738,5 +739,85 @@ func TestCloseWaitsForAnInFlightClassification(t *testing.T) {
 	}
 	if !d.watch.ClaimAnnounce("slow1", VideoUpload) {
 		t.Error("an abandoned classification must release its latch")
+	}
+}
+
+// The description rides in the snippet part that is already requested, so it
+// must decode from the same response with no change to the request, and the
+// accessor must survive an item that arrived without a snippet.
+func TestVideosListDecodesDescription(t *testing.T) {
+	const desc = "Line one\n\nhttps://example.com/merch\nLine three"
+	var gotPart string
+	c := newYouTubeTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPart = r.URL.Query().Get("part")
+		json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{"id": "vid1", "snippet": map[string]any{"liveBroadcastContent": "none", "title": "hello", "description": desc}},
+				{"id": "vid2"},
+			},
+		})
+	})
+
+	videos, err := c.VideosList(context.Background(), []string{"vid1", "vid2"})
+	if err != nil {
+		t.Fatalf("VideosList: %v", err)
+	}
+	if gotPart != "snippet,liveStreamingDetails" {
+		t.Errorf("part = %q: the description must not cost another part", gotPart)
+	}
+	if len(videos) != 2 {
+		t.Fatalf("got %d videos, want 2", len(videos))
+	}
+	if got := videos[0].Description(); got != desc {
+		t.Errorf("Description() = %q, want %q", got, desc)
+	}
+	if got := videos[1].Description(); got != "" {
+		t.Errorf("Description() of an item with no snippet = %q, want empty", got)
+	}
+}
+
+// Every YouTube observation carries the description as it read at that
+// moment: the live broadcast, the scheduled frame, and the upload (whose
+// announcement is built on another goroutine, after the classification).
+func TestYouTubeObservationsCarryTheDescription(t *testing.T) {
+	site := notifNewShortsSite(t, notifAnswerVideo)
+	sink := &recordingSink{}
+	d := notifYouTubeDetector(t, sink, site)
+	now := time.Now()
+
+	live := notifVideo("live1", "live", now.Add(-time.Hour))
+	live.Snippet.Description = "live description\nsecond line"
+	live.LiveStreamingDetails = liveDetails(now.Add(-time.Minute).UTC().Format(time.RFC3339), "", "")
+	d.watch.Seed("live1", "doki", now, true)
+	d.applyYouTubeVideo(context.Background(), live, now)
+
+	frame := notifVideo("frame1", "upcoming", now.Add(-10*time.Minute))
+	frame.Snippet.Description = "frame description"
+	frame.LiveStreamingDetails = liveDetails("", "", now.Add(2*time.Hour).UTC().Format(time.RFC3339))
+	d.watch.Seed("frame1", "doki", now, true)
+	d.applyYouTubeVideo(context.Background(), frame, now)
+
+	upload := notifVideo("upload1", "none", now.Add(-5*time.Minute))
+	upload.Snippet.Description = "upload description"
+	d.watch.Seed("upload1", "doki", now, true)
+	d.applyYouTubeVideo(context.Background(), upload, now)
+
+	notifWaitFor(t, "both video events", func() bool { return len(sink.videoEvents()) == 2 })
+
+	sink.mu.Lock()
+	lives := append([]Broadcast(nil), sink.live...)
+	sink.mu.Unlock()
+	if len(lives) != 1 || lives[0].Description != "live description\nsecond line" {
+		t.Errorf("live broadcasts = %+v, want one carrying its description", lives)
+	}
+	got := map[string]string{}
+	for _, ev := range sink.videoEvents() {
+		got[ev.ID] = ev.Description
+	}
+	if got["frame1"] != "frame description" {
+		t.Errorf("scheduled frame description = %q", got["frame1"])
+	}
+	if got["upload1"] != "upload description" {
+		t.Errorf("upload description = %q", got["upload1"])
 	}
 }

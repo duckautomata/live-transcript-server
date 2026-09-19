@@ -507,6 +507,34 @@ func TestNotificationsGetReturnsVocabularyAndEmptyLists(t *testing.T) {
 			t.Errorf("placeholder[%d] = %+v, want %q", i, resp.Placeholders[i], want.Name)
 		}
 	}
+	// The editor builds its line chooser from what is served, so the wire
+	// shape matters: {description} carries a chip label and its line bounds,
+	// and a plain placeholder carries neither key, which is how the editor
+	// tells them apart.
+	var vocab struct {
+		Placeholders []map[string]json.RawMessage `json:"placeholders"`
+	}
+	notifDecode(t, rec, &vocab)
+	sawDescription := false
+	for _, ph := range vocab.Placeholders {
+		if string(ph["name"]) != `"{description}"` {
+			if ph["label"] != nil || ph["lines"] != nil {
+				t.Errorf("placeholder %s carries label %s and lines %s, want neither", ph["name"], ph["label"], ph["lines"])
+			}
+			continue
+		}
+		sawDescription = true
+		if got := string(ph["label"]); got != `"Video description"` {
+			t.Errorf("{description} label = %s", got)
+		}
+		var lines map[string]int
+		if err := json.Unmarshal(ph["lines"], &lines); err != nil || len(lines) != 2 || lines["max"] != 20 || lines["default"] != 3 {
+			t.Errorf("{description} lines = %s (%v), want {max: 20, default: 3}", ph["lines"], err)
+		}
+	}
+	if !sawDescription {
+		t.Error("the vocabulary has no {description} entry")
+	}
 
 	d := resp.Defaults
 	if !d.EmbedEnabled || d.Content != "" || d.CooldownSeconds != defaultCooldownSeconds {

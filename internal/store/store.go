@@ -272,6 +272,8 @@ func createSchema(db *sql.DB) error {
 		channel_key TEXT NOT NULL,
 		url TEXT NOT NULL,
 		title TEXT NOT NULL DEFAULT '',
+		description TEXT NOT NULL DEFAULT '',
+		game TEXT NOT NULL DEFAULT '',
 		started_at INTEGER NOT NULL DEFAULT 0,
 		detected_at INTEGER NOT NULL,
 		mechanism TEXT NOT NULL DEFAULT '',
@@ -307,6 +309,7 @@ func createSchema(db *sql.DB) error {
 		channel_key TEXT NOT NULL,
 		url TEXT NOT NULL,
 		title TEXT NOT NULL DEFAULT '',
+		description TEXT NOT NULL DEFAULT '',
 		published_at INTEGER NOT NULL DEFAULT 0,
 		scheduled_at INTEGER NOT NULL DEFAULT 0,
 		detected_at INTEGER NOT NULL,
@@ -322,6 +325,20 @@ func createSchema(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("error creating detected_videos index: %w", err)
+	}
+
+	// Columns the detection ledgers grew after they were first created, so a
+	// notification template can say more than the title. The CREATEs above
+	// only help a fresh database; on a deployed one the column has to be added,
+	// or every claim fails with "no such column" and detection goes silent.
+	for _, c := range []struct{ table, column, ddl string }{
+		{"detected_broadcasts", "description", "TEXT NOT NULL DEFAULT ''"},
+		{"detected_videos", "description", "TEXT NOT NULL DEFAULT ''"},
+		{"detected_broadcasts", "game", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureColumn(db, c.table, c.column, c.ddl); err != nil {
+			return err
+		}
 	}
 
 	// notification_events are the admin-configured announcement rules. The

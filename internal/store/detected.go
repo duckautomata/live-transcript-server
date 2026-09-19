@@ -23,9 +23,9 @@ import (
 func (s *Store) ClaimDetection(ctx context.Context, d model.DetectedBroadcast) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `
 	INSERT OR IGNORE INTO detected_broadcasts
-		(platform, broadcast_id, channel_key, url, title, started_at, detected_at, mechanism, ended_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0);
-	`, d.Platform, d.BroadcastID, d.ChannelKey, d.URL, d.Title, d.StartedAt, d.DetectedAt, d.Mechanism)
+		(platform, broadcast_id, channel_key, url, title, description, game, started_at, detected_at, mechanism, ended_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0);
+	`, d.Platform, d.BroadcastID, d.ChannelKey, d.URL, d.Title, d.Description, d.Game, d.StartedAt, d.DetectedAt, d.Mechanism)
 	if err != nil {
 		return false, err
 	}
@@ -68,16 +68,39 @@ func (s *Store) FillDetectionTitle(ctx context.Context, platform, broadcastID, t
 	return n > 0, nil
 }
 
+// FillDetectionGame records a Twitch category for a ledger row that has none,
+// and reports whether it did. Same guard as FillDetectionTitle, for the same
+// reason: EventSub claims nearly every Twitch broadcast and carries no
+// category, so the winner's lookup and the poll leg's later observations both
+// fill it in here, and whichever lands first stays - the row records the
+// category at go-live, not wherever the stream wandered to since.
+func (s *Store) FillDetectionGame(ctx context.Context, platform, broadcastID, game string) (bool, error) {
+	if game == "" {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE detected_broadcasts SET game = ? WHERE platform = ? AND broadcast_id = ? AND game = ''",
+		game, platform, broadcastID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetDetection returns a single ledger row, or nil when the broadcast has
 // never been claimed.
 func (s *Store) GetDetection(ctx context.Context, platform, broadcastID string) (*model.DetectedBroadcast, error) {
 	row := s.db.QueryRowContext(ctx, `
-	SELECT platform, broadcast_id, channel_key, url, title, started_at, detected_at, mechanism, ended_at
+	SELECT platform, broadcast_id, channel_key, url, title, description, game, started_at, detected_at, mechanism, ended_at
 	FROM detected_broadcasts WHERE platform = ? AND broadcast_id = ?;
 	`, platform, broadcastID)
 
 	var d model.DetectedBroadcast
-	err := row.Scan(&d.Platform, &d.BroadcastID, &d.ChannelKey, &d.URL, &d.Title,
+	err := row.Scan(&d.Platform, &d.BroadcastID, &d.ChannelKey, &d.URL, &d.Title, &d.Description, &d.Game,
 		&d.StartedAt, &d.DetectedAt, &d.Mechanism, &d.EndedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -114,7 +137,7 @@ func (s *Store) MarkDetectionEnded(ctx context.Context, platform, broadcastID st
 // not lose track of a stream it already saw.
 func (s *Store) GetLiveDetections(ctx context.Context) ([]model.DetectedBroadcast, error) {
 	rows, err := s.db.QueryContext(ctx, `
-	SELECT platform, broadcast_id, channel_key, url, title, started_at, detected_at, mechanism, ended_at
+	SELECT platform, broadcast_id, channel_key, url, title, description, game, started_at, detected_at, mechanism, ended_at
 	FROM detected_broadcasts WHERE ended_at = 0 ORDER BY detected_at ASC;
 	`)
 	if err != nil {
@@ -125,7 +148,7 @@ func (s *Store) GetLiveDetections(ctx context.Context) ([]model.DetectedBroadcas
 	var out []model.DetectedBroadcast
 	for rows.Next() {
 		var d model.DetectedBroadcast
-		if err := rows.Scan(&d.Platform, &d.BroadcastID, &d.ChannelKey, &d.URL, &d.Title,
+		if err := rows.Scan(&d.Platform, &d.BroadcastID, &d.ChannelKey, &d.URL, &d.Title, &d.Description, &d.Game,
 			&d.StartedAt, &d.DetectedAt, &d.Mechanism, &d.EndedAt); err != nil {
 			return nil, err
 		}
@@ -142,7 +165,7 @@ func (s *Store) GetRecentDetections(ctx context.Context, channelKey string, limi
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `
-	SELECT platform, broadcast_id, channel_key, url, title, started_at, detected_at, mechanism, ended_at
+	SELECT platform, broadcast_id, channel_key, url, title, description, game, started_at, detected_at, mechanism, ended_at
 	FROM detected_broadcasts WHERE channel_key = ? ORDER BY detected_at DESC, rowid DESC LIMIT ?;
 	`, channelKey, limit)
 	if err != nil {
@@ -153,7 +176,7 @@ func (s *Store) GetRecentDetections(ctx context.Context, channelKey string, limi
 	var out []model.DetectedBroadcast
 	for rows.Next() {
 		var d model.DetectedBroadcast
-		if err := rows.Scan(&d.Platform, &d.BroadcastID, &d.ChannelKey, &d.URL, &d.Title,
+		if err := rows.Scan(&d.Platform, &d.BroadcastID, &d.ChannelKey, &d.URL, &d.Title, &d.Description, &d.Game,
 			&d.StartedAt, &d.DetectedAt, &d.Mechanism, &d.EndedAt); err != nil {
 			return nil, err
 		}
@@ -184,12 +207,12 @@ func (s *Store) ClaimVideoDetection(ctx context.Context, v model.DetectedVideo) 
 	}
 	res, err := s.db.ExecContext(ctx, `
 	INSERT OR IGNORE INTO detected_videos
-		(platform, video_id, kind, channel_key, url, title, published_at, scheduled_at, detected_at)
-	SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+		(platform, video_id, kind, channel_key, url, title, description, published_at, scheduled_at, detected_at)
+	SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 	WHERE NOT EXISTS (
 		SELECT 1 FROM detected_videos WHERE platform = ? AND video_id = ? AND kind IN (?, ?)
 	);
-	`, v.Platform, v.VideoID, v.Kind, v.ChannelKey, v.URL, v.Title, v.PublishedAt, v.ScheduledAt, v.DetectedAt,
+	`, v.Platform, v.VideoID, v.Kind, v.ChannelKey, v.URL, v.Title, v.Description, v.PublishedAt, v.ScheduledAt, v.DetectedAt,
 		v.Platform, v.VideoID, v.Kind, sibling)
 	if err != nil {
 		return false, err
@@ -208,7 +231,7 @@ func (s *Store) GetRecentVideoDetections(ctx context.Context, channelKey string,
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `
-	SELECT platform, video_id, kind, channel_key, url, title, published_at, scheduled_at, detected_at
+	SELECT platform, video_id, kind, channel_key, url, title, description, published_at, scheduled_at, detected_at
 	FROM detected_videos WHERE channel_key = ? ORDER BY detected_at DESC, rowid DESC LIMIT ?;
 	`, channelKey, limit)
 	if err != nil {
@@ -219,7 +242,7 @@ func (s *Store) GetRecentVideoDetections(ctx context.Context, channelKey string,
 	var out []model.DetectedVideo
 	for rows.Next() {
 		var v model.DetectedVideo
-		if err := rows.Scan(&v.Platform, &v.VideoID, &v.Kind, &v.ChannelKey, &v.URL, &v.Title,
+		if err := rows.Scan(&v.Platform, &v.VideoID, &v.Kind, &v.ChannelKey, &v.URL, &v.Title, &v.Description,
 			&v.PublishedAt, &v.ScheduledAt, &v.DetectedAt); err != nil {
 			return nil, err
 		}
