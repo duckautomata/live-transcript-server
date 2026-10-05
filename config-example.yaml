@@ -167,7 +167,15 @@ liveDetect:
   # worker and never touches the streams table. Run a new deployment with this
   # off first and read the detection delays on the admin page; once they are
   # trustworthy, turn it on and the Discord listener bot becomes redundant.
+  # A members-only YouTube stream is announced but not queued (see
+  # queueMembersOnly) - unless it is opened to everyone while live, when it is
+  # queued then.
   queueIncoming: false
+
+  # With queueIncoming on, also queue members-only YouTube streams. Off because
+  # the worker refuses members-only content: a queue entry would only buy an
+  # hour of futile probes. Turn it on once the worker can capture them.
+  queueMembersOnly: false
 
   # This server's externally reachable base URL, no trailing slash, e.g.
   # "https://api.example.com". REQUIRED for eventSub and webSub: both register
@@ -228,10 +236,12 @@ liveDetect:
     #   openssl rand -hex 32
     webSubSecret: ""
 
-    # How often each channel's uploads playlist is scanned for video ids we have
-    # not seen. This is the latency floor for an UNSCHEDULED surprise go-live
-    # only - every premiere and any stream with a waiting room is already on the
-    # watchlist and is caught within seconds by the state poller.
+    # How often each channel's uploads and members-only playlists are scanned
+    # for video ids we have not seen, one quota unit each (a channel with no
+    # members-only playlist is re-checked only hourly). This is the latency
+    # floor for an UNSCHEDULED surprise go-live only - every premiere and any
+    # stream with a waiting room is already on the watchlist and is caught
+    # within seconds by the state poller.
     discoverySeconds: 120
 
     # Daily quota ceiling, under the API's 10,000/day project allocation, leaving

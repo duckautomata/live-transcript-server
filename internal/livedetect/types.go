@@ -63,6 +63,13 @@ const (
 	// MechanismYouTubeWebSubRenew is the lease-renewal half of WebSub, tracked
 	// separately from push delivery for the same reason.
 	MechanismYouTubeWebSubRenew = "youtube-websub-renew"
+	// MechanismYouTubeMembersDiscover is the members-only half of discovery,
+	// tracked separately from the uploads half. A members-only read only runs
+	// after the same channel's uploads read succeeded, so folding the two
+	// together would let that success reset every members-only failure: a
+	// broken members-only playlist would never alert, or would alert and
+	// recover inside every pass once enough channels were affected.
+	MechanismYouTubeMembersDiscover = "youtube-members-discovery"
 )
 
 // Target is one channel to watch on one platform. ID is the platform's own
@@ -103,6 +110,12 @@ type Broadcast struct {
 	// rather than how long discovery took to notice it. Only YouTube can be
 	// scheduled; Twitch broadcasts are always false.
 	SawScheduled bool
+	// MembersOnly reports that YouTube lists this broadcast on the channel's
+	// members-only playlist rather than its public uploads, so only paying
+	// members can watch it. The worker deliberately refuses members-only
+	// content, which is why the sink does not queue one unless
+	// liveDetect.queueMembersOnly is set. Twitch broadcasts are always false.
+	MembersOnly bool
 }
 
 // Kinds of non-live video observation, reported through Sink.ObserveVideo.

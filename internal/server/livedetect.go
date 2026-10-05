@@ -122,6 +122,17 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 		if backfilled {
 			app.bumpAdminChange(b.ChannelKey)
 		}
+		// A members-only stream the winner kept off the queue, now seen
+		// public: the creator opened it to everyone at or after the go-live.
+		// The claim is once-only, so without this a public stream would stay
+		// untranscribed for good.
+		if app.QueueIncoming && !b.MembersOnly {
+			if _, skipped := app.membersSkipped.LoadAndDelete(membersSkipKey(b.Platform, b.ID)); skipped {
+				slog.Info("a members-only stream was opened to everyone; queueing it now",
+					"func", "App.ObserveLive", "key", b.ChannelKey, "url", b.URL)
+				app.queueDetected(ctx, b)
+			}
+		}
 		return nil
 	}
 
@@ -145,29 +156,27 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 		"detectedAt", det.DetectedAt,
 		"delaySeconds", det.DetectedAt-det.StartedAt,
 		"sawScheduled", b.SawScheduled,
+		"membersOnly", b.MembersOnly,
 		"queueIncoming", app.QueueIncoming,
+		"queueMembersOnly", app.QueueMembersOnly,
 		"url", b.URL,
 	)
 
 	// The worker first: it is the product, and an announcement that goes out
 	// before the transcript starts is the normal order of events anyway.
 	//
-	// Detached from the poll's context: the claim above is already durable,
-	// so a cancellation landing between the two writes would lose the queue
-	// entry with nothing left to retry it. The write itself is a few
-	// milliseconds against the local database.
-	if app.QueueIncoming {
-		if err := app.QueueIncomingStream(context.WithoutCancel(ctx), b.ChannelKey, b.URL); err != nil {
-			// The claim is already taken, so this broadcast will not be
-			// retried by the next poll. Say so loudly; the operator can queue
-			// it by hand from the admin page.
-			slog.Error("failed to queue a detected stream for the worker",
-				"func", "App.ObserveLive", "key", b.ChannelKey, "url", b.URL, "err", err)
-		} else {
-			metrics.LiveDetectQueued.WithLabelValues(b.ChannelKey, b.Platform).Inc()
-			slog.Info("detected stream queued for the worker",
-				"func", "App.ObserveLive", "key", b.ChannelKey, "url", b.URL)
-		}
+	// A members-only broadcast is not queued unless queueMembersOnly says so.
+	// The worker refuses members-only content on purpose, so all a queue entry
+	// would buy is an hour of futile probes before the worker gives up on it.
+	// It is still announced below, and queued after all if it is opened to
+	// everyone while live.
+	switch {
+	case app.QueueIncoming && b.MembersOnly && !app.QueueMembersOnly:
+		app.membersSkipped.Store(membersSkipKey(b.Platform, b.ID), struct{}{})
+		slog.Info("not queueing a members-only stream for the worker",
+			"func", "App.ObserveLive", "key", b.ChannelKey, "url", b.URL)
+	case app.QueueIncoming:
+		app.queueDetected(ctx, b)
 	}
 
 	// Twitch EventSub wins nearly every Twitch race and carries no title. One
@@ -224,6 +233,31 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 	// stream - unlike the per-poll churn bumpAdminChange deliberately avoids.
 	app.bumpAdminChange(b.ChannelKey)
 	return nil
+}
+
+// queueDetected queues a detected broadcast for the worker.
+//
+// Detached from the caller's context: the claim is already durable, so a
+// cancellation landing between the two writes would lose the queue entry with
+// nothing left to retry it. The write itself is a few milliseconds against the
+// local database.
+func (app *App) queueDetected(ctx context.Context, b livedetect.Broadcast) {
+	if err := app.QueueIncomingStream(context.WithoutCancel(ctx), b.ChannelKey, b.URL); err != nil {
+		// The claim is already taken, so this broadcast will not be retried
+		// by the next poll. Say so loudly; the operator can queue it by hand
+		// from the admin page.
+		slog.Error("failed to queue a detected stream for the worker",
+			"func", "App.queueDetected", "key", b.ChannelKey, "url", b.URL, "err", err)
+		return
+	}
+	metrics.LiveDetectQueued.WithLabelValues(b.ChannelKey, b.Platform).Inc()
+	slog.Info("detected stream queued for the worker",
+		"func", "App.queueDetected", "key", b.ChannelKey, "url", b.URL)
+}
+
+// membersSkipKey keys App.membersSkipped.
+func membersSkipKey(platform, broadcastID string) string {
+	return platform + "/" + broadcastID
 }
 
 // scheduledLabel renders the scheduled/surprise split for metrics. Only
@@ -322,6 +356,8 @@ func (app *App) ObserveVideo(ctx context.Context, v livedetect.VideoEvent) error
 // downstream depends on an end ever being observed, which matters because the
 // end of a stream is the observation most likely to be lost to an outage.
 func (app *App) ObserveEnded(ctx context.Context, platform, broadcastID string) error {
+	// A finished members-only stream can no longer be opened to anyone.
+	app.membersSkipped.Delete(membersSkipKey(platform, broadcastID))
 	ended, err := app.Store.MarkDetectionEnded(ctx, platform, broadcastID, time.Now().Unix())
 	if err != nil {
 		return err

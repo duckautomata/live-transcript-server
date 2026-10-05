@@ -44,19 +44,22 @@ const (
 	// the sweep and the next discovery pass simply resume churning the same
 	// ids off and back onto the watchlist.
 	ytRetiredMemory = 24 * time.Hour
-	// ytMaxConsecutiveMisses is how many polls may omit an id before it is
-	// dropped. Five at the 60-second miss cadence is five minutes - far longer
-	// than any transient API hiccup, and short enough that a deleted video
-	// costs a handful of units rather than a day of them.
+	// ytMaxConsecutiveMisses is how many polls the id was due for may omit it
+	// before it is dropped. Five at the 60-second miss cadence is about five
+	// minutes - far longer than any transient API hiccup, and short enough
+	// that a deleted video costs a handful of units rather than a day of them.
 	ytMaxConsecutiveMisses = 5
 	// ytAbandonedAfterSchedule drops a frame still sitting "upcoming" this long
 	// past its own announced start. Creators leave dead waiting rooms up, and
 	// one costs a poll every five minutes until the 24-hour sweep otherwise.
 	ytAbandonedAfterSchedule = 12 * time.Hour
-	// ytRetiredMax bounds the negative cache. A channel uploads a handful of
-	// times a day, so this is generous; the cap exists only so an unexpected
-	// flood cannot grow the map without limit.
-	ytRetiredMax = 2000
+	// ytRetiredMax bounds the negative cache. Every finished id on a page
+	// discovery reads ends up in it, and discovery reads two 50-id pages per
+	// channel (uploads and members-only), so this holds fifty channels' worth
+	// before evicting anything. An evicted id still on its playlist is
+	// re-seeded, which is the churn the cache exists to stop; the cap is only
+	// there so an unexpected flood cannot grow the map without limit.
+	ytRetiredMax = 5000
 )
 
 // watchEntry is one YouTube video being tracked.
@@ -89,10 +92,17 @@ type watchEntry struct {
 	// exit path, including errors and quota refusals - an entry left permanently
 	// overdue would make the scheduler compute a zero wait and spin.
 	NextDue time.Time
-	// Misses counts consecutive polls in which videos.list did not return this
-	// id at all. A deleted or privated video is gone for good, and retrying it
-	// every minute until the 24-hour sweep wastes up to 1,440 quota units.
+	// Misses counts consecutive polls this entry was due for in which
+	// videos.list did not return it at all. A deleted or privated video is gone
+	// for good, and retrying it every minute until the 24-hour sweep wastes up
+	// to 1,440 quota units.
 	Misses int
+	// MembersOnly records that the id was last listed on the channel's
+	// members-only playlist rather than its public uploads. Discovery keeps it
+	// in step with whichever playlist the id currently sits on, because a
+	// creator can open a members-only waiting room to everyone before it
+	// starts, and that public stream must then be treated as one.
+	MembersOnly bool
 	// Retired entries are dropped on the next sweep.
 	Retired bool
 	// Announced latches which non-live kinds (scheduled, upload) have been
@@ -178,6 +188,16 @@ type watchlist struct {
 	// re-seed them from the uploads playlist they still sit on. It must
 	// outlive the discovery interval by a wide margin or the churn resumes.
 	retired map[string]time.Time
+	// retiredMembersOnly is the same for members-only ids dropped because
+	// videos.list would not answer for them. It is kept apart because it only
+	// speaks for the members-only playlist: if such an id turns up on the
+	// uploads playlist it has been made public, and must be seeded at once.
+	retiredMembersOnly map[string]time.Time
+	// membersServed records that videos.list has answered for at least one
+	// members-only id. Until it does, a members-only id that is never returned
+	// is evidence the API does not serve members-only content at all; after,
+	// it is just a video that was deleted or hidden, like any other.
+	membersServed bool
 
 	// wake lets a Seed that pulls work forward interrupt a parked poll loop.
 	// Without it the seconds of latency a push path buys are thrown away
@@ -192,12 +212,28 @@ func newWatchlist() *watchlist {
 		channelBoost: make(map[string]time.Time),
 		retired:      make(map[string]time.Time),
 		wake:         make(chan struct{}, 1),
+
+		retiredMembersOnly: make(map[string]time.Time),
 	}
 }
 
 // Seed adds a video id, or refreshes an existing one's boost. Called by
 // discovery, by WebSub pushes, and on startup from the ledger.
 func (w *watchlist) Seed(videoID, channelKey string, now time.Time, boost bool) {
+	w.seed(videoID, channelKey, now, boost, false)
+}
+
+// SeedMembersOnly is a boosted Seed for an id found on a channel's
+// members-only playlist.
+//
+// The flag is set under the seed's own lock rather than by a second call. The
+// seed wakes the state loop, and a poll that ran between the two could claim
+// the go-live as an ordinary broadcast and queue it for the worker.
+func (w *watchlist) SeedMembersOnly(videoID, channelKey string, now time.Time) {
+	w.seed(videoID, channelKey, now, true, true)
+}
+
+func (w *watchlist) seed(videoID, channelKey string, now time.Time, boost, membersOnly bool) {
 	if videoID == "" {
 		return
 	}
@@ -226,6 +262,12 @@ func (w *watchlist) Seed(videoID, channelKey string, now time.Time, boost bool) 
 	if boost {
 		e.BoostUntil = now.Add(ytSeedBoost)
 		e.NextDue = now
+	}
+	// Only ever raised here. A WebSub push or a reseed knows nothing about
+	// membership, so an ordinary Seed must not clear what discovery learned;
+	// SetMembersOnly is the one place that does.
+	if membersOnly {
+		e.MembersOnly = true
 	}
 	// Only a seed that actually pulled work forward is worth interrupting a
 	// parked loop for; re-seeding an existing entry without a boost changes
@@ -346,29 +388,52 @@ func (w *watchlist) Due(now time.Time) []string {
 // MarkMissing records that videos.list did not return these ids, backing them
 // off and eventually dropping them.
 //
+// Only an omission on a poll the entry was DUE for counts as a miss. Due fills
+// every call with every entry, so while anything else on the watchlist is hot
+// a missing id rides along every three seconds, and counting each of those
+// would spend the whole miss allowance in fifteen seconds instead of five
+// minutes. A rider that was not due learns nothing its own next poll will not.
+//
 // They are NOT added to the retired cache: a video that reappears (an
 // unlisted-then-public flip, a lifted region block) should be rediscoverable on
 // the next discovery pass, and the negative cache would blind us to it for a
 // day. A genuinely deleted video is off the uploads playlist too, so it simply
 // never comes back.
-func (w *watchlist) MarkMissing(ids []string, now time.Time) (dropped []string) {
+//
+// A members-only id is retired when videos.list has never answered for a
+// members-only id at all. Nothing guarantees that it serves members-only
+// content to a plain API key, and if it does not, the id stays on the
+// members-only playlist regardless: without the negative cache, discovery
+// would re-seed it on every pass, poll it hot for nothing and drop it again,
+// forever. The second return lists those ids so the caller can say so loudly -
+// it means members-only detection is not working. Once any members-only id has
+// been answered for, a missing one is simply deleted or hidden, and is treated
+// like every other missing video so a restored waiting room is rediscovered.
+func (w *watchlist) MarkMissing(ids []string, now time.Time) (dropped, droppedMembersOnly []string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	for _, id := range ids {
 		e, ok := w.entries[id]
-		if !ok {
+		if !ok || now.Before(e.NextDue) {
 			continue
 		}
 		e.Misses++
 		if e.Misses >= ytMaxConsecutiveMisses {
 			delete(w.entries, id)
 			dropped = append(dropped, id)
+			if e.MembersOnly && !w.membersServed {
+				w.retiredMembersOnly[id] = now
+				droppedMembersOnly = append(droppedMembersOnly, id)
+			}
 			continue
 		}
 		e.NextDue = now.Add(ytIntervalCool)
 	}
-	return dropped
+	if len(droppedMembersOnly) > 0 {
+		w.pruneRetiredLocked(now)
+	}
+	return dropped, droppedMembersOnly
 }
 
 // Defer pushes back the next poll for a set of ids. Used on every non-success
@@ -400,6 +465,9 @@ func (w *watchlist) Observe(videoID string, state State, scheduled time.Time, no
 		return false
 	}
 	e.Misses = 0
+	if e.MembersOnly {
+		w.membersServed = true
+	}
 	if state != StateUnknown {
 		if state == StateLive {
 			e.SawLive = true
@@ -516,25 +584,41 @@ func (w *watchlist) Retired(videoID string, now time.Time) bool {
 	return ok && now.Sub(t) < ytRetiredMemory
 }
 
-// pruneRetiredLocked expires the negative cache and enforces its cap. Callers
-// must hold w.mu.
+// RetiredMembersOnly reports whether a members-only id was dropped recently
+// because videos.list would not answer for it. Only the members-only half of
+// discovery consults it.
+func (w *watchlist) RetiredMembersOnly(videoID string, now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	t, ok := w.retiredMembersOnly[videoID]
+	return ok && now.Sub(t) < ytRetiredMemory
+}
+
+// pruneRetiredLocked expires the negative caches and enforces their cap.
+// Callers must hold w.mu.
 func (w *watchlist) pruneRetiredLocked(now time.Time) {
-	for id, t := range w.retired {
+	pruneNegativeCache(w.retired, now)
+	pruneNegativeCache(w.retiredMembersOnly, now)
+}
+
+// pruneNegativeCache expires one negative cache and enforces ytRetiredMax.
+func pruneNegativeCache(cache map[string]time.Time, now time.Time) {
+	for id, t := range cache {
 		if now.Sub(t) >= ytRetiredMemory {
-			delete(w.retired, id)
+			delete(cache, id)
 		}
 	}
 	// If the cap is still exceeded, drop the oldest entries. Losing one only
 	// costs a redundant re-seed, so an approximate policy is fine.
-	for len(w.retired) > ytRetiredMax {
+	for len(cache) > ytRetiredMax {
 		var oldestID string
 		var oldest time.Time
-		for id, t := range w.retired {
+		for id, t := range cache {
 			if oldestID == "" || t.Before(oldest) {
 				oldestID, oldest = id, t
 			}
 		}
-		delete(w.retired, oldestID)
+		delete(cache, oldestID)
 	}
 }
 
@@ -601,6 +685,27 @@ func (w *watchlist) Known(videoID string) bool {
 	defer w.mu.Unlock()
 	_, ok := w.entries[videoID]
 	return ok
+}
+
+// SetMembersOnly records which playlist discovery last found a tracked id on.
+// A no-op for an id that is not tracked.
+func (w *watchlist) SetMembersOnly(videoID string, membersOnly bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if e, ok := w.entries[videoID]; ok {
+		e.MembersOnly = membersOnly
+	}
+}
+
+// MembersOnly reports whether a tracked id was last listed on its channel's
+// members-only playlist. False for an id that is not tracked.
+func (w *watchlist) MembersOnly(videoID string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if e, ok := w.entries[videoID]; ok {
+		return e.MembersOnly
+	}
+	return false
 }
 
 // ChannelOf returns the channel key an id was seeded under.

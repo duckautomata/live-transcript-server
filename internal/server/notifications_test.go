@@ -1456,6 +1456,136 @@ func TestObserveLiveQueuesForWorkerOnlyWhenEnabled(t *testing.T) {
 	ws.none(t)
 }
 
+// The worker refuses members-only content on purpose, so queueing a members-only
+// stream buys nothing but an hour of futile probes. It must still be announced:
+// skipping the queue is not skipping the detection.
+func TestObserveLiveNeverQueuesMembersOnly(t *testing.T) {
+	app, mux, ws := notifDetectApp(t)
+	ctx := context.Background()
+	app.QueueIncoming = true
+
+	const liveID = "444444444444444444"
+	notifCreate(t, mux, "doki", notifRule("Go live", []string{"live"}, notifWebhookFor(liveID)))
+
+	const membersURL = "https://www.youtube.com/watch?v=members-1"
+	if err := app.ObserveLive(ctx, livedetect.Broadcast{
+		Platform: livedetect.PlatformYouTube, ChannelKey: "doki", ID: "members-1", URL: membersURL,
+		Title: "Members karaoke", StartedAt: time.Now(), MembersOnly: true,
+	}, livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive (members-only): %v", err)
+	}
+	if post := ws.next(t); post.Path != "/api/webhooks/"+liveID+"/"+notifWebhookToken {
+		t.Fatalf("posted to %q, want the live rule's webhook", post.Path)
+	}
+	if det, _ := app.Store.GetDetection(ctx, "youtube", "members-1"); det == nil {
+		t.Fatal("a members-only stream must still be recorded")
+	}
+	if urls, _ := app.Store.GetIncomingStreams(ctx, "doki"); len(urls) != 0 {
+		t.Fatalf("members-only stream queued %v for the worker", urls)
+	}
+
+	// Every later poll of the still members-only stream loses the claim, and
+	// must not queue it either.
+	if err := app.ObserveLive(ctx, livedetect.Broadcast{
+		Platform: livedetect.PlatformYouTube, ChannelKey: "doki", ID: "members-1", URL: membersURL,
+		Title: "Members karaoke", StartedAt: time.Now(), MembersOnly: true,
+	}, livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive (members-only replay): %v", err)
+	}
+	if urls, _ := app.Store.GetIncomingStreams(ctx, "doki"); len(urls) != 0 {
+		t.Fatalf("a members-only replay queued %v for the worker", urls)
+	}
+
+	// Opened to everyone while live: later observations lose the claim, and
+	// must queue it rather than leave a public stream behind - once. The queue
+	// merges a repeated URL, so the first entry is taken off (as the worker
+	// does) before the second observation, which must not put it back.
+	opened := livedetect.Broadcast{
+		Platform: livedetect.PlatformYouTube, ChannelKey: "doki", ID: "members-1", URL: membersURL,
+		Title: "Members karaoke", StartedAt: time.Now(),
+	}
+	if err := app.ObserveLive(ctx, opened, livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive (opened): %v", err)
+	}
+	if urls, _ := app.Store.GetIncomingStreams(ctx, "doki"); len(urls) != 1 || urls[0] != membersURL {
+		t.Fatalf("incoming = %v, want the opened stream queued", urls)
+	}
+	if _, err := app.Store.DeleteIncomingStream(ctx, "doki", membersURL); err != nil {
+		t.Fatalf("clearing the queue: %v", err)
+	}
+	if err := app.ObserveLive(ctx, opened, livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive (opened, again): %v", err)
+	}
+	if urls, _ := app.Store.GetIncomingStreams(ctx, "doki"); len(urls) != 0 {
+		t.Fatalf("the opened stream was queued again: %v", urls)
+	}
+
+	// Once it has ended there is nothing left to open, and a stale
+	// observation must not queue it.
+	const endedURL = "https://www.youtube.com/watch?v=members-2"
+	ended := livedetect.Broadcast{
+		Platform: livedetect.PlatformYouTube, ChannelKey: "doki", ID: "members-2", URL: endedURL,
+		StartedAt: time.Now(), MembersOnly: true,
+	}
+	if err := app.ObserveLive(ctx, ended, livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive (members-2): %v", err)
+	}
+	if err := app.ObserveEnded(ctx, livedetect.PlatformYouTube, "members-2"); err != nil {
+		t.Fatalf("ObserveEnded: %v", err)
+	}
+	ended.MembersOnly = false
+	if err := app.ObserveLive(ctx, ended, livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive (members-2 after end): %v", err)
+	}
+	if urls, _ := app.Store.GetIncomingStreams(ctx, "doki"); len(urls) != 0 {
+		t.Fatalf("an ended members-only stream was queued: %v", urls)
+	}
+
+	// The same flag off is an ordinary stream, and is queued.
+	const publicURL = "https://www.youtube.com/watch?v=public-1"
+	if err := app.ObserveLive(ctx, livedetect.Broadcast{
+		Platform: livedetect.PlatformYouTube, ChannelKey: "doki", ID: "public-1", URL: publicURL,
+		Title: "Public stream", StartedAt: time.Now(),
+	}, livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive (public): %v", err)
+	}
+	if urls, _ := app.Store.GetIncomingStreams(ctx, "doki"); len(urls) != 1 || urls[0] != publicURL {
+		t.Fatalf("incoming = %v, want exactly [%s]", urls, publicURL)
+	}
+}
+
+// queueMembersOnly is the switch for a worker that can capture members-only
+// streams: with it on, a members-only stream is queued on its claim like any
+// other, and it does nothing without queueIncoming.
+func TestObserveLiveQueuesMembersOnlyWhenConfigured(t *testing.T) {
+	app, _ := setupDetectApp(t)
+	ctx := context.Background()
+	app.QueueMembersOnly = true
+
+	members := func(id string) livedetect.Broadcast {
+		return livedetect.Broadcast{
+			Platform: livedetect.PlatformYouTube, ChannelKey: "doki", ID: id,
+			URL: "https://www.youtube.com/watch?v=" + id, StartedAt: time.Now(), MembersOnly: true,
+		}
+	}
+
+	if err := app.ObserveLive(ctx, members("mo-shadow"), livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive (shadow): %v", err)
+	}
+	if urls, _ := app.Store.GetIncomingStreams(ctx, "doki"); len(urls) != 0 {
+		t.Fatalf("queueMembersOnly without queueIncoming queued %v", urls)
+	}
+
+	app.QueueIncoming = true
+	if err := app.ObserveLive(ctx, members("mo-1"), livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive (members-only): %v", err)
+	}
+	const want = "https://www.youtube.com/watch?v=mo-1"
+	if urls, _ := app.Store.GetIncomingStreams(ctx, "doki"); len(urls) != 1 || urls[0] != want {
+		t.Fatalf("incoming = %v, want exactly [%s]", urls, want)
+	}
+}
+
 func TestObserveLiveDispatchesToMatchingEnabledRules(t *testing.T) {
 	app, mux, ws := notifDetectApp(t)
 	ctx := context.Background()

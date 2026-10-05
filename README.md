@@ -111,8 +111,11 @@ or short being published.
 
 Every observation is recorded once in a ledger and then does three things:
 
-1. **Queues the stream for the worker** - only for a live broadcast, and only
-   when `liveDetect.queueIncoming` is on. This is the same queue a Pingcord
+1. **Queues the stream for the worker** - only for a live broadcast, only
+   when `liveDetect.queueIncoming` is on, and not for a members-only YouTube
+   broadcast, which the worker refuses, unless `liveDetect.queueMembersOnly`
+   is on too (or it is opened to everyone while live, when it is queued then).
+   This is the same queue a Pingcord
    announcement picked up by the Discord bot feeds, so once detection is
    trusted the bot becomes redundant. With `queueIncoming` off, detection is an
    observer: it never queues work, never writes the `streams` table, and never
@@ -169,9 +172,18 @@ Two rules hold the design together:
   that is still live.
 
 Discovery is the one cost that scales with channel count and is paid whether or
-not anyone streams (one quota unit per channel per cycle), so `discoverySeconds`
-must be scaled with the number of YouTube channels; the startup log prints the
-projection and warns when it leaves too little headroom for the fast ladder.
+not anyone streams (up to two quota units per channel per cycle), so
+`discoverySeconds` must be scaled with the number of YouTube channels; the
+startup log prints the projection and warns when it leaves too little headroom
+for the fast ladder.
+
+Each discovery pass reads two playlists per channel: the public uploads
+playlist and the members-only playlist (`UUMO...`). YouTube lists members-only
+streams, waiting rooms, videos and shorts only in the latter - never in the
+uploads playlist or the channel feed WebSub watches - so reading it is how they
+are detected. Most channels have no members-only playlist; YouTube answers 404
+for those, and discovery then asks only once an hour. The members-only reads
+report their health as their own leg, `youtube-members-discovery`.
 
 Latency comes from knowing the video id *before* the stream starts. Every
 premiere and any stream with a waiting room is on the watchlist long in advance,

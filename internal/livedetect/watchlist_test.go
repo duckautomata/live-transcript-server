@@ -504,7 +504,7 @@ func TestMissingVideosAreDroppedNotRetriedForever(t *testing.T) {
 	now := base
 	for i := 1; i < ytMaxConsecutiveMisses; i++ {
 		now = now.Add(time.Minute)
-		if dropped := w.MarkMissing([]string{"deleted"}, now); len(dropped) != 0 {
+		if dropped, _ := w.MarkMissing([]string{"deleted"}, now); len(dropped) != 0 {
 			t.Fatalf("dropped after only %d misses: %v", i, dropped)
 		}
 		if !w.Known("deleted") {
@@ -513,7 +513,7 @@ func TestMissingVideosAreDroppedNotRetriedForever(t *testing.T) {
 	}
 
 	now = now.Add(time.Minute)
-	if dropped := w.MarkMissing([]string{"deleted"}, now); len(dropped) != 1 {
+	if dropped, _ := w.MarkMissing([]string{"deleted"}, now); len(dropped) != 1 {
 		t.Fatalf("dropped = %v, want the entry gone after %d misses", dropped, ytMaxConsecutiveMisses)
 	}
 	if w.Known("deleted") {
@@ -523,6 +523,151 @@ func TestMissingVideosAreDroppedNotRetriedForever(t *testing.T) {
 	// be rediscoverable, and the negative cache would blind us for a day.
 	if w.Retired("deleted", now) {
 		t.Error("a missing video must stay rediscoverable, not be negatively cached")
+	}
+}
+
+// While videos.list has never answered for a members-only id, a missing one is
+// evidence it does not serve them at all - and such an id never leaves its
+// playlist, so dropping it without a negative cache means discovery re-seeds
+// it on the next pass, polls it hot and drops it again, forever. It has to be
+// reported too, because it means members-only detection is not working.
+func TestMissingMembersOnlyVideosAreRetiredUntilOneIsServed(t *testing.T) {
+	w := newWatchlist()
+	w.SeedMembersOnly("members", "doki", base)
+	w.Seed("public", "doki", base, false)
+
+	now := base
+	var dropped, droppedMembersOnly []string
+	for range ytMaxConsecutiveMisses {
+		now = now.Add(time.Minute)
+		dropped, droppedMembersOnly = w.MarkMissing([]string{"members", "public"}, now)
+	}
+	if len(dropped) != 2 {
+		t.Fatalf("dropped = %v, want both entries gone after %d misses", dropped, ytMaxConsecutiveMisses)
+	}
+	if len(droppedMembersOnly) != 1 || droppedMembersOnly[0] != "members" {
+		t.Fatalf("droppedMembersOnly = %v, want only the members-only id", droppedMembersOnly)
+	}
+	if !w.RetiredMembersOnly("members", now) {
+		t.Error("a dropped members-only id must be negatively cached so discovery stops re-seeding it")
+	}
+	// The members-only cache is its own: the id turning up on the uploads
+	// playlist (made public) must not be blocked by it.
+	if w.Retired("members", now) {
+		t.Error("a members-only drop must not land in the shared negative cache")
+	}
+	if w.Retired("public", now) || w.RetiredMembersOnly("public", now) {
+		t.Error("an ordinary missing video must stay rediscoverable")
+	}
+}
+
+// Once videos.list has answered for any members-only id, a missing one is
+// just deleted or hidden, like any other video. Retiring it would hide a
+// waiting room the creator briefly took down and then restored for a day, and
+// warning about it would be a false alarm.
+func TestMissingMembersOnlyVideoIsNotRetiredOnceMembersAreServed(t *testing.T) {
+	w := newWatchlist()
+	w.SeedMembersOnly("served", "doki", base)
+	w.SeedMembersOnly("hidden", "doki", base)
+	w.Observe("served", StateUpcoming, base.Add(time.Hour), base)
+
+	now := base
+	var dropped, droppedMembersOnly []string
+	for range ytMaxConsecutiveMisses {
+		now = now.Add(time.Minute)
+		dropped, droppedMembersOnly = w.MarkMissing([]string{"hidden"}, now)
+	}
+	if len(dropped) != 1 {
+		t.Fatalf("dropped = %v, want the missing id gone after %d misses", dropped, ytMaxConsecutiveMisses)
+	}
+	if len(droppedMembersOnly) != 0 {
+		t.Errorf("droppedMembersOnly = %v; members-only content is plainly being served", droppedMembersOnly)
+	}
+	if w.RetiredMembersOnly("hidden", now) || w.Retired("hidden", now) {
+		t.Error("a missing members-only id must stay rediscoverable once members-only content is served")
+	}
+}
+
+// Discovery owns the members-only flag, and only discovery may clear it: a
+// WebSub push or a reseed knows nothing about membership.
+func TestMembersOnlyFlagIsOnlyClearedExplicitly(t *testing.T) {
+	w := newWatchlist()
+	w.SeedMembersOnly("frame", "doki", base)
+	if !w.MembersOnly("frame") {
+		t.Fatal("SeedMembersOnly must flag the entry")
+	}
+
+	// A later ordinary seed (a hub push, say) must not wipe what discovery knew.
+	w.Seed("frame", "doki", base.Add(time.Minute), true)
+	if !w.MembersOnly("frame") {
+		t.Fatal("an ordinary Seed must not clear the members-only flag")
+	}
+
+	// The creator opened the waiting room to everyone: discovery found it on
+	// the uploads playlist.
+	w.SetMembersOnly("frame", false)
+	if w.MembersOnly("frame") {
+		t.Fatal("SetMembersOnly(false) must clear the flag")
+	}
+
+	// Flagging an untracked id creates nothing, and it is never members-only.
+	w.SetMembersOnly("untracked", true)
+	if w.MembersOnly("untracked") || w.Known("untracked") {
+		t.Error("SetMembersOnly must not create an entry")
+	}
+
+	// SeedMembersOnly is boosted: the id may already be live.
+	w2 := newWatchlist()
+	w2.SeedMembersOnly("fresh", "doki", base)
+	if due := w2.Due(base); len(due) != 1 || due[0] != "fresh" {
+		t.Fatalf("Due = %v, want the freshly seeded members-only id polled immediately", due)
+	}
+	if until := w2.entries["fresh"].BoostUntil; !until.Equal(base.Add(ytSeedBoost)) {
+		t.Errorf("BoostUntil = %v, want the seed boost window %v", until, base.Add(ytSeedBoost))
+	}
+	select {
+	case <-w2.Wake():
+	default:
+		t.Error("seeding a new members-only id must wake the state loop")
+	}
+}
+
+// Due fills every call with every entry, so while another entry is hot a
+// missing id rides along on a call every three seconds. Counting each of those
+// as a miss spent the whole allowance in fifteen seconds - and a waiting room
+// briefly hidden by its creator was dropped before the miss window its own
+// comment promises. Only the polls the id was due for may count.
+func TestRidingAlongOnHotCallsIsNotAMiss(t *testing.T) {
+	w := newWatchlist()
+	w.Seed("hot", "doki", base, true)
+	w.Seed("gone", "doki", base, false)
+
+	now := base
+	for {
+		due := w.Due(now)
+		if len(due) != 2 {
+			t.Fatalf("Due(%v) = %v, want the missing id riding along on the hot call", now.Sub(base), due)
+		}
+		w.Observe("hot", StateUpcoming, base.Add(time.Hour), now)
+		dropped, _ := w.MarkMissing([]string{"gone"}, now)
+		if len(dropped) > 0 {
+			break
+		}
+		if now.Sub(base) > time.Hour {
+			t.Fatal("the missing id was never dropped")
+		}
+		now = now.Add(ytIntervalHot)
+	}
+
+	// Dropped on its fifth DUE poll: the first at seeding, then one per miss
+	// backoff - not after its fifth three-second ride.
+	want := base.Add((ytMaxConsecutiveMisses - 1) * ytIntervalCool)
+	if !now.Equal(want) {
+		t.Errorf("dropped after %v, want %v (%d due polls at the miss cadence)",
+			now.Sub(base), want.Sub(base), ytMaxConsecutiveMisses)
+	}
+	if w.Known("gone") || !w.Known("hot") {
+		t.Error("only the missing id must be dropped")
 	}
 }
 

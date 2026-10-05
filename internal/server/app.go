@@ -75,6 +75,15 @@ type App struct {
 	// QueueIncoming is liveDetect.queueIncoming: whether a detected live
 	// broadcast is queued for the worker, or only observed and announced.
 	QueueIncoming bool
+	// QueueMembersOnly is liveDetect.queueMembersOnly: whether, with
+	// QueueIncoming, a members-only broadcast is queued too.
+	QueueMembersOnly bool
+	// membersSkipped holds the live broadcasts (membersSkipKey) whose claim
+	// kept them off the worker queue for being members-only, so one opened to
+	// everyone afterwards can still be queued. In memory on purpose: it only
+	// has to outlive a broadcast, and losing it to a restart costs no more
+	// than that late queueing.
+	membersSkipped sync.Map
 	// TwitchStreamLookup fills in the title of a Twitch broadcast that was
 	// detected without one (EventSub carries none), and its category along
 	// with it. Called after the ledger claim and the queue write, before the
@@ -153,6 +162,7 @@ func NewApp(cfg config.Config, st *store.Store, tempDir, version, buildTime stri
 		Version:           version,
 		BuildTime:         buildTime,
 		QueueIncoming:     cfg.LiveDetect.QueueIncoming,
+		QueueMembersOnly:  cfg.LiveDetect.QueueMembersOnly,
 		Accounts:          cfg.Accounts,
 		authLimits:        newAuthLimits(cfg.Accounts),
 	}

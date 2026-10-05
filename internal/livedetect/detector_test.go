@@ -446,6 +446,11 @@ func TestStalenessWindowFollowsEachLegsCadence(t *testing.T) {
 	if got := d.staleAfter(MechanismYouTubeWebSub); got != 0 {
 		t.Errorf("a push leg must never be judged stale, got %v", got)
 	}
+	// The members-only half only goes quiet when the uploads half does, and
+	// that leg already alerts; judging it stale would alert twice per outage.
+	if got := d.staleAfter(MechanismYouTubeMembersDiscover); got != 0 {
+		t.Errorf("the members-only discovery leg must never be judged stale on its own, got %v", got)
+	}
 	// A frequent leg still gets the configured floor rather than 3x a few seconds.
 	if got := d.staleAfter(MechanismTwitchPoll); got < time.Duration(d.staleAlertMinutes())*time.Minute {
 		t.Errorf("poll leg stale window = %v, below the configured floor", got)
@@ -749,10 +754,11 @@ func TestQuotaProjectionSuggestsASaferCadence(t *testing.T) {
 	if len(d.ytTargets) != 6 {
 		t.Fatalf("expected 6 youtube targets, got %d", len(d.ytTargets))
 	}
-	// 6 channels x 720 cycles/day = 4320 units, which is over half of 8000.
+	// 6 channels x 2 playlists x 720 cycles/day = 8640 units, which is over
+	// half of 8000 - over all of it, in fact.
 	cycles := int(24 * time.Hour / d.ytDiscoveryInterval())
-	if got := len(d.ytTargets) * cycles; got != 4320 {
-		t.Fatalf("projected discovery = %d units/day, expected 4320", got)
+	if got := ytDiscoveryCallsPerChannel * len(d.ytTargets) * cycles; got != 8640 {
+		t.Fatalf("projected discovery = %d units/day, expected 8640", got)
 	}
 	// The projection must not panic and must run on a nil alerts client.
 	d.logQuotaProjection()

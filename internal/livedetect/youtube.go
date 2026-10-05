@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -25,6 +26,39 @@ const videosListBatchSize = 50
 // 10,000-unit daily budget, while search.list has its own 100-call bucket, and
 // exhausting one must not stop the other.
 var errYouTubeQuota = errors.New("youtube: quota exceeded")
+
+// youtubeStatusError is any other non-2xx answer. Only the path and status
+// survive: the body echoes the request, which carries the key. The status is
+// kept as a field so a caller can tell "this playlist does not exist" from a
+// failure without matching on the message.
+type youtubeStatusError struct {
+	path   string
+	status int
+	// rateLimited marks a 403 whose reason is a short-term rate limit. It
+	// passes on its own, so a caller must retry it rather than read the 403
+	// as "this resource is forbidden".
+	rateLimited bool
+}
+
+func (e *youtubeStatusError) Error() string {
+	return fmt.Sprintf("youtube %s returned status %d", e.path, e.status)
+}
+
+// youtubeStatus returns the HTTP status behind a non-2xx error, or 0 when err
+// is not one (a transport failure, a decode error, a quota refusal).
+func youtubeStatus(err error) int {
+	var se *youtubeStatusError
+	if errors.As(err, &se) {
+		return se.status
+	}
+	return 0
+}
+
+// youtubeRateLimited reports whether err is a 403 rate-limit refusal.
+func youtubeRateLimited(err error) bool {
+	var se *youtubeStatusError
+	return errors.As(err, &se) && se.rateLimited
+}
 
 // YouTubeClient calls the YouTube Data API v3 with an API key.
 type YouTubeClient struct {
@@ -215,7 +249,11 @@ func (c *YouTubeClient) get(ctx context.Context, path string, q url.Values, out 
 		if resp.StatusCode == http.StatusForbidden && isQuotaExceeded(body) {
 			return fmt.Errorf("%w (%s)", errYouTubeQuota, path)
 		}
-		return fmt.Errorf("youtube %s returned status %d", path, resp.StatusCode)
+		return &youtubeStatusError{
+			path:        path,
+			status:      resp.StatusCode,
+			rateLimited: resp.StatusCode == http.StatusForbidden && isRateLimited(body),
+		}
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out); err != nil {
 		return fmt.Errorf("decode youtube response: %w", err)
@@ -228,6 +266,17 @@ func (c *YouTubeClient) get(ctx context.Context, path string, q url.Values, out 
 // permission problem (retrying will never help either, but the operator needs
 // to hear a different message).
 func isQuotaExceeded(body []byte) bool {
+	return hasErrorReason(body, "quotaExceeded", "dailyLimitExceeded")
+}
+
+// isRateLimited reports whether a 403 body carries a short-term rate-limit
+// reason, as opposed to a refusal that retrying will never change.
+func isRateLimited(body []byte) bool {
+	return hasErrorReason(body, "rateLimitExceeded", "userRateLimitExceeded")
+}
+
+// hasErrorReason reports whether a Data API error body lists any of reasons.
+func hasErrorReason(body []byte, reasons ...string) bool {
 	var e struct {
 		Error struct {
 			Errors []struct {
@@ -239,7 +288,7 @@ func isQuotaExceeded(body []byte) bool {
 		return false
 	}
 	for _, item := range e.Error.Errors {
-		if item.Reason == "quotaExceeded" || item.Reason == "dailyLimitExceeded" {
+		if slices.Contains(reasons, item.Reason) {
 			return true
 		}
 	}
@@ -287,8 +336,26 @@ func UploadsPlaylistID(channelID string) string {
 	return "UU" + channelID[2:]
 }
 
+// MembersOnlyPlaylistID derives a channel's members-only playlist id from its
+// channel id, by the same kind of prefix swap: "UC" -> "UUMO".
+//
+// The uploads playlist leaves members-only content out entirely - streams,
+// waiting rooms, VODs, videos and shorts alike - and so does the channel feed
+// WebSub watches. This auto-generated playlist is the only place YouTube lists
+// them, and it holds all of them: UUMO is the union of UUMV (live), UUMF
+// (videos) and UUMS (shorts), so one call covers every kind. YouTube creates it
+// only once a channel has members-only content, so it legitimately does not
+// exist for most channels.
+func MembersOnlyPlaylistID(channelID string) string {
+	if len(channelID) < 2 || !strings.HasPrefix(channelID, "UC") {
+		return ""
+	}
+	return "UUMO" + channelID[2:]
+}
+
 // PlaylistItems returns the most recent video ids on a playlist, newest first.
-// Used against the uploads playlist to discover video ids we have not seen.
+// Used against the uploads and members-only playlists to discover video ids
+// we have not seen.
 //
 // Costs one unit per call and cannot batch channels, so this is the slow
 // discovery tier; the whole returned page is diffed rather than just the top

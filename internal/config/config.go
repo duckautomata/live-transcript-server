@@ -123,10 +123,10 @@ type LiveDetectYouTubeConfig struct {
 	// WebSubSecret is the base secret for per-topic HMAC keys.
 	// Generate with: openssl rand -hex 32
 	WebSubSecret string `yaml:"webSubSecret"`
-	// DiscoverySeconds is how often the uploads playlist is scanned for video
-	// ids we have not seen. This is the latency floor for an UNSCHEDULED
-	// surprise go-live; scheduled streams and premieres are already on the
-	// watchlist and are caught by the state poller in seconds.
+	// DiscoverySeconds is how often the uploads and members-only playlists are
+	// scanned for video ids we have not seen. This is the latency floor for an
+	// UNSCHEDULED surprise go-live; scheduled streams and premieres are already
+	// on the watchlist and are caught by the state poller in seconds.
 	DiscoverySeconds int `yaml:"discoverySeconds"`
 	// DailyUnitBudget caps quota spend, leaving headroom under the API's
 	// 10,000/day project allocation for retries and restarts.
@@ -150,8 +150,15 @@ type LiveDetectConfig struct {
 	// QueueIncoming makes a detected live broadcast queue its URL for the
 	// worker, exactly as a Pingcord announcement would. Off by default so an
 	// existing shadow-mode deployment keeps observing until the operator has
-	// read the soak results and opts in.
+	// read the soak results and opts in. A members-only YouTube broadcast is
+	// queued only with QueueMembersOnly, or once it is opened to everyone
+	// while live.
 	QueueIncoming bool `yaml:"queueIncoming"`
+	// QueueMembersOnly also queues members-only YouTube broadcasts when
+	// QueueIncoming is set. Off by default: the worker refuses members-only
+	// content, so a queue entry would buy nothing but an hour of futile probes.
+	// Turn it on together with a worker that can capture members-only streams.
+	QueueMembersOnly bool `yaml:"queueMembersOnly"`
 	// PublicBaseURL is this server's externally reachable base URL, e.g.
 	// "https://api.example.com". Required for EventSub and WebSub, which
 	// register an absolute callback with a third party and therefore cannot

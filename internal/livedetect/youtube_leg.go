@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 	"time"
 
@@ -22,6 +23,17 @@ const (
 	// ytRestartDiscovery is the discovery cadence while a channel is inside
 	// its post-broadcast restart window.
 	ytRestartDiscovery = 30 * time.Second
+	// ytDiscoveryCallsPerChannel is the most one discovery pass spends on a
+	// channel: its uploads playlist and its members-only playlist.
+	ytDiscoveryCallsPerChannel = 2
+	// ytMembersAbsentRetry is how long discovery waits before asking again
+	// for a members-only playlist that did not exist. YouTube creates one only
+	// once a channel posts members-only content, so for most channels it never
+	// exists, and asking every pass would double their discovery bill for
+	// nothing. The price is that a channel's very first members-only item can
+	// wait this long to be found; every one after it is found on the normal
+	// cadence.
+	ytMembersAbsentRetry = time.Hour
 	// webSubAbortAfterConsecutiveFailures stops a renewal pass once the hub
 	// has clearly refused everything, rather than working through the rest at
 	// twenty seconds apiece.
@@ -128,15 +140,23 @@ func (d *Detector) youtubeStateOnce() {
 		}
 	}
 	if len(missing) > 0 {
-		// An id the API declines to return (deleted, private, region-blocked,
-		// or made members-only) is a SILENT miss: the call succeeded, so the
-		// leg still reports healthy. Counting it is the only way this becomes
+		// An id the API declines to return (deleted, made private,
+		// region-blocked) is a SILENT miss: the call succeeded, so the leg
+		// still reports healthy. Counting it is the only way this becomes
 		// visible short of the search audit.
 		metrics.LiveDetectPolls.WithLabelValues(MechanismYouTubeState, "unreturned").Add(float64(len(missing)))
-		if dropped := d.watch.MarkMissing(missing, now); len(dropped) > 0 {
+		dropped, droppedMembersOnly := d.watch.MarkMissing(missing, now)
+		if len(dropped) > 0 {
 			slog.Info("dropping videos the API has stopped returning",
 				"func", "Detector.youtubeStateOnce", "ids", dropped,
 				"after_consecutive_misses", ytMaxConsecutiveMisses)
+		}
+		// Members-only content is expected to be returned like anything else.
+		// If it is not, members-only detection cannot work at all, and the
+		// only symptom would otherwise be notifications that never arrive.
+		if len(droppedMembersOnly) > 0 {
+			slog.Warn("videos.list is not returning members-only videos; their streams cannot be detected",
+				"func", "Detector.youtubeStateOnce", "ids", droppedMembersOnly)
 		}
 		slog.Debug("youtube did not return watched ids", "func", "Detector.youtubeStateOnce", "ids", missing)
 	}
@@ -191,6 +211,7 @@ func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Ti
 			Description:  v.Description(),
 			StartedAt:    v.StartedAt(),
 			SawScheduled: sawScheduled,
+			MembersOnly:  d.watch.MembersOnly(v.ID),
 		}, MechanismYouTubeState)
 
 	case StateEnded:
@@ -315,14 +336,19 @@ func (d *Detector) announceUpload(v YTVideo, channelKey string, now time.Time) {
 	})
 }
 
-// runYouTubeDiscovery scans each channel's uploads playlist for video ids we
-// have not seen.
+// runYouTubeDiscovery scans each channel's uploads and members-only playlists
+// for video ids we have not seen.
 //
 // This is the latency floor for an UNSCHEDULED surprise go-live. Anything
 // scheduled - every premiere, and any stream with a waiting room - is already
 // on the watchlist long before it starts and is caught by the state poller in
 // seconds, so this leg only has to cover the case where a channel goes live
 // with no prior frame at all.
+//
+// For MEMBERS-ONLY content it is the only source of ids at all. The uploads
+// playlist and the channel feed WebSub watches both leave members-only items
+// out, so a members-only waiting room or video reaches the watchlist only when
+// this leg reads the members-only playlist.
 func (d *Detector) runYouTubeDiscovery() {
 	if !d.sleep(2 * time.Second) {
 		return
@@ -365,6 +391,10 @@ func (d *Detector) youtubeDiscoverOnce() {
 	defer cancel()
 
 	anyOK := false
+	// The members-only half reaches one verdict per pass, under its own
+	// mechanism; see MechanismYouTubeMembersDiscover for why.
+	membersOK, membersFailures := 0, 0
+	var membersErr error
 	for _, channelID := range channels {
 		playlist := UploadsPlaylistID(channelID)
 		if playlist == "" {
@@ -387,37 +417,179 @@ func (d *Detector) youtubeDiscoverOnce() {
 		anyOK = true
 
 		key := d.ytTargets[channelID]
-		// The WHOLE page is diffed, never just the newest entry: a stream
-		// scheduled in advance sorts by publish date and can sit well down the
-		// list by the time it actually starts.
-		fresh := 0
-		for _, id := range ids {
-			if d.watch.Known(id) {
-				continue
-			}
-			// An id we already swept is still sitting on the uploads playlist;
-			// re-seeding it would restart its fast-poll window on every
-			// discovery pass forever.
-			if d.watch.Retired(id, now) {
-				continue
-			}
-			// Boost a newly discovered id so its first state poll is immediate
-			// - the id may already be live.
-			d.watch.Seed(id, key, now, true)
-			fresh++
-		}
-		if fresh > 0 {
+		if fresh := d.seedDiscovered(ids, key, false, now); fresh > 0 {
 			slog.Info("youtube discovery found new videos", "func", "Detector.youtubeDiscoverOnce",
 				"key", key, "count", fresh, "watchlist", d.watch.Size())
 		}
+
+		outcome, err := d.discoverMembersOnly(ctx, channelID, key, ids, now)
+		if outcome == membersRefused {
+			break
+		}
+		if outcome == membersFailed {
+			if membersFailures == 0 {
+				membersErr = err
+			}
+			membersFailures++
+			continue
+		}
+		membersOK++
 	}
 
 	if anyOK {
 		d.recordSuccess(MechanismYouTubeDiscover)
 	}
+	switch {
+	case membersFailures == 1:
+		d.recordFailure(MechanismYouTubeMembersDiscover, membersErr)
+	case membersFailures > 1:
+		d.recordFailure(MechanismYouTubeMembersDiscover,
+			fmt.Errorf("%d members-only playlists could not be read; the first: %w", membersFailures, membersErr))
+	case membersOK > 0:
+		d.recordSuccess(MechanismYouTubeMembersDiscover)
+	}
 	if dropped := d.watch.Sweep(now); len(dropped) > 0 {
 		slog.Debug("watchlist swept", "func", "Detector.youtubeDiscoverOnce", "dropped", len(dropped))
 	}
+}
+
+// membersAbsence is a channel whose members-only playlist could not be read.
+type membersAbsence struct {
+	// retry is when discovery next asks for the playlist.
+	retry time.Time
+	// status is the answer that put the channel here, so a change - above all
+	// a 404 turning into a 403 - is logged rather than swallowed by the backoff.
+	status int
+}
+
+// membersOutcome is what the members-only half of discovery did for a channel.
+type membersOutcome int
+
+const (
+	// membersDone covers a read, and a legitimate skip: no members-only
+	// playlist, or still backing off from not having one.
+	membersDone membersOutcome = iota
+	// membersFailed is a read that failed; the error says why.
+	membersFailed
+	// membersRefused is the unit budget refusing the call.
+	membersRefused
+)
+
+// discoverMembersOnly scans one channel's members-only playlist. publicIDs is
+// the page just read from the same channel's uploads playlist.
+//
+// It runs only after that uploads read succeeded, which is what lets a 403 or
+// 404 here be read as "this playlist", never "this key": the same key worked a
+// moment ago, and had it not, that failure was recorded.
+func (d *Detector) discoverMembersOnly(ctx context.Context, channelID, key string, publicIDs []string, now time.Time) (membersOutcome, error) {
+	playlist := MembersOnlyPlaylistID(channelID)
+	if playlist == "" {
+		return membersDone, nil
+	}
+	if a, absent := d.ytMembersAbsent[channelID]; absent && now.Before(a.retry) {
+		return membersDone, nil
+	}
+	if !d.gov.ReserveUnits(now, 1) {
+		metrics.LiveDetectPolls.WithLabelValues(MechanismYouTubeMembersDiscover, "skipped").Inc()
+		return membersRefused, nil
+	}
+	metrics.LiveDetectQuotaUnits.Inc()
+
+	ids, err := d.youtube.PlaylistItems(ctx, playlist, 50)
+	if err != nil {
+		// A 404 is the normal answer for a channel that has never posted
+		// members-only content, and a 403 is YouTube refusing to list one to
+		// the key. Neither is the API failing, and neither goes away by asking
+		// again a minute later, so both back off rather than counting against
+		// the leg. A 403 that is only a rate limit is the exception: it passes
+		// on its own, so it is retried like any other failure.
+		status := youtubeStatus(err)
+		if status == http.StatusNotFound || (status == http.StatusForbidden && !youtubeRateLimited(err)) {
+			d.markMembersAbsent(channelID, key, status, now)
+			return membersDone, nil
+		}
+		if errors.Is(err, errYouTubeQuota) {
+			d.gov.BlockUnits(now)
+		}
+		return membersFailed, fmt.Errorf("members-only playlist for %s: %w", key, err)
+	}
+	if _, wasAbsent := d.ytMembersAbsent[channelID]; wasAbsent {
+		delete(d.ytMembersAbsent, channelID)
+		slog.Info("channel now has a members-only playlist", "func", "Detector.discoverMembersOnly", "key", key)
+	}
+
+	// An id on both pages is caught mid-move between them, and public wins
+	// the tie. Treating a public stream as members-only keeps it off the
+	// worker's queue and loses its transcript; the reverse costs the worker
+	// some futile probes.
+	ids = slices.DeleteFunc(ids, func(id string) bool { return slices.Contains(publicIDs, id) })
+
+	if fresh := d.seedDiscovered(ids, key, true, now); fresh > 0 {
+		slog.Info("youtube discovery found new members-only videos", "func", "Detector.discoverMembersOnly",
+			"key", key, "count", fresh, "watchlist", d.watch.Size())
+	}
+	return membersDone, nil
+}
+
+// markMembersAbsent backs off a channel's members-only reads. It logs only
+// when the answer changes, so the hourly recheck of a channel without
+// memberships stays quiet while a 404 that turns into a 403 is still heard.
+func (d *Detector) markMembersAbsent(channelID, key string, status int, now time.Time) {
+	if prev, known := d.ytMembersAbsent[channelID]; !known || prev.status != status {
+		if status == http.StatusForbidden {
+			slog.Warn("youtube refuses to list this channel's members-only playlist; discovery cannot find its members-only content",
+				"func", "Detector.markMembersAbsent", "key", key, "status", status,
+				"retry_in", ytMembersAbsentRetry.String())
+		} else {
+			slog.Info("channel has no members-only playlist; checking again later",
+				"func", "Detector.markMembersAbsent", "key", key, "status", status,
+				"retry_in", ytMembersAbsentRetry.String())
+		}
+	}
+	d.ytMembersAbsent[channelID] = membersAbsence{retry: now.Add(ytMembersAbsentRetry), status: status}
+	metrics.LiveDetectPolls.WithLabelValues(MechanismYouTubeMembersDiscover, "no-members-playlist").Inc()
+}
+
+// seedDiscovered diffs one playlist page against the watchlist, seeds every id
+// it has not seen, and returns how many that was.
+//
+// The WHOLE page is diffed, never just the newest entry: a stream scheduled in
+// advance sorts by publish date and can sit well down the list by the time it
+// actually starts.
+//
+// membersOnly says which playlist the page came from, and it is applied to ids
+// already tracked as well. The uploads and members-only playlists never share
+// an id, so whichever one lists it now is the truth - a members-only waiting
+// room opened to everyone moves to the uploads playlist, and from then on it is
+// an ordinary stream.
+func (d *Detector) seedDiscovered(ids []string, key string, membersOnly bool, now time.Time) int {
+	fresh := 0
+	for _, id := range ids {
+		if d.watch.Known(id) {
+			d.watch.SetMembersOnly(id, membersOnly)
+			continue
+		}
+		// An id we already swept is still sitting on the playlist; re-seeding
+		// it would restart its fast-poll window on every discovery pass
+		// forever.
+		if d.watch.Retired(id, now) {
+			continue
+		}
+		// A members-only id videos.list would not answer for is skipped on the
+		// members-only page only. On the uploads page it has been made public.
+		if membersOnly && d.watch.RetiredMembersOnly(id, now) {
+			continue
+		}
+		// Boost a newly discovered id so its first state poll is immediate -
+		// the id may already be live.
+		if membersOnly {
+			d.watch.SeedMembersOnly(id, key, now)
+		} else {
+			d.watch.Seed(id, key, now, true)
+		}
+		fresh++
+	}
+	return fresh
 }
 
 // HandleWebSubPush processes a verified hub notification.

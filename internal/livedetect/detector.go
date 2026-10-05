@@ -96,6 +96,11 @@ type Detector struct {
 	gov       *quotaGovernor
 	seen      *seenCache
 
+	// ytMembersAbsent holds the channels whose members-only playlist could
+	// not be read, keyed by channel id. Touched only by the discovery
+	// goroutine.
+	ytMembersAbsent map[string]membersAbsence
+
 	// webSubSeen dedupes hub pushes, which are documented to arrive more than
 	// once and to fire on title and description edits.
 	webSubSeen *seenCache
@@ -146,6 +151,7 @@ func New(cfg config.LiveDetectConfig, channels []config.ChannelConfig, sink Sink
 		twitchTargets:   map[string]string{},
 		twitchUserIDs:   map[string]string{},
 		ytTargets:       map[string]string{},
+		ytMembersAbsent: map[string]membersAbsence{},
 		watch:           newWatchlist(),
 		gov:             newQuotaGovernor(cfg.YouTube.DailyUnitBudget, 0),
 		seen:            newSeenCache(twitchReplayMaxAge + time.Minute),
@@ -233,6 +239,7 @@ func New(cfg config.LiveDetectConfig, channels []config.ChannelConfig, sink Sink
 			d.shorts = NewShortsProbe()
 			d.health[MechanismYouTubeState] = &legHealth{}
 			d.health[MechanismYouTubeDiscover] = &legHealth{}
+			d.health[MechanismYouTubeMembersDiscover] = &legHealth{}
 		}
 	}
 
@@ -347,6 +354,7 @@ func (d *Detector) Start() error {
 		slog.Info("live detection started",
 			"func", "Detector.Start",
 			"queue_incoming", d.cfg.QueueIncoming,
+			"queue_members_only", d.cfg.QueueMembersOnly,
 			"twitch", d.cfg.Twitch.Enabled,
 			"twitch_eventsub", d.cfg.Twitch.EventSub,
 			"youtube", d.cfg.YouTube.Enabled,
@@ -377,7 +385,10 @@ func (d *Detector) Close() error {
 // configured discovery cadence, and warns when it leaves too little headroom.
 //
 // Discovery is the one cost that scales with channel count and is paid whether
-// or not anyone streams: one unit per channel per cycle, forever. State polling
+// or not anyone streams: two units per channel per cycle (the uploads and the
+// members-only playlist), forever. A channel with no members-only playlist
+// costs far less than that, but which channels have one is only known once
+// discovery has asked, so the projection assumes the worst. State polling
 // is nearly free by comparison, but the fast ladder during an actual broadcast
 // costs roughly 700-2,000 units per stream - so a discovery bill that already
 // eats most of the budget means detection dies partway through a busy day, at
@@ -391,7 +402,8 @@ func (d *Detector) logQuotaProjection() {
 	}
 	interval := d.ytDiscoveryInterval()
 	cyclesPerDay := int(24 * time.Hour / interval)
-	discoveryUnits := len(d.ytTargets) * cyclesPerDay
+	callsPerCycle := ytDiscoveryCallsPerChannel * len(d.ytTargets)
+	discoveryUnits := callsPerCycle * cyclesPerDay
 	budget := d.gov.Snapshot(time.Now()).UnitBudget
 
 	// Below this, a few concurrent streams still fit inside the budget.
@@ -405,7 +417,7 @@ func (d *Detector) logQuotaProjection() {
 		"daily_budget", budget,
 	}
 	if budget > 0 && float64(discoveryUnits) > float64(budget)*headroomFloor {
-		suggested := int((float64(len(d.ytTargets)) * 86400) / (float64(budget) * 0.25))
+		suggested := int((float64(callsPerCycle) * 86400) / (float64(budget) * 0.25))
 		slog.Warn("youtube discovery alone consumes most of the daily quota; raise discoverySeconds",
 			append(attrs, "suggested_discovery_seconds", suggested)...)
 		return
@@ -650,6 +662,12 @@ func (d *Detector) expectedCadence(mechanism string) time.Duration {
 		return ytIntervalCold
 	case MechanismYouTubeDiscover:
 		return d.ytDiscoveryInterval()
+	case MechanismYouTubeMembersDiscover:
+		// Never stale on its own. It reaches a verdict on every pass in which
+		// an uploads read succeeds, so it can only go quiet when the uploads
+		// half has, and that leg already alerts; a second alert would only
+		// repeat it. Its own failures still alert through the failure count.
+		return 0
 	case MechanismYouTubeAudit:
 		return searchAuditInterval
 	case MechanismTwitchEventSubReconcile:
