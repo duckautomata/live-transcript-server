@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"live-transcript-server/internal/config"
@@ -33,6 +34,12 @@ const (
 	// defaultSearchAuditCalls leaves most of search.list's own 100-call daily
 	// bucket unspent, so a manual query is still possible after a full day of
 	// automated audits.
+	//
+	// That bucket is this package's understanding of search.list billing, and
+	// it is UNVERIFIED for this project: the Data API's published cost table
+	// charges search.list 100 units of the shared 10,000-unit allocation, which
+	// the unit budget does not account for. Check the API's quota page in the
+	// Cloud Console after a day of audits before raising this.
 	defaultSearchAuditCalls    = 40
 	minTwitchPollSeconds       = 60
 	minYouTubeDiscoverySeconds = 30
@@ -98,12 +105,55 @@ type Detector struct {
 
 	// ytMembersAbsent holds the channels whose members-only playlist could
 	// not be read, keyed by channel id. Touched only by the discovery
-	// goroutine.
+	// goroutine - which is why the operator's manual controls (manual.go) are
+	// handed to that goroutine over ytRequests rather than run where the HTTP
+	// request arrived.
 	ytMembersAbsent map[string]membersAbsence
+
+	// ytRequests carries operator requests (a manual discovery pass, a video
+	// check) to the discovery goroutine, which serves them between passes.
+	// Unbuffered: a request is either picked up by a running loop or not at
+	// all, so a caller can never strand one in a buffer nobody drains.
+	ytRequests chan discoveryRequest
+	// ytDiscoveryRunning is true while runYouTubeDiscovery is serving
+	// ytRequests. A manual request checks it first, so with the leg disabled
+	// or not started the caller is told at once instead of waiting out a
+	// timeout for a goroutine that does not exist.
+	ytDiscoveryRunning atomic.Bool
+
+	// manualMu guards the limits on the manual controls. They are checked
+	// where the request arrives, not on the discovery goroutine, so a refusal
+	// is immediate rather than queued behind a pass in progress.
+	manualMu sync.Mutex
+	// lastManualDiscovery is when the last manual discovery pass was accepted.
+	lastManualDiscovery time.Time
+	// manualDay is the quota day (quotaDay) the counts below belong to, so
+	// the caps reset with the budget. manualChecks and manualPasses count the
+	// video checks and manual discovery passes accepted that day, per channel
+	// key.
+	manualDay    int
+	manualChecks map[string]int
+	manualPasses map[string]int
+	// manualStop is closed by StopManualRequests when the server starts
+	// shutting down, releasing every caller waiting on the discovery loop.
+	manualStop     chan struct{}
+	manualStopOnce sync.Once
 
 	// webSubSeen dedupes hub pushes, which are documented to arrive more than
 	// once and to fire on title and description edits.
 	webSubSeen *seenCache
+
+	// auditGrace is how long the search audit gives a tracked but unclaimed
+	// live broadcast to be claimed before calling it a miss. Always
+	// searchAuditGrace in production; a field only so tests need not wait
+	// thirty seconds.
+	auditGrace time.Duration
+
+	// discoveryStartDelay is how long after Start the first discovery pass
+	// runs. Always ytDiscoveryStartDelay in production; a field only so a
+	// test can push the scheduled pass out of the way and drive the loop with
+	// manual requests alone.
+	discoveryStartDelay time.Duration
 
 	// twitchAbsent counts consecutive polls in which a previously-live login
 	// was missing from the Helix response. Helix is edge-cached and can omit a
@@ -145,21 +195,25 @@ func New(cfg config.LiveDetectConfig, channels []config.ChannelConfig, sink Sink
 	}
 
 	d := &Detector{
-		cfg:             cfg,
-		sink:            sink,
-		alerts:          alerts,
-		twitchTargets:   map[string]string{},
-		twitchUserIDs:   map[string]string{},
-		ytTargets:       map[string]string{},
-		ytMembersAbsent: map[string]membersAbsence{},
-		watch:           newWatchlist(),
-		gov:             newQuotaGovernor(cfg.YouTube.DailyUnitBudget, 0),
-		seen:            newSeenCache(twitchReplayMaxAge + time.Minute),
-		webSubSeen:      newSeenCache(webSubDedupeTTL),
-		twitchAbsent:    map[string]int{},
-		twitchLiveID:    map[string]string{},
-		twitchLiveSince: map[string]time.Time{},
-		health:          map[string]*legHealth{},
+		cfg:                 cfg,
+		sink:                sink,
+		alerts:              alerts,
+		twitchTargets:       map[string]string{},
+		twitchUserIDs:       map[string]string{},
+		ytTargets:           map[string]string{},
+		ytMembersAbsent:     map[string]membersAbsence{},
+		ytRequests:          make(chan discoveryRequest),
+		manualStop:          make(chan struct{}),
+		watch:               newWatchlist(),
+		gov:                 newQuotaGovernor(cfg.YouTube.DailyUnitBudget, 0),
+		seen:                newSeenCache(twitchReplayMaxAge + time.Minute),
+		webSubSeen:          newSeenCache(webSubDedupeTTL),
+		auditGrace:          searchAuditGrace,
+		discoveryStartDelay: ytDiscoveryStartDelay,
+		twitchAbsent:        map[string]int{},
+		twitchLiveID:        map[string]string{},
+		twitchLiveSince:     map[string]time.Time{},
+		health:              map[string]*legHealth{},
 	}
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 
@@ -240,6 +294,14 @@ func New(cfg config.LiveDetectConfig, channels []config.ChannelConfig, sink Sink
 			d.health[MechanismYouTubeState] = &legHealth{}
 			d.health[MechanismYouTubeDiscover] = &legHealth{}
 			d.health[MechanismYouTubeMembersDiscover] = &legHealth{}
+			// Registered up front so the admin page shows the audit as idle
+			// from boot. It runs at fixed UTC slots, never at startup, so its
+			// first cycle can be three hours away; created lazily on that
+			// first cycle, the leg would be missing from the page until then,
+			// which reads as "not configured" rather than "waiting".
+			if cfg.YouTube.SearchAudit {
+				d.health[MechanismYouTubeAudit] = &legHealth{}
+			}
 		}
 	}
 
@@ -294,6 +356,31 @@ func (d *Detector) Watching(channelKey string) []string {
 		}
 	}
 	return out
+}
+
+// PollingFloor is the longest a healthy detection on platform can take when
+// every push path misses the go-live: one interval of the polling leg that is
+// that platform's floor. On YouTube that is discovery, the only thing that
+// finds an unscheduled go-live without WebSub; on Twitch, the Helix poll. Both
+// are configurable without an upper bound - and the startup quota projection
+// tells operators with many channels to raise discovery's - so a fixed
+// "this is late" threshold would page on configured, healthy behaviour. Zero
+// for a platform that is not being watched. Nil-receiver-safe.
+func (d *Detector) PollingFloor(platform string) time.Duration {
+	if d == nil {
+		return 0
+	}
+	switch platform {
+	case PlatformYouTube:
+		if d.cfg.YouTube.Enabled {
+			return d.ytDiscoveryInterval()
+		}
+	case PlatformTwitch:
+		if d.cfg.Twitch.Enabled {
+			return d.twitchPollInterval()
+		}
+	}
+	return 0
 }
 
 // EventSubSecret exposes the callback signing secret to the HTTP handler.
@@ -669,6 +756,10 @@ func (d *Detector) expectedCadence(mechanism string) time.Duration {
 		// repeat it. Its own failures still alert through the failure count.
 		return 0
 	case MechanismYouTubeAudit:
+		// Its slots are fixed UTC times exactly this far apart, so the usual
+		// three missed cycles still applies. Its first slot can be up to a
+		// full interval after startup, but a leg with no success yet reads as
+		// idle and is never judged stale, so that wait cannot alert.
 		return searchAuditInterval
 	case MechanismTwitchEventSubReconcile:
 		return eventSubReconcileInterval

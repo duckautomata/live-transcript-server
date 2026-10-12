@@ -61,6 +61,11 @@ type AdminInfoResponse struct {
 	DiscordBot discord.BotStatus `json:"discordBot"`
 	// LiveDetect is the health of the (observer-only) live detector.
 	LiveDetect livedetect.Status `json:"liveDetect"`
+	// LiveDetectYouTube says this channel is watched on YouTube by an enabled
+	// YouTube leg, which is when the page offers its manual controls (check a
+	// video, run discovery now). Added after LiveDetect, so older pages that
+	// do not read it are unaffected.
+	LiveDetectYouTube bool `json:"liveDetectYouTube"`
 	// Detections is this channel's recent detection history, newest first. It
 	// is how the shadow-mode soak is read without opening the database: each
 	// row carries the measured delay and which mechanism won.
@@ -135,6 +140,7 @@ func (app *App) getAdminInfoHandler(w http.ResponseWriter, r *http.Request, cs *
 		MembershipEnabled: app.membershipEnabled(cs),
 		DiscordBot:        app.DiscordBot.Status(cs.Key),
 		LiveDetect:        app.LiveDetect.Status(),
+		LiveDetectYouTube: app.manualDetect().WatchesYouTube(cs.Key),
 		Detections:        detections,
 	})
 }

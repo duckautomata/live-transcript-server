@@ -1,6 +1,7 @@
 package livedetect
 
 import (
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -33,8 +34,18 @@ const (
 	// ytRestartBoost keeps a channel hot after one of its broadcasts ends,
 	// because a restart is exactly when a new id appears.
 	ytRestartBoost = 30 * time.Minute
-	// ytUpcomingMaxAge retires a scheduled frame that never started. Creators
-	// abandon waiting rooms, and watching one forever slowly leaks quota.
+	// ytUpcomingMaxAge drops (never retires) a scheduled frame that never
+	// started. Creators abandon waiting rooms, and watching one forever slowly
+	// leaks quota.
+	//
+	// It is measured from first sighting ONLY. There is deliberately no
+	// schedule-based "abandoned" drop: a frame still "upcoming" long past its
+	// announced start is not proof it is dead. Creators hide a waiting room and
+	// re-publish it days later, often without editing the schedule, and go live
+	// on it. Such a frame sits on the cold rung of the ladder, riding along on
+	// batched calls, and is aged out like any other pending frame - unretired,
+	// so discovery picks it straight back up. Retiring it blinded detection to
+	// a go-live for a day (FdwrQid9ulg, 2026-10-11).
 	ytUpcomingMaxAge = 24 * time.Hour
 	// ytEndedLinger keeps an ended entry around briefly so a stale-cache flap
 	// back to "live" does not look like a brand-new broadcast.
@@ -49,10 +60,6 @@ const (
 	// minutes - far longer than any transient API hiccup, and short enough
 	// that a deleted video costs a handful of units rather than a day of them.
 	ytMaxConsecutiveMisses = 5
-	// ytAbandonedAfterSchedule drops a frame still sitting "upcoming" this long
-	// past its own announced start. Creators leave dead waiting rooms up, and
-	// one costs a poll every five minutes until the 24-hour sweep otherwise.
-	ytAbandonedAfterSchedule = 12 * time.Hour
 	// ytRetiredMax bounds the negative cache. Every finished id on a page
 	// discovery reads ends up in it, and discovery reads two 50-id pages per
 	// channel (uploads and members-only), so this holds fifty channels' worth
@@ -103,13 +110,23 @@ type watchEntry struct {
 	// creator can open a members-only waiting room to everyone before it
 	// starts, and that public stream must then be treated as one.
 	MembersOnly bool
-	// Retired entries are dropped on the next sweep.
-	Retired bool
 	// Announced latches which non-live kinds (scheduled, upload) have been
 	// handed to the sink for this entry, so a level-triggered poll reports
 	// each once per process rather than once per cycle. The durable
 	// once-ever guarantee is the sink's ledger, not this.
 	Announced map[string]bool
+	// RescuedBy names the mechanism that put this id in front of the state
+	// poll after detection had already missed its go-live: the search audit
+	// (MechanismYouTubeAudit) or an operator's check (MechanismYouTubeManual).
+	// Empty for everything else.
+	//
+	// The claim the poll then wins is recorded under it rather than under the
+	// state poll. What that claim's delay measures is how long the miss lasted
+	// until the rescue, not how fast the ladder is, and booking hours-long
+	// samples against youtube-state-poll would bury the soak's real numbers
+	// for that leg. It is also how the late-detection alert knows the audit
+	// has already paged about this broadcast.
+	RescuedBy string
 }
 
 // interval returns how often this entry should be polled right now.
@@ -173,6 +190,107 @@ func (e *watchEntry) interval(now time.Time) time.Duration {
 	}
 }
 
+// Why the watchlist let go of an entry.
+//
+// They exist for the question every missed broadcast starts with: was the id
+// on the watchlist when it went live, and if not, what took it off and when?
+// With only counts in the logs, the answer for FdwrQid9ulg (2026-10-11) had to
+// be reconstructed by accounting for every id across hours of discovery
+// passes. A reason, the state the entry was last seen in and its schedule
+// answer it from a single line.
+const (
+	// dropEnded is a finished broadcast or an ordinary upload, swept once
+	// ytEndedLinger has passed since its end. It is the only reason that
+	// RETIRES an id, so discovery leaves it alone for ytRetiredMemory.
+	dropEnded = "ended"
+	// dropAgedUpcoming is a scheduled frame that has not started within
+	// ytUpcomingMaxAge of first sighting. Dropped unretired: discovery re-seeds
+	// it on its next pass if it is still on its playlist.
+	dropAgedUpcoming = "aged-upcoming"
+	// dropAgedUnknown is the same for an entry that never got a verdict at all
+	// - every answer for it was unclassifiable, or it was never polled. Also
+	// dropped unretired.
+	dropAgedUnknown = "aged-unknown"
+	// dropUnreturned is an id videos.list left out of ytMaxConsecutiveMisses
+	// polls in a row it was due for: deleted, made private, or blocked. Dropped
+	// unretired; see MarkMissing for the members-only exception, which has a
+	// negative cache of its own.
+	dropUnreturned = "unreturned"
+)
+
+// watchDrop is one id the watchlist let go of, with enough of the entry's last
+// known state to explain the decision in a log line after the fact. The entry
+// itself is gone by the time anyone reads it, so this is a copy, not a view.
+type watchDrop struct {
+	VideoID    string
+	ChannelKey string
+	// Reason is one of the drop* constants.
+	Reason string
+	// State and Scheduled are the entry's last observation. A pending frame
+	// carrying a schedule days in the past is the signature of a waiting room
+	// that was hidden and re-published.
+	State     State
+	Scheduled time.Time
+	FirstSeen time.Time
+	// MembersOnly is the playlist discovery last found the id on.
+	MembersOnly bool
+	// Retired reports that the id went into the shared negative cache, so
+	// discovery will not re-seed it for ytRetiredMemory. It is never true for
+	// anything but dropEnded; retireLocked enforces that.
+	Retired bool
+}
+
+// dropRecord snapshots an entry as it leaves the watchlist.
+func (e *watchEntry) dropRecord(reason string) watchDrop {
+	return watchDrop{
+		VideoID:     e.VideoID,
+		ChannelKey:  e.ChannelKey,
+		Reason:      reason,
+		State:       e.State,
+		Scheduled:   e.Scheduled,
+		FirstSeen:   e.FirstSeen,
+		MembersOnly: e.MembersOnly,
+	}
+}
+
+// dropIDs reduces drop records to their ids, for the callers that only count
+// or compare them.
+func dropIDs(drops []watchDrop) []string {
+	if len(drops) == 0 {
+		return nil
+	}
+	ids := make([]string, len(drops))
+	for i, dr := range drops {
+		ids[i] = dr.VideoID
+	}
+	return ids
+}
+
+// logAttrs renders a drop as slog key-value pairs, led by the reporting
+// function's name: whose id it was, why it went, what it last looked like,
+// and how long it had been watched. Every drop line shares this shape so one
+// grep for a video id finds them all.
+func (dr watchDrop) logAttrs(fn string, now time.Time) []any {
+	return []any{
+		"func", fn, "key", dr.ChannelKey, "videoId", dr.VideoID, "reason", dr.Reason,
+		// String() explicitly: the file log is JSON, which would otherwise
+		// write the enum's integer.
+		"state", dr.State.String(), rfc3339Attr("scheduled", dr.Scheduled),
+		"members_only", dr.MembersOnly,
+		"first_seen_ago", now.Sub(dr.FirstSeen).Round(time.Second).String(),
+	}
+}
+
+// rfc3339Attr renders a time for a log line as RFC 3339 in UTC, or as an empty
+// attribute - which slog handlers leave out - when it is zero, so an entry with
+// no schedule does not log one as the year 1.
+func rfc3339Attr(key string, t time.Time) slog.Attr {
+	if t.IsZero() {
+		return slog.Attr{}
+	}
+	return slog.String(key, t.UTC().Format(time.RFC3339))
+}
+
 // watchlist is the set of YouTube video ids under observation.
 //
 // It is in-memory on purpose: it is a cache of what to look at, not a record
@@ -187,12 +305,27 @@ type watchlist struct {
 	// retired remembers ids swept off the watchlist so discovery does not
 	// re-seed them from the uploads playlist they still sit on. It must
 	// outlive the discovery interval by a wide margin or the churn resumes.
+	// Only ended entries ever go in; retireLocked is the one writer and
+	// enforces it.
 	retired map[string]time.Time
 	// retiredMembersOnly is the same for members-only ids dropped because
 	// videos.list would not answer for them. It is kept apart because it only
 	// speaks for the members-only playlist: if such an id turns up on the
 	// uploads playlist it has been made public, and must be seeded at once.
 	retiredMembersOnly map[string]time.Time
+	// aged remembers ids the sweep aged out while still pending (upcoming or
+	// unknown), for ytRetiredMemory. Unlike retired it hides nothing: the next
+	// discovery pass re-seeds such an id exactly as before. It only stops that
+	// re-seed from arming the seed boost (SeedDiscovered).
+	//
+	// The boost is for an id discovery has only just learned about, which may
+	// already be live. A frame the watchlist was watching a moment ago is not
+	// news, and boosting it polled every three seconds for ten minutes - about
+	// 200 units unless something else was hot - once a day for every waiting
+	// room a creator leaves up, far-future and long-overdue alike. Unboosted,
+	// its first poll is still immediate, because a new entry is due at once,
+	// and the ladder takes it from there.
+	aged map[string]time.Time
 	// membersServed records that videos.list has answered for at least one
 	// members-only id. Until it does, a members-only id that is never returned
 	// is evidence the API does not serve members-only content at all; after,
@@ -211,6 +344,7 @@ func newWatchlist() *watchlist {
 		entries:      make(map[string]*watchEntry),
 		channelBoost: make(map[string]time.Time),
 		retired:      make(map[string]time.Time),
+		aged:         make(map[string]time.Time),
 		wake:         make(chan struct{}, 1),
 
 		retiredMembersOnly: make(map[string]time.Time),
@@ -220,7 +354,7 @@ func newWatchlist() *watchlist {
 // Seed adds a video id, or refreshes an existing one's boost. Called by
 // discovery, by WebSub pushes, and on startup from the ledger.
 func (w *watchlist) Seed(videoID, channelKey string, now time.Time, boost bool) {
-	w.seed(videoID, channelKey, now, boost, false)
+	w.seed(videoID, channelKey, now, seedOpts{boost: boost})
 }
 
 // SeedMembersOnly is a boosted Seed for an id found on a channel's
@@ -230,16 +364,99 @@ func (w *watchlist) Seed(videoID, channelKey string, now time.Time, boost bool) 
 // seed wakes the state loop, and a poll that ran between the two could claim
 // the go-live as an ordinary broadcast and queue it for the worker.
 func (w *watchlist) SeedMembersOnly(videoID, channelKey string, now time.Time) {
-	w.seed(videoID, channelKey, now, true, true)
+	w.seed(videoID, channelKey, now, seedOpts{boost: true, membersOnly: true})
 }
 
-func (w *watchlist) seed(videoID, channelKey string, now time.Time, boost, membersOnly bool) {
+// SeedDiscovered is discovery's seed for an id it found on a playlist page and
+// does not track: boosted, like Seed, unless the sweep aged the id out within
+// ytRetiredMemory (see watchlist.aged). Reports whether it boosted.
+//
+// The aged-out check and the seed share one lock, so a WebSub push cannot slip
+// a boosted entry in between them and have it treated as a re-seed.
+func (w *watchlist) SeedDiscovered(videoID, channelKey string, now time.Time, membersOnly bool) (boosted bool) {
+	if videoID == "" {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	at, aged := w.aged[videoID]
+	// Consumed either way: once the id is back on the watchlist the record has
+	// done its job, and the next age-out writes a fresh one.
+	delete(w.aged, videoID)
+	boosted = !aged || now.Sub(at) >= ytRetiredMemory
+	w.seedLocked(videoID, channelKey, now, seedOpts{boost: boosted, membersOnly: membersOnly})
+	return boosted
+}
+
+// SeedDueNow puts an id on the watchlist due for an immediate poll WITHOUT
+// arming the seed boost: an existing entry's next poll is pulled forward to
+// now, a new one is due at once anyway. It is the operator's check
+// (Detector.CheckYouTubeVideo), which has just read the video's state itself
+// and so needs one poll, not ten minutes of them: a live broadcast moves to the
+// live rung on that poll, and an upcoming one is polled as closely as its
+// schedule warrants by the ladder. A boost here cost about 200 units a check,
+// and re-checking a waiting room re-armed it every time.
+//
+// membersOnly and rescuedBy go in under the seed's own lock for the reason
+// SeedMembersOnly gives: the seed wakes the state loop.
+func (w *watchlist) SeedDueNow(videoID, channelKey string, now time.Time, membersOnly bool, rescuedBy string) {
+	w.seed(videoID, channelKey, now, seedOpts{dueNow: true, membersOnly: membersOnly, rescuedBy: rescuedBy})
+}
+
+// SeedRescue is a boosted Seed for a live broadcast the search audit found
+// detection had missed, recording the audit as the mechanism that rescued it
+// (watchEntry.RescuedBy) under the same lock, so the claim the woken state
+// poll wins is never booked against the state poll.
+func (w *watchlist) SeedRescue(videoID, channelKey string, now time.Time, mechanism string) {
+	w.seed(videoID, channelKey, now, seedOpts{boost: true, rescuedBy: mechanism})
+}
+
+// MarkRescued records mechanism as the rescuer of a tracked id
+// (watchEntry.RescuedBy). A no-op for an id that is not tracked.
+func (w *watchlist) MarkRescued(videoID, mechanism string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if e, ok := w.entries[videoID]; ok {
+		e.RescuedBy = mechanism
+	}
+}
+
+// RescuedBy returns the mechanism that rescued a tracked id after a missed
+// go-live, or "" when nothing did or the id is not tracked.
+func (w *watchlist) RescuedBy(videoID string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if e, ok := w.entries[videoID]; ok {
+		return e.RescuedBy
+	}
+	return ""
+}
+
+// seedOpts says what a seed does to the entry beyond making sure it exists.
+type seedOpts struct {
+	// boost holds the entry at the hot interval for ytSeedBoost and makes it
+	// due now.
+	boost bool
+	// dueNow pulls the entry's next poll forward to now without a boost.
+	dueNow bool
+	// membersOnly raises the members-only flag. Nothing here lowers it.
+	membersOnly bool
+	// rescuedBy, when set, records the mechanism rescuing a missed go-live.
+	rescuedBy string
+}
+
+func (w *watchlist) seed(videoID, channelKey string, now time.Time, o seedOpts) {
 	if videoID == "" {
 		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.seedLocked(videoID, channelKey, now, o)
+}
 
+// seedLocked is every seed's body. Callers must hold w.mu.
+func (w *watchlist) seedLocked(videoID, channelKey string, now time.Time, o seedOpts) {
 	e, ok := w.entries[videoID]
 	isNew := !ok
 	if !ok {
@@ -252,27 +469,28 @@ func (w *watchlist) seed(videoID, channelKey string, now time.Time, boost, membe
 		}
 		w.entries[videoID] = e
 	}
-	if e.Retired {
-		// A previously retired id reappearing in discovery is worth another
-		// look - creators un-hide and reschedule frames.
-		e.Retired = false
-		e.NextDue = now
-		isNew = true
-	}
-	if boost {
+	if o.boost {
 		e.BoostUntil = now.Add(ytSeedBoost)
+		e.NextDue = now
+	}
+	// Only ever pulled forward: an entry already overdue keeps its place at
+	// the head of the most-overdue-first queue.
+	if o.dueNow && e.NextDue.After(now) {
 		e.NextDue = now
 	}
 	// Only ever raised here. A WebSub push or a reseed knows nothing about
 	// membership, so an ordinary Seed must not clear what discovery learned;
 	// SetMembersOnly is the one place that does.
-	if membersOnly {
+	if o.membersOnly {
 		e.MembersOnly = true
+	}
+	if o.rescuedBy != "" {
+		e.RescuedBy = o.rescuedBy
 	}
 	// Only a seed that actually pulled work forward is worth interrupting a
 	// parked loop for; re-seeding an existing entry without a boost changes
 	// nothing it needs to wake for.
-	if isNew || boost {
+	if isNew || o.boost || o.dueNow {
 		w.poke()
 	}
 }
@@ -316,7 +534,6 @@ func (w *watchlist) SeedClaimed(videoID, channelKey string, now time.Time) {
 		w.entries[videoID] = e
 	}
 	e.SawLive = true
-	e.Retired = false
 }
 
 // BoostChannel marks a channel as recently ended so discovery watches it
@@ -361,9 +578,6 @@ func (w *watchlist) Due(now time.Time) []string {
 	var list []candidate
 	anyDue := false
 	for id, e := range w.entries {
-		if e.Retired {
-			continue
-		}
 		over := now.Sub(e.NextDue)
 		if over >= 0 {
 			anyDue = true
@@ -410,6 +624,18 @@ func (w *watchlist) Due(now time.Time) []string {
 // been answered for, a missing one is simply deleted or hidden, and is treated
 // like every other missing video so a restored waiting room is rediscovered.
 func (w *watchlist) MarkMissing(ids []string, now time.Time) (dropped, droppedMembersOnly []string) {
+	drops, droppedMembersOnly := w.markMissing(ids, now)
+	return dropIDs(drops), droppedMembersOnly
+}
+
+// markMissing is MarkMissing reporting each dropped entry's last known state
+// rather than just its id, so the drop can be logged with it. The state is the
+// part that matters: an id whose last word was "upcoming" is a waiting room
+// its creator hid or deleted, which may well come back and go live, while an
+// "ended" one is a finished video being pulled. On 2026-10-04 a line saying
+// "upcoming" would have shown the frame behind the FdwrQid9ulg miss going
+// private a week before it was re-published.
+func (w *watchlist) markMissing(ids []string, now time.Time) (dropped []watchDrop, droppedMembersOnly []string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -421,7 +647,7 @@ func (w *watchlist) MarkMissing(ids []string, now time.Time) (dropped, droppedMe
 		e.Misses++
 		if e.Misses >= ytMaxConsecutiveMisses {
 			delete(w.entries, id)
-			dropped = append(dropped, id)
+			dropped = append(dropped, e.dropRecord(dropUnreturned))
 			if e.MembersOnly && !w.membersServed {
 				w.retiredMembersOnly[id] = now
 				droppedMembersOnly = append(droppedMembersOnly, id)
@@ -499,72 +725,81 @@ func (w *watchlist) NextWait(now time.Time) time.Duration {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	if len(w.entries) == 0 {
+		return ytIntervalCold
+	}
 	best := ytIntervalCold
-	found := false
 	for _, e := range w.entries {
-		if e.Retired {
-			continue
-		}
-		found = true
 		if d := e.NextDue.Sub(now); d < best {
 			best = d
 		}
-	}
-	if !found {
-		return ytIntervalCold
 	}
 	// A floor of one second is the backstop against a busy loop: even if an
 	// entry is somehow left overdue, the cycle cannot run hotter than 1/s.
 	return max(best, time.Second)
 }
 
-// Sweep retires entries that are no longer worth watching and drops retired
-// ones. Returns the ids dropped so callers can log the churn.
+// Sweep drops entries that are no longer worth watching, retiring the ended
+// ones. Returns the ids dropped so callers can count the churn; sweep has the
+// reasons.
 func (w *watchlist) Sweep(now time.Time) []string {
+	return dropIDs(w.sweep(now))
+}
+
+// sweep is Sweep reporting why each entry went, what it last looked like, and
+// whether it was retired, sorted by channel and then id so a log of them reads
+// in a stable order.
+func (w *watchlist) sweep(now time.Time) []watchDrop {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	var dropped, retire []string
+	var drops []watchDrop
 	for id, e := range w.entries {
+		var reason string
+		retire := false
 		switch {
 		// Measured from the END, not from first sighting: a broadcast whose
 		// frame was seeded days before it started would otherwise be dropped on
 		// the first sweep after it finished, losing the anti-flap window
 		// entirely.
 		case e.State == StateEnded && !e.EndedAt.IsZero() && now.Sub(e.EndedAt) > ytEndedLinger:
-			dropped = append(dropped, id)
+			reason = dropEnded
 			// Only an ENDED entry is worth remembering. It is a finished
 			// broadcast or an ordinary upload that will sit on the playlist
 			// forever, and re-seeding it is pure churn.
-			retire = append(retire, id)
-		// Still "upcoming" long past the time it announced: the creator moved
-		// on and left the waiting room up. Judged against the schedule rather
-		// than first sighting, so a frame created days early is not dropped
-		// while it is still legitimately pending.
-		case e.State == StateUpcoming && !e.Scheduled.IsZero() &&
-			now.Sub(e.Scheduled) > ytAbandonedAfterSchedule:
-			dropped = append(dropped, id)
-			retire = append(retire, id)
+			retire = true
+		// A PENDING frame is only ever aged out, never retired, whatever its
+		// schedule says - see the note under ytUpcomingMaxAge. Being dropped
+		// unretired, it is re-seeded by the next discovery pass if it is still
+		// on its playlist - without the seed boost, see watchlist.aged.
 		case e.State == StateUpcoming && now.Sub(e.FirstSeen) > ytUpcomingMaxAge:
-			dropped = append(dropped, id)
+			reason = dropAgedUpcoming
 		case e.State == StateUnknown && now.Sub(e.FirstSeen) > ytUpcomingMaxAge:
-			dropped = append(dropped, id)
+			reason = dropAgedUnknown
+		default:
+			continue
 		}
-	}
-	for _, id := range dropped {
+		// Deleting the current key inside a range over the map is safe.
 		delete(w.entries, id)
-	}
-	// An ABANDONED UPCOMING frame is deliberately NOT retired. Retiring it
-	// would blind discovery to that id for a full day, and a stream scheduled
-	// more than 24 hours ahead is swept while still upcoming - so retiring it
-	// could mean missing the go-live entirely. Letting it be rediscovered
-	// costs one re-seed per day per abandoned frame, which is nothing.
-	for _, id := range retire {
-		// Remember it so discovery does not immediately re-seed the same id
-		// from the uploads playlist, which the id is still sitting on. Without
-		// this the sweep and the next discovery pass form a permanent churn
-		// loop that re-arms the fast poll every cycle.
-		w.retired[id] = now
+		drop := e.dropRecord(reason)
+		// Only ENDED entries are retired; an upcoming (or unknown) frame never
+		// is. Retiring one would blind discovery to that id for a full day - a
+		// stream scheduled more than 24 hours ahead, or a hidden waiting room
+		// re-published with its old schedule, can go live inside that day - so
+		// retiring it could mean missing the go-live entirely.
+		//
+		// Letting it be rediscovered instead costs one immediate poll per
+		// pending frame per day, and then whatever the ladder charges for it -
+		// for an overdue or far-future frame, a slot on the cold rung's
+		// batched calls. That holds only because the re-seed is not boosted,
+		// which is what recording it in aged is for: a boosted re-seed polled
+		// each such frame every three seconds for ten minutes, every day.
+		if retire {
+			drop.Retired = w.retireLocked(e, now)
+		} else {
+			w.aged[id] = now
+		}
+		drops = append(drops, drop)
 	}
 	w.pruneRetiredLocked(now)
 	for key, until := range w.channelBoost {
@@ -572,7 +807,41 @@ func (w *watchlist) Sweep(now time.Time) []string {
 			delete(w.channelBoost, key)
 		}
 	}
-	return dropped
+	sort.Slice(drops, func(i, j int) bool {
+		if drops[i].ChannelKey != drops[j].ChannelKey {
+			return drops[i].ChannelKey < drops[j].ChannelKey
+		}
+		return drops[i].VideoID < drops[j].VideoID
+	})
+	return drops
+}
+
+// retireLocked puts a swept entry into the negative cache and reports whether
+// it did. Callers must hold w.mu.
+//
+// The cache is what stops discovery re-seeding an id from the playlist it
+// still sits on - without it the sweep and the next discovery pass form a
+// permanent churn loop that re-arms the fast poll every cycle - and it hides
+// that id from discovery for ytRetiredMemory.
+//
+// ONLY AN ENDED ENTRY MAY BE RETIRED, and that is checked here rather than
+// trusted to the caller. Retiring anything that can still go live blinds
+// detection to it for a day and leaves nothing in the logs to say so: that is
+// exactly how FdwrQid9ulg went undetected for two hours on 2026-10-11. The
+// check is a tripwire against that ever coming back. A violating entry is
+// left out of the cache - still dropped, so discovery re-seeds it, which is
+// the safe direction - and reported as the bug it is.
+//
+// retiredMembersOnly is a separate cache with its own rule (MarkMissing) and
+// is deliberately not covered here.
+func (w *watchlist) retireLocked(e *watchEntry, now time.Time) bool {
+	if e.State != StateEnded {
+		slog.Error("BUG: refused to retire a watchlist entry that has not ended; only ended entries may be hidden from discovery",
+			"func", "watchlist.retireLocked", "key", e.ChannelKey, "videoId", e.VideoID, "state", e.State.String())
+		return false
+	}
+	w.retired[e.VideoID] = now
+	return true
 }
 
 // Retired reports whether an id was swept recently, so discovery can skip
@@ -594,11 +863,38 @@ func (w *watchlist) RetiredMembersOnly(videoID string, now time.Time) bool {
 	return ok && now.Sub(t) < ytRetiredMemory
 }
 
-// pruneRetiredLocked expires the negative caches and enforces their cap.
-// Callers must hold w.mu.
+// Unretire removes an id from both negative caches and reports whether either
+// was still hiding it from discovery.
+//
+// It is the operator's override (Detector.CheckYouTubeVideo): someone has
+// looked at this video and says it matters, which outranks whatever the
+// watchlist concluded about it before. Clearing both caches, not just the one
+// that matches how the id was last listed, is deliberate - the operator does
+// not know which one it is in, and neither entry is worth keeping once the id
+// is being watched again. If the id is genuinely finished, the sweep retires
+// it again after it is next seen ended, at the cost of one re-seed.
+func (w *watchlist) Unretire(videoID string, now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	hidden := false
+	for _, cache := range []map[string]time.Time{w.retired, w.retiredMembersOnly} {
+		if t, ok := cache[videoID]; ok {
+			// An entry past ytRetiredMemory was no longer hiding anything; it
+			// only had not been pruned yet.
+			hidden = hidden || now.Sub(t) < ytRetiredMemory
+			delete(cache, videoID)
+		}
+	}
+	return hidden
+}
+
+// pruneRetiredLocked expires the negative caches, and the aged-out record that
+// shares their lifetime and cap, and enforces that cap. Callers must hold
+// w.mu.
 func (w *watchlist) pruneRetiredLocked(now time.Time) {
 	pruneNegativeCache(w.retired, now)
 	pruneNegativeCache(w.retiredMembersOnly, now)
+	pruneNegativeCache(w.aged, now)
 }
 
 // pruneNegativeCache expires one negative cache and enforces ytRetiredMax.
@@ -626,13 +922,7 @@ func pruneNegativeCache(cache map[string]time.Time, now time.Time) {
 func (w *watchlist) Size() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	n := 0
-	for _, e := range w.entries {
-		if !e.Retired {
-			n++
-		}
-	}
-	return n
+	return len(w.entries)
 }
 
 // SawUpcoming reports whether an id was observed as a scheduled frame before

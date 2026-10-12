@@ -53,6 +53,19 @@ func (s *recordingSink) ActiveBroadcasts(context.Context) ([]Broadcast, error) {
 	return append([]Broadcast(nil), s.active...), nil
 }
 
+// DetectionClaimed answers as the ledger would: a broadcast is claimed once
+// anything has observed it live.
+func (s *recordingSink) DetectionClaimed(_ context.Context, platform, broadcastID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, b := range s.live {
+		if b.Platform == platform && b.ID == broadcastID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *recordingSink) videoEvents() []VideoEvent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -362,6 +375,9 @@ func (failingSink) ObserveEnded(context.Context, string, string) error   { retur
 func (failingSink) ObserveVideo(context.Context, VideoEvent) error       { return errFailingSink }
 func (failingSink) ActiveBroadcasts(context.Context) ([]Broadcast, error) {
 	return nil, errFailingSink
+}
+func (failingSink) DetectionClaimed(context.Context, string, string) (bool, error) {
+	return false, errFailingSink
 }
 
 var errFailingSink = errors.New("sink unavailable")

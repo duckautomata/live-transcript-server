@@ -64,6 +64,12 @@ type App struct {
 	// LiveDetect observes YouTube and Twitch for channels going live. It is
 	// nil when unconfigured, and every method is nil-receiver-safe.
 	LiveDetect *livedetect.Detector
+	// ManualDetect stands in for LiveDetect behind the admin page's manual
+	// YouTube controls (handlers_livedetect.go). Nil - the production value -
+	// means LiveDetect itself; a field only so handler tests can fake the
+	// discovery goroutine, which the real detector runs against the YouTube
+	// API.
+	ManualDetect manualDetector
 	// Announcer turns detections into the admin-configured public Discord
 	// announcements (and the operator's own feed). Always constructed.
 	Announcer *announce.Dispatcher

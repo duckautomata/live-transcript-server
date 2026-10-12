@@ -23,6 +23,10 @@ const (
 	// ytRestartDiscovery is the discovery cadence while a channel is inside
 	// its post-broadcast restart window.
 	ytRestartDiscovery = 30 * time.Second
+	// ytDiscoveryStartDelay is how long after Start the first discovery pass
+	// runs. Operator requests are served from the moment the loop starts,
+	// this wait included.
+	ytDiscoveryStartDelay = 2 * time.Second
 	// ytDiscoveryCallsPerChannel is the most one discovery pass spends on a
 	// channel: its uploads playlist and its members-only playlist.
 	ytDiscoveryCallsPerChannel = 2
@@ -145,11 +149,16 @@ func (d *Detector) youtubeStateOnce() {
 		// still reports healthy. Counting it is the only way this becomes
 		// visible short of the search audit.
 		metrics.LiveDetectPolls.WithLabelValues(MechanismYouTubeState, "unreturned").Add(float64(len(missing)))
-		dropped, droppedMembersOnly := d.watch.MarkMissing(missing, now)
-		if len(dropped) > 0 {
+		dropped, droppedMembersOnly := d.watch.markMissing(missing, now)
+		// One line per id rather than one for the batch: drops are rare, and
+		// the state each id was last seen in is the story. "upcoming" is a
+		// waiting room its creator hid or deleted - one that may come back and
+		// go live, and is worth remembering when it does - while "ended" is a
+		// finished video being pulled.
+		for _, dr := range dropped {
 			slog.Info("dropping videos the API has stopped returning",
-				"func", "Detector.youtubeStateOnce", "ids", dropped,
-				"after_consecutive_misses", ytMaxConsecutiveMisses)
+				append(dr.logAttrs("Detector.youtubeStateOnce", now),
+					"after_consecutive_misses", ytMaxConsecutiveMisses)...)
 		}
 		// Members-only content is expected to be returned like anything else.
 		// If it is not, members-only detection cannot work at all, and the
@@ -200,6 +209,13 @@ func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Ti
 		d.announceScheduled(ctx, v, channelKey, now)
 
 	case StateLive:
+		// The state poll makes the claim either way, but one the search audit
+		// or an operator rescued after a missed go-live is booked under the
+		// rescuer: see watchEntry.RescuedBy.
+		mechanism := MechanismYouTubeState
+		if rescuer := d.watch.RescuedBy(v.ID); rescuer != "" {
+			mechanism = rescuer
+		}
 		// Livestreams and premieres are indistinguishable here and both are in
 		// scope, so there is deliberately no discriminator between them.
 		d.observe(ctx, Broadcast{
@@ -212,7 +228,7 @@ func (d *Detector) applyYouTubeVideo(ctx context.Context, v YTVideo, now time.Ti
 			StartedAt:    v.StartedAt(),
 			SawScheduled: sawScheduled,
 			MembersOnly:  d.watch.MembersOnly(v.ID),
-		}, MechanismYouTubeState)
+		}, mechanism)
 
 	case StateEnded:
 		// "Ended" with no broadcast details is not a stream that finished; it
@@ -349,15 +365,22 @@ func (d *Detector) announceUpload(v YTVideo, channelKey string, now time.Time) {
 // playlist and the channel feed WebSub watches both leave members-only items
 // out, so a members-only waiting room or video reaches the watchlist only when
 // this leg reads the members-only playlist.
+//
+// Between passes it also serves the operator's manual requests (manual.go),
+// which must run on this goroutine because it alone owns ytMembersAbsent.
 func (d *Detector) runYouTubeDiscovery() {
-	if !d.sleep(2 * time.Second) {
-		return
-	}
+	d.ytDiscoveryRunning.Store(true)
+	defer d.ytDiscoveryRunning.Store(false)
+
+	next := time.Now().Add(d.discoveryStartDelay)
 	for {
-		d.youtubeDiscoverOnce()
-		if !d.sleep(d.discoveryWait(time.Now())) {
+		var ok bool
+		if next, ok = d.awaitDiscovery(next); !ok {
 			return
 		}
+		d.youtubeDiscoverOnce()
+		now := time.Now()
+		next = now.Add(d.discoveryWait(now))
 	}
 }
 
@@ -378,7 +401,10 @@ func (d *Detector) discoveryWait(now time.Time) time.Duration {
 	return base
 }
 
-func (d *Detector) youtubeDiscoverOnce() {
+// youtubeDiscoverOnce runs one discovery pass over every channel and reports
+// what it did. The scheduled loop ignores the report; a manual pass
+// (RunDiscoveryNow) hands it to the operator.
+func (d *Detector) youtubeDiscoverOnce() DiscoverySummary {
 	now := time.Now()
 
 	channels := make([]string, 0, len(d.ytTargets))
@@ -386,6 +412,7 @@ func (d *Detector) youtubeDiscoverOnce() {
 		channels = append(channels, id)
 	}
 	slices.Sort(channels)
+	summary := DiscoverySummary{Channels: len(channels)}
 
 	ctx, cancel := d.pollCtx(20 * time.Second)
 	defer cancel()
@@ -402,9 +429,11 @@ func (d *Detector) youtubeDiscoverOnce() {
 		}
 		if !d.gov.ReserveUnits(now, 1) {
 			metrics.LiveDetectPolls.WithLabelValues(MechanismYouTubeDiscover, "skipped").Inc()
+			summary.BudgetRefused = true
 			break
 		}
 		metrics.LiveDetectQuotaUnits.Inc()
+		summary.UnitsSpent++
 
 		ids, err := d.youtube.PlaylistItems(ctx, playlist, 50)
 		if err != nil {
@@ -412,18 +441,22 @@ func (d *Detector) youtubeDiscoverOnce() {
 				d.gov.BlockUnits(now)
 			}
 			d.recordFailure(MechanismYouTubeDiscover, err)
+			summary.Failures++
 			continue
 		}
 		anyOK = true
+		summary.PlaylistsRead++
 
 		key := d.ytTargets[channelID]
-		if fresh := d.seedDiscovered(ids, key, false, now); fresh > 0 {
+		if fresh := d.seedDiscovered(ids, key, false, now); len(fresh) > 0 {
 			slog.Info("youtube discovery found new videos", "func", "Detector.youtubeDiscoverOnce",
-				"key", key, "count", fresh, "watchlist", d.watch.Size())
+				"key", key, "count", len(fresh), freshIDsAttr(fresh), "watchlist", d.watch.Size())
+			summary.noteFound(key, fresh, false)
 		}
 
-		outcome, err := d.discoverMembersOnly(ctx, channelID, key, ids, now)
+		outcome, err := d.discoverMembersOnly(ctx, channelID, key, ids, now, &summary)
 		if outcome == membersRefused {
+			summary.BudgetRefused = true
 			break
 		}
 		if outcome == membersFailed {
@@ -431,6 +464,7 @@ func (d *Detector) youtubeDiscoverOnce() {
 				membersErr = err
 			}
 			membersFailures++
+			summary.Failures++
 			continue
 		}
 		membersOK++
@@ -448,9 +482,28 @@ func (d *Detector) youtubeDiscoverOnce() {
 	case membersOK > 0:
 		d.recordSuccess(MechanismYouTubeMembersDiscover)
 	}
-	if dropped := d.watch.Sweep(now); len(dropped) > 0 {
-		slog.Debug("watchlist swept", "func", "Detector.youtubeDiscoverOnce", "dropped", len(dropped))
+	if drops := d.watch.sweep(now); len(drops) > 0 {
+		retired := 0
+		for _, dr := range drops {
+			if dr.Retired {
+				retired++
+			}
+			// Ended drops stay in the count below: the sweeps after a start
+			// let go of hundreds of back-catalogue uploads at once, all
+			// expected. Anything else is a video leaving the watchlist without
+			// having been seen to finish - rare, about one per pending frame
+			// per day - and exactly the line wanted when a go-live turns out to
+			// have been missed.
+			if dr.Reason == dropEnded {
+				continue
+			}
+			slog.Info("watchlist dropped a pending video without retiring it; discovery re-seeds it while it is still listed",
+				dr.logAttrs("Detector.youtubeDiscoverOnce", now)...)
+		}
+		slog.Debug("watchlist swept", "func", "Detector.youtubeDiscoverOnce",
+			"dropped", len(drops), "retired", retired)
 	}
+	return summary
 }
 
 // membersAbsence is a channel whose members-only playlist could not be read.
@@ -481,17 +534,85 @@ const (
 // It runs only after that uploads read succeeded, which is what lets a 403 or
 // 404 here be read as "this playlist", never "this key": the same key worked a
 // moment ago, and had it not, that failure was recorded.
-func (d *Detector) discoverMembersOnly(ctx context.Context, channelID, key string, publicIDs []string, now time.Time) (membersOutcome, error) {
-	playlist := MembersOnlyPlaylistID(channelID)
-	if playlist == "" {
-		return membersDone, nil
+//
+// summary is the pass's report, which it adds its unit, its read and its finds
+// to; the caller counts the outcome.
+func (d *Detector) discoverMembersOnly(ctx context.Context, channelID, key string, publicIDs []string, now time.Time, summary *DiscoverySummary) (membersOutcome, error) {
+	ids, read, err := d.readMembersOnlyPlaylist(ctx, channelID, key, now)
+	if read.spentUnit() {
+		summary.UnitsSpent++
 	}
-	if a, absent := d.ytMembersAbsent[channelID]; absent && now.Before(a.retry) {
+	switch read {
+	case membersReadSkipped, membersReadAbsent:
 		return membersDone, nil
-	}
-	if !d.gov.ReserveUnits(now, 1) {
+	case membersReadRefused:
 		metrics.LiveDetectPolls.WithLabelValues(MechanismYouTubeMembersDiscover, "skipped").Inc()
 		return membersRefused, nil
+	case membersReadFailed:
+		return membersFailed, fmt.Errorf("members-only playlist for %s: %w", key, err)
+	}
+	summary.PlaylistsRead++
+
+	// An id on both pages is caught mid-move between them, and public wins
+	// the tie. Treating a public stream as members-only keeps it off the
+	// worker's queue and loses its transcript; the reverse costs the worker
+	// some futile probes.
+	ids = slices.DeleteFunc(ids, func(id string) bool { return slices.Contains(publicIDs, id) })
+
+	if fresh := d.seedDiscovered(ids, key, true, now); len(fresh) > 0 {
+		slog.Info("youtube discovery found new members-only videos", "func", "Detector.discoverMembersOnly",
+			"key", key, "count", len(fresh), freshIDsAttr(fresh), "watchlist", d.watch.Size())
+		summary.noteFound(key, fresh, true)
+	}
+	return membersDone, nil
+}
+
+// membersRead is what readMembersOnlyPlaylist did.
+type membersRead int
+
+const (
+	// membersReadOK is a read; the ids are the page.
+	membersReadOK membersRead = iota
+	// membersReadSkipped asked nothing: the channel has no members-only
+	// playlist id, or is still backing off from not having a playlist.
+	membersReadSkipped
+	// membersReadAbsent is a 404 or a 403 that is not a rate limit: the
+	// channel has no playlist this key can read, and is now backed off.
+	membersReadAbsent
+	// membersReadRefused is the unit budget refusing the call.
+	membersReadRefused
+	// membersReadFailed is any other failure; the error says why.
+	membersReadFailed
+)
+
+// spentUnit reports whether the read booked a unit: every outcome that got as
+// far as asking YouTube.
+func (r membersRead) spentUnit() bool {
+	return r != membersReadSkipped && r != membersReadRefused
+}
+
+// readMembersOnlyPlaylist reads one channel's members-only playlist, keeping
+// the backoff bookkeeping in ytMembersAbsent, and says what happened. It runs
+// on the discovery goroutine, which alone may touch that map.
+//
+// It is the one place the members-only playlist is read and its answers are
+// classified, for discovery and for the operator's check alike: they share
+// ytMembersAbsent, and two copies of the rules drifting apart would have one
+// backing a channel off that the other had just cleared.
+//
+// Callers must only ask after a read with the same key has succeeded - an
+// uploads read, or a videos.list call - which is what lets a 403 or 404 here
+// be read as "this playlist", never "this key".
+func (d *Detector) readMembersOnlyPlaylist(ctx context.Context, channelID, key string, now time.Time) ([]string, membersRead, error) {
+	playlist := MembersOnlyPlaylistID(channelID)
+	if playlist == "" {
+		return nil, membersReadSkipped, nil
+	}
+	if a, absent := d.ytMembersAbsent[channelID]; absent && now.Before(a.retry) {
+		return nil, membersReadSkipped, nil
+	}
+	if !d.gov.ReserveUnits(now, 1) {
+		return nil, membersReadRefused, nil
 	}
 	metrics.LiveDetectQuotaUnits.Inc()
 
@@ -506,29 +627,18 @@ func (d *Detector) discoverMembersOnly(ctx context.Context, channelID, key strin
 		status := youtubeStatus(err)
 		if status == http.StatusNotFound || (status == http.StatusForbidden && !youtubeRateLimited(err)) {
 			d.markMembersAbsent(channelID, key, status, now)
-			return membersDone, nil
+			return nil, membersReadAbsent, nil
 		}
 		if errors.Is(err, errYouTubeQuota) {
 			d.gov.BlockUnits(now)
 		}
-		return membersFailed, fmt.Errorf("members-only playlist for %s: %w", key, err)
+		return nil, membersReadFailed, err
 	}
 	if _, wasAbsent := d.ytMembersAbsent[channelID]; wasAbsent {
 		delete(d.ytMembersAbsent, channelID)
-		slog.Info("channel now has a members-only playlist", "func", "Detector.discoverMembersOnly", "key", key)
+		slog.Info("channel now has a members-only playlist", "func", "Detector.readMembersOnlyPlaylist", "key", key)
 	}
-
-	// An id on both pages is caught mid-move between them, and public wins
-	// the tie. Treating a public stream as members-only keeps it off the
-	// worker's queue and loses its transcript; the reverse costs the worker
-	// some futile probes.
-	ids = slices.DeleteFunc(ids, func(id string) bool { return slices.Contains(publicIDs, id) })
-
-	if fresh := d.seedDiscovered(ids, key, true, now); fresh > 0 {
-		slog.Info("youtube discovery found new members-only videos", "func", "Detector.discoverMembersOnly",
-			"key", key, "count", fresh, "watchlist", d.watch.Size())
-	}
-	return membersDone, nil
+	return ids, membersReadOK, nil
 }
 
 // markMembersAbsent backs off a channel's members-only reads. It logs only
@@ -551,19 +661,22 @@ func (d *Detector) markMembersAbsent(channelID, key string, status int, now time
 }
 
 // seedDiscovered diffs one playlist page against the watchlist, seeds every id
-// it has not seen, and returns how many that was.
+// it has not seen, and returns those ids in page order.
 //
 // The WHOLE page is diffed, never just the newest entry: a stream scheduled in
 // advance sorts by publish date and can sit well down the list by the time it
 // actually starts.
+//
+// The ids themselves are returned, not a count, so the caller's log line can
+// name them. "Was this id ever seeded, and by which pass?" is the first
+// question about a missed go-live, and a count cannot answer it.
 //
 // membersOnly says which playlist the page came from, and it is applied to ids
 // already tracked as well. The uploads and members-only playlists never share
 // an id, so whichever one lists it now is the truth - a members-only waiting
 // room opened to everyone moves to the uploads playlist, and from then on it is
 // an ordinary stream.
-func (d *Detector) seedDiscovered(ids []string, key string, membersOnly bool, now time.Time) int {
-	fresh := 0
+func (d *Detector) seedDiscovered(ids []string, key string, membersOnly bool, now time.Time) (fresh []string) {
 	for _, id := range ids {
 		if d.watch.Known(id) {
 			d.watch.SetMembersOnly(id, membersOnly)
@@ -580,16 +693,32 @@ func (d *Detector) seedDiscovered(ids []string, key string, membersOnly bool, no
 		if membersOnly && d.watch.RetiredMembersOnly(id, now) {
 			continue
 		}
-		// Boost a newly discovered id so its first state poll is immediate -
-		// the id may already be live.
-		if membersOnly {
-			d.watch.SeedMembersOnly(id, key, now)
-		} else {
-			d.watch.Seed(id, key, now, true)
-		}
-		fresh++
+		// Boost a newly discovered id so it is polled hot from the start - the
+		// id may already be live. One the sweep only just aged out is re-seeded
+		// without the boost: it was being watched until moments ago, and
+		// boosting every such frame once a day is a standing cost for nothing.
+		// Its first poll is immediate either way.
+		d.watch.SeedDiscovered(id, key, now, membersOnly)
+		fresh = append(fresh, id)
 	}
 	return fresh
+}
+
+// discoveryLogIDsMax is the most fresh ids a discovery log line names. A
+// steady-state pass finds one or two, and naming them is what lets a missed
+// go-live be traced to the pass that seeded it, or show that none did. The
+// first pass after a start finds every id on every page - fifty a playlist -
+// and listing those would bury the lines that matter; the count says enough.
+const discoveryLogIDsMax = 10
+
+// freshIDsAttr is the "ids" attribute of a discovery log line, or an empty
+// attribute - which slog handlers leave out - when there are too many ids for
+// the list to be useful.
+func freshIDsAttr(fresh []string) slog.Attr {
+	if len(fresh) > discoveryLogIDsMax {
+		return slog.Attr{}
+	}
+	return slog.Any("ids", fresh)
 }
 
 // HandleWebSubPush processes a verified hub notification.

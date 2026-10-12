@@ -127,11 +127,19 @@ Every observation is recorded once in a ledger and then does three things:
 3. **Mirrors it to the operator feed** (`discord.detectWebhookUrl`) in the
    default announcement look, with no pings, and with the detection
    diagnostics (which mechanism won, and the delay behind the platform's own
-   start time) in the footer. The same feed carries detection problems.
+   start time) in the footer. The same feed carries detection problems,
+   including a ping when a live broadcast is detected more than ten minutes
+   after the platform's own start time (or one interval of the platform's
+   slowest poll plus five minutes, when `discoverySeconds` or `pollSeconds`
+   is set high enough to make that longer): healthy detections land within
+   seconds, so a late one is a stream that was effectively missed. A
+   broadcast the search audit rescued is not pinged again as late; the
+   audit's own alert already covered it.
 
 Disabled by default (`liveDetect.enabled`).
 
-Six mechanisms run together, deliberately redundant:
+Six mechanisms run together, deliberately redundant (a seventh label,
+`youtube-manual`, marks a claim an operator rescued with **Check video**):
 
 | Mechanism | Platform | Kind | Latency |
 | --- | --- | --- | --- |
@@ -140,7 +148,7 @@ Six mechanisms run together, deliberately redundant:
 | `youtube-websub` | YouTube | push (PubSubHubbub) | seeds a video id in seconds |
 | `youtube-state-poll` | YouTube | poll (`videos.list`, 3-300s adaptive) | seconds once the id is known |
 | `youtube-discovery` | YouTube | poll (`playlistItems.list`, 120s) | floor for an unscheduled go-live |
-| `youtube-search-audit` | YouTube | poll (`search.list`, 3h) | cross-check only, never detects |
+| `youtube-search-audit` | YouTube | poll (`search.list`, 3h at fixed UTC slots) | cross-check; alerts on a miss and seeds it, and the claim that follows is recorded under it |
 
 The split matters. Push paths give the latency but are **edge-triggered**: one
 dropped delivery and the stream is never seen. Polling paths are slower but
@@ -185,12 +193,64 @@ are detected. Most channels have no members-only playlist; YouTube answers 404
 for those, and discovery then asks only once an hour. The members-only reads
 report their health as their own leg, `youtube-members-discovery`.
 
+The optional search audit (`liveDetect.youtube.searchAudit`) is the backstop
+for a broadcast detection never sees. At fixed UTC slots - 00:20, 03:20, 06:20
+and every three hours after, never at startup, since restarts are frequent - it
+asks `search.list` which video each channel is live on and checks each answer
+against the detection ledger. A claimed broadcast (live or since ended) is
+fine. One the watchlist never knew about is a discovery miss: it is alerted
+immediately and seeded so the state poller still claims it. One the watchlist
+was already tracking is seeded and given 30 seconds to be claimed before it is
+alerted as tracked but never detected. Either way the claim the state poller
+then makes is recorded under `youtube-search-audit`, not `youtube-state-poll`:
+its delay measures the miss, not the poll ladder. When the ledger cannot be
+read, nothing is alerted, but an id the watchlist does not know is still
+seeded. A channel the ledger already holds a
+live YouTube broadcast for is skipped to save its call; a live Twitch broadcast
+does not count. Each pass logs what search returned and when the next slot is.
+The audit is budgeted at 40 calls a day (one per channel per slot, eight slots),
+on the understanding that `search.list` has its own 100-call daily bucket.
+That billing is unverified - the published cost table charges it 100 units of
+the shared allocation - so check the API's quota page in the Cloud Console
+before raising the budget.
+
 Latency comes from knowing the video id *before* the stream starts. Every
 premiere and any stream with a waiting room is on the watchlist long in advance,
 so the `upcoming -> live` transition is caught within seconds; only an
 unscheduled surprise go-live waits for a discovery pass. `videos.list` costs one
 quota unit per **call** regardless of how many ids it carries, which is what
 makes a three-second poll affordable.
+
+The watchlist the state poll reads is in memory, and how ids leave it decides
+what can still be detected:
+
+- **Ended** videos - finished streams, and the ordinary uploads discovery
+  finds on every page - leave ten minutes after they are first seen ended and
+  go into a 24-hour negative cache, so discovery does not re-seed the same back
+  catalogue on every pass. They are the only thing that cache ever holds.
+- **Upcoming** frames are never written off by their schedule. A frame still
+  waiting hours or days past its announced start is not abandoned: creators
+  hide a waiting room and re-publish it later without editing the schedule,
+  then go live on it. It stays on the cold rung of the ladder (every five
+  minutes, riding along on calls made anyway) and is aged out 24 hours after it
+  was first seen - not negative-cached, so the next discovery pass re-seeds it
+  while it is still listed. The re-seeded frame is polled straight away and
+  then left to the ladder, without the ten minutes of three-second polls a
+  newly found id gets, which would cost about 200 units a frame every day. Until
+  2026-10-11 such a frame was negative-cached as
+  "abandoned", which hid a re-published waiting room from discovery for a day;
+  its stream went undetected for two hours, until a restart cleared the cache.
+- An id `videos.list` **stops returning** (deleted, made private) is dropped
+  after five consecutive misses, also not negative-cached, so one that comes
+  back is rediscovered. The exception is a members-only id while `videos.list`
+  has never answered for any members-only video: it gets a negative cache of
+  its own, or it would be re-seeded and re-polled forever.
+
+Every drop other than an ended video is logged with the video id, the channel
+key, a `reason` (`aged-upcoming`, `aged-unknown`, `unreturned`), the state it
+was last seen in and its schedule, and discovery's log lines name the ids they
+seed (up to ten a line; the first pass after a start only counts them) - so
+"was this video ever on the watchlist, and what took it off?" is one grep.
 
 Both push callbacks are public and unauthenticated by necessity - Twitch and
 Google cannot send an API key - and verify an HMAC over the raw request body:
@@ -216,6 +276,86 @@ from a video (redirect to `/watch`), and an answer that is neither is
 announced as a video - the harmless direction. Only a video published within
 the last six hours is announced, so the first discovery pass after enabling
 does not announce a channel's whole back catalogue.
+
+#### Manual YouTube controls
+
+Two admin endpoints recover a missed YouTube go-live without restarting the
+server. Both take the channel's admin key (`X-Admin-Key`) and are on the admin
+page under the **Live detection legs** card (Notifications tab), which offers
+them when the channel is watched on YouTube (`liveDetectYouTube` in
+`GET /{channel}/admin/info`). Both run on the detector's discovery goroutine,
+between passes - the members-only bookkeeping they share with discovery
+belongs to that goroutine alone - and a request waits at most 45 seconds for
+it. Errors are JSON, `{"ok": false, "error": "...", "retryAfterSeconds": N}`.
+A successful call is posted to the admin audit webhook and wakes the admin
+page; a refused one is only logged.
+
+**`POST /{channel}/admin/livedetect/check`**, body
+`{"url": "<YouTube URL or video id>"}`. Accepts `watch?v=`, `youtu.be/`,
+`/live/`, `/shorts/` and `/embed/` links (tracking parameters are fine) and
+bare 11-character ids; a channel link such as `youtube.com/@name/live` is
+refused. It looks the video up (`videos.list`, one unit), refuses it unless it
+belongs to this channel's `youtubeChannelId` - otherwise one channel's admin
+could have another channel's stream announced and queued as theirs - removes
+it from both negative caches, reads the channel's members-only playlist (one
+unit, skipped while the channel is known to have none) to tell whether it is
+members-only, and puts it on the watchlist due for an immediate poll - without
+the ten-minute fast-poll boost discovery gives a new id, since the check has
+just read the video's state and the poll ladder handles an upcoming one. The
+state poll then detects it the normal way within seconds: claimed (recorded
+under `youtube-manual` when the video was already live at the check), queued
+(with `queueIncoming`), announced, and flagged by the late-detection alert if
+it started more than ten minutes earlier. A check costs at most three units:
+the lookup, the members-only read, and the one poll it brings forward. At most
+20 checks per channel per quota day; refused checks count, since each one
+still cost a lookup.
+
+| Status | Meaning |
+| --- | --- |
+| `200` | `{"ok": true, "videoId", "channelKey", "url", "state", "title", "scheduledStart", "actualStart", "membersOnly", "membersOnlyChecked", "unretired", "wasTracked", "tracked", "checksRemaining"}`. `state` is `upcoming`, `live`, `ended` or `unknown`; times are unix seconds; `unretired: true` means detection had wrongly written off a video that has not ended (an ended one in the negative cache is expected, and reads `false`); `membersOnlyChecked: false` means the members-only playlist was not read - the channel has none, is backed off, or the read failed - so a video not already known to be members-only is treated as public. |
+| `400` | Not a video link or id, or the video belongs to another channel. |
+| `404` | YouTube does not return the video: private, deleted, or a wrong id. |
+| `429` | This channel's daily check cap or the unit budget is spent; `Retry-After` says until when. |
+| `502` | The YouTube API call failed. |
+| `503` | Detection is disabled, the YouTube leg is not running, the server is shutting down, or the channel has no `youtubeChannelId`. |
+| `504` | The discovery loop did not answer in time. |
+
+**`POST /{channel}/admin/livedetect/discover`**, no body. Runs one discovery
+pass over every channel now, spending what a scheduled pass spends; the next
+scheduled pass then waits a full interval. At most one manual pass a minute
+across all channels, and six per channel per quota day: the spacing alone let
+one channel's script double the discovery rate and spend the whole budget.
+
+| Status | Meaning |
+| --- | --- |
+| `200` | `{"ok": true, "channels", "playlistsRead", "failures", "budgetRefused", "unitsSpent", "found", "foundMembersOnly", "foundOtherChannels"}`. The pass covers every channel, but `found` and `foundMembersOnly` list only this channel's new ids; other channels' finds are only counted. |
+| `429` | A manual pass ran less than a minute ago, or this channel has used its six for the quota day; `Retry-After` says when the next is allowed. |
+| `503` / `504` | As for `check`. |
+
+#### Runbook: a stream is live but was not detected
+
+1. **Start the transcript.** Queue the stream from the admin page's
+   **Incoming queue** as `https://www.youtube.com/watch?v=<id>`. The worker
+   picks it up in about 16 seconds, and every minute spent on the steps below
+   is otherwise lost from the transcript. That form is the one detection queues
+   itself, so if detection gets there while the entry is still waiting, the
+   two are one entry.
+2. **Let detection record it.** Paste the same URL into **Check video**.
+   Detection claims the stream and runs its announcements within seconds -
+   late, and the late-detection alert pings the operator feed if it started
+   more than ten minutes ago. The answer's `unretired` (shown as *was hidden
+   from discovery*) says whether a negative cache was hiding it although it
+   had not ended.
+3. **Find out why.** Search the server log (`tmp/_logs/server*.log`, JSON) for
+   the video id and for the channel key (`"key":"<channel>"`). Discovery lines
+   name the ids they seeded, drop lines carry a `reason` and the state and
+   schedule the video was last seen in, the check logs
+   `operator check seeded a youtube video` with `unretired`, and the search
+   audit logs what search reported live at each slot.
+4. **Do not restart the server to fix it.** A restart erases the in-memory
+   watchlist and caches that explain the miss, resets the quota counters (the
+   governor then believes the day's budget is unspent), and disconnects every
+   viewer. Steps 1 and 2 do everything a restart would.
 
 ### Notification Events
 

@@ -164,6 +164,10 @@ func main() {
 
 	// Release parked long-polls so Shutdown doesn't wait for them
 	app.Notifier.Release()
+	// Likewise admin requests waiting on live detection's discovery loop: the
+	// detector is only closed after Shutdown returns, so nothing else would
+	// release them in time.
+	app.LiveDetect.StopManualRequests()
 
 	// Shutdown HTTP Server first
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

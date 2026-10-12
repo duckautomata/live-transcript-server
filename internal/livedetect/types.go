@@ -70,6 +70,13 @@ const (
 	// broken members-only playlist would never alert, or would alert and
 	// recover inside every pass once enough channels were affected.
 	MechanismYouTubeMembersDiscover = "youtube-members-discovery"
+	// MechanismYouTubeManual is an operator's "Check video" on the admin page
+	// (Detector.CheckYouTubeVideo). It is never a leg with a health record;
+	// it only labels a claim the state poll won for a broadcast the operator
+	// found already live, so a rescued miss is not booked as the state poll's
+	// own detection. The search audit labels its rescues the same way, under
+	// MechanismYouTubeAudit.
+	MechanismYouTubeManual = "youtube-manual"
 )
 
 // Target is one channel to watch on one platform. ID is the platform's own
@@ -175,6 +182,11 @@ type Sink interface {
 	// restart can resume watching a broadcast already in progress instead of
 	// waiting for the next discovery pass to rediscover it.
 	ActiveBroadcasts(ctx context.Context) ([]Broadcast, error)
+	// DetectionClaimed reports whether a broadcast has been claimed in the
+	// ledger at all - live or since ended - which is the search audit's
+	// definition of "detected". An error means the ledger could not be read
+	// and says nothing either way.
+	DetectionClaimed(ctx context.Context, platform, broadcastID string) (bool, error)
 }
 
 // State is the liveness verdict for one broadcast, kept separate from

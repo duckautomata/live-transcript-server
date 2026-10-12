@@ -3,12 +3,16 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
+	"live-transcript-server/internal/discord"
 	"live-transcript-server/internal/livedetect"
 	"live-transcript-server/internal/metrics"
 )
@@ -290,4 +294,304 @@ func (app *App) webSubNotify(w http.ResponseWriter, r *http.Request) {
 	app.webhookWork(func(context.Context) {
 		app.LiveDetect.HandleWebSubPush(feed)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Manual YouTube detection (admin key, per channel)
+//
+// The two admin endpoints below are the operator's way to recover a missed
+// go-live without restarting the server, which used to be the only remedy
+// (FdwrQid9ulg, 2026-10-11): a restart cleared what hid the stream, but also
+// erased the in-memory state that explained the miss, reset the quota counters
+// and disconnected every viewer. The work runs on the detector's discovery
+// goroutine (livedetect/manual.go); these handlers only parse, map errors and
+// keep the audit trail.
+// ---------------------------------------------------------------------------
+
+// manualDetector is the slice of the detector the manual-control endpoints
+// use. *livedetect.Detector implements it, nil included: every method is
+// nil-receiver-safe and answers livedetect.ErrDetectionDisabled.
+type manualDetector interface {
+	CheckYouTubeVideo(ctx context.Context, channelKey, videoID string) (livedetect.VideoCheck, error)
+	RunDiscoveryNow(ctx context.Context, channelKey string) (livedetect.DiscoverySummary, error)
+	WatchesYouTube(channelKey string) bool
+}
+
+// manualDetect returns the detector behind the manual controls: the test
+// stand-in when one is set, LiveDetect otherwise.
+func (app *App) manualDetect() manualDetector {
+	if app.ManualDetect != nil {
+		return app.ManualDetect
+	}
+	return app.LiveDetect
+}
+
+// maxManualDetectBody bounds a check request. The body is one URL.
+const maxManualDetectBody = 4 << 10
+
+// youtubeVideoHosts are the hosts whose links carry a video id in the path or
+// the v parameter. youtu.be is handled on its own: its whole path is the id.
+var youtubeVideoHosts = map[string]bool{
+	"youtube.com":              true,
+	"www.youtube.com":          true,
+	"m.youtube.com":            true,
+	"music.youtube.com":        true,
+	"youtube-nocookie.com":     true,
+	"www.youtube-nocookie.com": true,
+}
+
+// errNotAVideoLink is the parser's answer for anything it cannot read an id
+// out of. The message is written for the admin page.
+var errNotAVideoLink = errors.New("not a YouTube video link or id: paste the video's own URL (watch?v=, youtu.be/, /live/ or /shorts/) or its 11-character id")
+
+// parseYouTubeVideoRef extracts a video id from what an operator pastes: a
+// bare id, or a watch?v=, youtu.be/, /live/, /shorts/ or /embed/ link, with or
+// without the scheme, and with whatever tracking parameters came along.
+//
+// A channel's own /live link (youtube.com/@name/live) is refused rather than
+// resolved: it redirects to whatever the channel is live on, which takes a
+// search call to learn, and the operator has the stream open anyway - its
+// address bar carries the real id.
+func parseYouTubeVideoRef(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", errors.New("url is required")
+	}
+	if livedetect.ValidYouTubeVideoID(s) {
+		return s, nil
+	}
+
+	raw := s
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", errNotAVideoLink
+	}
+	host := strings.ToLower(u.Hostname())
+	segments := strings.Split(strings.Trim(u.Path, "/"), "/")
+
+	var id string
+	switch {
+	case host == "youtu.be" || host == "www.youtu.be":
+		id = segments[0]
+	case youtubeVideoHosts[host]:
+		switch {
+		case segments[0] == "watch":
+			id = u.Query().Get("v")
+		case len(segments) >= 2 && (segments[0] == "live" || segments[0] == "shorts" || segments[0] == "embed"):
+			id = segments[1]
+		case strings.HasPrefix(segments[0], "@") || segments[0] == "channel" || segments[0] == "c":
+			return "", errors.New("that is a channel link, not a video: open the stream and paste the URL of its own page")
+		}
+	default:
+		return "", errNotAVideoLink
+	}
+	if !livedetect.ValidYouTubeVideoID(id) {
+		return "", errNotAVideoLink
+	}
+	return id, nil
+}
+
+// badManualRequest is input the handler refuses before the detector sees it.
+// manualDetectStatus answers it 400, and its message is the whole answer.
+type badManualRequest struct{ msg string }
+
+func (e *badManualRequest) Error() string { return e.msg }
+
+// manualDetectError is the JSON body of a refused manual request. The admin
+// page shows Error as written; RetryAfterSeconds repeats the Retry-After
+// header for a page that does not read headers.
+type manualDetectError struct {
+	OK                bool   `json:"ok"`
+	Error             string `json:"error"`
+	RetryAfterSeconds int    `json:"retryAfterSeconds,omitempty"`
+}
+
+// manualDetectStatus maps an error from the manual controls to the HTTP status
+// it answers with, plus how long a retry should wait where waiting helps.
+//
+// 400 is the request's fault (bad input, another channel's video), 404 a
+// video YouTube will not return, 429 a limit (with when it lifts), 502 the
+// YouTube API failing, 503 detection being unavailable for this channel, and
+// 504 the discovery loop not answering in time.
+func manualDetectStatus(err error) (status int, retryAfter time.Duration) {
+	var tooSoon *livedetect.TooSoonError
+	var other *livedetect.OtherChannelError
+	var bad *badManualRequest
+	switch {
+	case errors.As(err, &tooSoon):
+		return http.StatusTooManyRequests, tooSoon.RetryAfter
+	case errors.As(err, &bad), errors.As(err, &other), errors.Is(err, livedetect.ErrInvalidVideoID):
+		return http.StatusBadRequest, 0
+	case errors.Is(err, livedetect.ErrVideoNotFound):
+		return http.StatusNotFound, 0
+	case errors.Is(err, livedetect.ErrDetectionDisabled),
+		errors.Is(err, livedetect.ErrYouTubeNotRunning),
+		errors.Is(err, livedetect.ErrNoYouTubeChannel):
+		return http.StatusServiceUnavailable, 0
+	case errors.Is(err, livedetect.ErrManualTimeout), errors.Is(err, context.DeadlineExceeded):
+		return http.StatusGatewayTimeout, 0
+	case errors.Is(err, livedetect.ErrYouTubeAPI):
+		return http.StatusBadGateway, 0
+	default:
+		return http.StatusInternalServerError, 0
+	}
+}
+
+// writeManualDetectError answers a refused manual request and logs it. A
+// refusal is not audited: notifyAdminAction is for what an admin changed, and
+// a refused request changed nothing.
+func (app *App) writeManualDetectError(w http.ResponseWriter, r *http.Request, cs *ChannelState, fn string, err error, attrs ...any) {
+	attrs = append([]any{"key", cs.Key, "func", fn}, attrs...)
+	if isClientGone(err) && r.Context().Err() != nil {
+		// The admin closed the page; nobody is left to answer.
+		slog.Info("admin live detection request abandoned by the client", append(attrs, "err", err)...)
+		return
+	}
+
+	status, retryAfter := manualDetectStatus(err)
+	attrs = append(attrs, "status", status, "err", err)
+	var other *livedetect.OtherChannelError
+	if errors.As(err, &other) {
+		// Named in the log: a channel admin pointed detection at a stream
+		// that is not theirs, by mistake or not.
+		attrs = append(attrs, "videoChannelId", other.ChannelID, "videoChannelKey", other.ChannelKey)
+	}
+	if status >= 500 {
+		slog.Error("admin live detection request failed", attrs...)
+		metrics.Http500Errors.Inc()
+	} else {
+		slog.Warn("admin live detection request refused", attrs...)
+		metrics.Http400Errors.Inc()
+	}
+
+	body := manualDetectError{Error: err.Error()}
+	if retryAfter > 0 {
+		secs := max(int(retryAfter.Round(time.Second)/time.Second), 1)
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		body.RetryAfterSeconds = secs
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		slog.Error("failed to write JSON error", "func", fn, "err", err)
+	}
+}
+
+// LiveDetectCheckResponse is the answer to POST
+// /{channel}/admin/livedetect/check: the video as YouTube reports it and what
+// detection did with it.
+type LiveDetectCheckResponse struct {
+	OK bool `json:"ok"`
+	livedetect.VideoCheck
+}
+
+// postAdminLiveDetectCheckHandler looks up one YouTube video for this channel
+// and puts it on the detection watchlist, due for an immediate state poll -
+// clearing whatever negative cache hid it. Body: {"url": "<link or id>"}.
+//
+// It is the recovery for a stream that is live but was never detected. The
+// state poll that follows claims it through the normal path, so it is queued
+// and announced like any other detection - late, and the late-detection alert
+// says so.
+func (app *App) postAdminLiveDetectCheckHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
+	const fn = "postAdminLiveDetectCheckHandler"
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxManualDetectBody)).Decode(&body); err != nil {
+		app.writeManualDetectError(w, r, cs, fn, &badManualRequest{`the body must be JSON like {"url": "https://www.youtube.com/watch?v=..."}`})
+		return
+	}
+	videoID, err := parseYouTubeVideoRef(body.URL)
+	if err != nil {
+		app.writeManualDetectError(w, r, cs, fn, &badManualRequest{err.Error()}, "input", body.URL)
+		return
+	}
+
+	check, err := app.manualDetect().CheckYouTubeVideo(r.Context(), cs.Key, videoID)
+	if err != nil {
+		app.writeManualDetectError(w, r, cs, fn, err, "videoId", videoID)
+		return
+	}
+
+	// The watchlist size and the quota spend on the page both moved, and a
+	// live video is about to appear under recent detections.
+	app.bumpAdminChange(cs.Key)
+	app.notifyAdminAction(r, cs, "Checked a YouTube video for live detection",
+		discord.AdminField{Name: "Video", Value: check.URL},
+		discord.AdminField{Name: "State", Value: check.State, Inline: true},
+		discord.AdminField{Name: "Members Only", Value: yesNo(check.MembersOnly), Inline: true},
+		discord.AdminField{Name: "Was Hidden From Discovery", Value: yesNo(check.Unretired), Inline: true},
+		discord.AdminField{Name: "Was Already Tracked", Value: yesNo(check.WasTracked), Inline: true},
+		discord.AdminField{Name: "Title", Value: check.Title},
+	)
+	slog.Info("admin checked a youtube video for live detection", "key", cs.Key, "func", fn,
+		"videoId", check.VideoID, "state", check.State, "membersOnly", check.MembersOnly,
+		"unretired", check.Unretired, "wasTracked", check.WasTracked, "checksRemaining", check.ChecksRemaining)
+	writeJSON(w, LiveDetectCheckResponse{OK: true, VideoCheck: check})
+}
+
+// LiveDetectDiscoverResponse is the answer to POST
+// /{channel}/admin/livedetect/discover.
+//
+// A pass covers every YouTube channel, whichever admin asked, so the counts
+// are the whole pass's. Only this channel's finds are listed, though: this
+// page is scoped to one channel, and another channel's new ids - members-only
+// ones included - are that channel's business. FoundOtherChannels says how
+// many there were.
+type LiveDetectDiscoverResponse struct {
+	OK                 bool     `json:"ok"`
+	Channels           int      `json:"channels"`
+	PlaylistsRead      int      `json:"playlistsRead"`
+	Failures           int      `json:"failures"`
+	BudgetRefused      bool     `json:"budgetRefused"`
+	UnitsSpent         int      `json:"unitsSpent"`
+	Found              []string `json:"found"`
+	FoundMembersOnly   []string `json:"foundMembersOnly"`
+	FoundOtherChannels int      `json:"foundOtherChannels"`
+}
+
+// postAdminLiveDetectDiscoverHandler runs one YouTube discovery pass now
+// rather than at its next scheduled slot. At most one manual pass a minute,
+// across every channel.
+func (app *App) postAdminLiveDetectDiscoverHandler(w http.ResponseWriter, r *http.Request, cs *ChannelState) {
+	const fn = "postAdminLiveDetectDiscoverHandler"
+	summary, err := app.manualDetect().RunDiscoveryNow(r.Context(), cs.Key)
+	if err != nil {
+		app.writeManualDetectError(w, r, cs, fn, err)
+		return
+	}
+
+	resp := LiveDetectDiscoverResponse{
+		OK:               true,
+		Channels:         summary.Channels,
+		PlaylistsRead:    summary.PlaylistsRead,
+		Failures:         summary.Failures,
+		BudgetRefused:    summary.BudgetRefused,
+		UnitsSpent:       summary.UnitsSpent,
+		Found:            append([]string{}, summary.Found[cs.Key]...),
+		FoundMembersOnly: append([]string{}, summary.FoundMembersOnly[cs.Key]...),
+	}
+	for _, found := range []map[string][]string{summary.Found, summary.FoundMembersOnly} {
+		for key, ids := range found {
+			if key != cs.Key {
+				resp.FoundOtherChannels += len(ids)
+			}
+		}
+	}
+
+	app.bumpAdminChange(cs.Key)
+	app.notifyAdminAction(r, cs, "Ran live detection discovery",
+		discord.AdminField{Name: "New Videos Here", Value: strconv.Itoa(len(resp.Found) + len(resp.FoundMembersOnly)), Inline: true},
+		discord.AdminField{Name: "Playlists Read", Value: strconv.Itoa(resp.PlaylistsRead), Inline: true},
+		discord.AdminField{Name: "Quota Units", Value: strconv.Itoa(resp.UnitsSpent), Inline: true},
+	)
+	slog.Info("admin ran youtube discovery", "key", cs.Key, "func", fn,
+		"found", resp.Found, "foundMembersOnly", resp.FoundMembersOnly, "foundOtherChannels", resp.FoundOtherChannels,
+		"playlistsRead", resp.PlaylistsRead, "failures", resp.Failures, "budgetRefused", resp.BudgetRefused,
+		"units", resp.UnitsSpent)
+	writeJSON(w, resp)
 }

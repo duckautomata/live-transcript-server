@@ -307,3 +307,110 @@ func TestNotifyAdminAction_EmptyValueIsPlaceheld(t *testing.T) {
 		}
 	}
 }
+
+// A late detection is a stream that was effectively missed, so the alert pings
+// and carries everything the operator needs to start digging: who, where,
+// which leg finally saw it, how late, and whether it was watched beforehand.
+func TestNotifyLiveDetectLate_PingsWithDiagnostics(t *testing.T) {
+	channels := []config.ChannelConfig{{Name: "beri", DisplayName: "Beri"}}
+	c, payloads := newTestClient(t, config.DiscordConfig{NotifyUserID: "u1"}, "test", channels)
+
+	c.NotifyLiveDetectLate("beri", "YouTube", "FdwrQid9ulg", "https://www.youtube.com/watch?v=FdwrQid9ulg",
+		"youtube-discovery", 7349*time.Second, false)
+	payload := waitPayload(t, payloads)
+	embed := embedFrom(t, payload)
+
+	if got := payload["content"]; got != "<@u1>" {
+		t.Errorf("content=%v want the operator ping", got)
+	}
+	if got := embed["title"]; got != "Live Detection Was Late" {
+		t.Errorf("title=%v", got)
+	}
+	if got := embed["color"]; got != float64(15158332) {
+		t.Errorf("color=%v want red", got)
+	}
+	desc, _ := embed["description"].(string)
+	for _, want := range []string{
+		"**Beri** went live on YouTube 2h2m29s before detection noticed.",
+		"[FdwrQid9ulg](https://www.youtube.com/watch?v=FdwrQid9ulg)",
+		"**Detected by:** youtube-discovery",
+		"**Watched as scheduled:** no",
+		"check the server log for the channel's discovery/sweep lines",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("description=%q\nmissing %q", desc, want)
+		}
+	}
+}
+
+// Detection alerts go to the detection webhook, not the main one, like every
+// other live-detect alert.
+func TestNotifyLiveDetectLate_UsesDetectWebhook(t *testing.T) {
+	main, mainPayloads := newTestClient(t, config.DiscordConfig{}, "test", nil)
+	detect, detectPayloads := newTestClient(t, config.DiscordConfig{}, "test", nil)
+
+	c := NewClient(config.DiscordConfig{
+		WebhookURL:       main.WebhookURL,
+		DetectWebhookURL: detect.WebhookURL,
+	}, "test", nil)
+
+	// No URL (and an unconfigured channel): the id stands alone and the key
+	// stands in for the display name.
+	c.NotifyLiveDetectLate("other", "Twitch", "314159", "", "twitch-poll", 15*time.Minute, true)
+	desc, _ := embedFrom(t, waitPayload(t, detectPayloads))["description"].(string)
+	for _, want := range []string{
+		"**other** went live on Twitch 15m0s before detection noticed.\n314159\n",
+		"**Watched as scheduled:** yes",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("description=%q\nmissing %q", desc, want)
+		}
+	}
+
+	select {
+	case p := <-mainPayloads:
+		t.Fatalf("late-detection alert leaked to the main webhook: %#v", p)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestNotifyLiveDetectLate_NilAndUnconfiguredAreNoOps(t *testing.T) {
+	var nilClient *Client
+	nilClient.NotifyLiveDetectLate("beri", "YouTube", "x", "", "youtube-discovery", time.Hour, false)
+
+	NewClient(config.DiscordConfig{}, "test", nil).
+		NotifyLiveDetectLate("beri", "YouTube", "x", "", "youtube-discovery", time.Hour, false)
+}
+
+// A tracked-but-unclaimed broadcast is a miss like any other, so it pings, but
+// it must not blame discovery: discovery found it, and the text has to send
+// the operator to the state poll instead.
+func TestNotifyLiveDetectAuditUnclaimed_PointsAtTheStatePoll(t *testing.T) {
+	channels := []config.ChannelConfig{{Name: "beri", DisplayName: "Beri"}}
+	c, payloads := newTestClient(t, config.DiscordConfig{NotifyUserID: "u1"}, "test", channels)
+
+	c.NotifyLiveDetectAuditUnclaimed("beri", "FdwrQid9ulg")
+	payload := waitPayload(t, payloads)
+	embed := embedFrom(t, payload)
+
+	if got := payload["content"]; got != "<@u1>" {
+		t.Errorf("content=%v want the operator ping", got)
+	}
+	desc, _ := embed["description"].(string)
+	for _, want := range []string{
+		"**Beri** live on a broadcast detection was tracking but never detected",
+		"[FdwrQid9ulg](https://www.youtube.com/watch?v=FdwrQid9ulg)",
+		"the state poll did not confirm it",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("description=%q\nmissing %q", desc, want)
+		}
+	}
+	if strings.Contains(desc, "Discovery is not surfacing") {
+		t.Errorf("description=%q blames discovery, which did find this broadcast", desc)
+	}
+
+	var nilClient *Client
+	nilClient.NotifyLiveDetectAuditUnclaimed("beri", "x")
+	NewClient(config.DiscordConfig{}, "test", nil).NotifyLiveDetectAuditUnclaimed("beri", "x")
+}

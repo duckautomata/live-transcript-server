@@ -688,29 +688,130 @@ func TestMissCounterResetsWhenTheVideoComesBack(t *testing.T) {
 	}
 }
 
-// Creators leave dead waiting rooms up. One still "upcoming" long past its own
-// announced start is never going to begin, and costs a poll every five minutes
-// until the 24-hour age sweep otherwise.
-func TestAbandonedFramesAreDroppedByTheirOwnSchedule(t *testing.T) {
+// A frame still "upcoming" long past its own announced start is NOT proof the
+// creator abandoned it: a hidden waiting room can be re-published days later
+// with its old schedule and used. It stays on the cold rung of the ladder and
+// is aged out like any other pending frame - never retired - so discovery
+// re-seeds it if it is still on the playlist.
+func TestFramesPastTheirScheduleAreAgedOutNotRetired(t *testing.T) {
 	w := newWatchlist()
+	d := &Detector{watch: w}
 
 	// Scheduled for an hour after we first saw it, then never started.
-	w.Seed("abandoned", "doki", base, false)
-	w.Observe("abandoned", StateUpcoming, base.Add(time.Hour), base)
+	w.Seed("overdue", "doki", base, false)
+	w.Observe("overdue", StateUpcoming, base.Add(time.Hour), base)
 
-	// Judged against the schedule, so it survives while still pending.
-	if dropped := w.Sweep(base.Add(2 * time.Hour)); len(dropped) != 0 {
-		t.Fatalf("swept a frame only an hour past its start: %v", dropped)
+	// Hours past its schedule it is still watched, on the cold rung - checked,
+	// not abandoned, and not polled fast.
+	at := base.Add(13 * time.Hour)
+	if dropped := w.Sweep(at); len(dropped) != 0 {
+		t.Fatalf("swept a frame only 12h past its start: %v", dropped)
 	}
-	if dropped := w.Sweep(base.Add(time.Hour + ytAbandonedAfterSchedule + time.Minute)); len(dropped) != 1 {
-		t.Fatalf("dropped = %v, want the abandoned frame gone", dropped)
+	if got := w.entries["overdue"].interval(at); got != ytIntervalCold {
+		t.Errorf("interval of an overdue frame = %v, want %v", got, ytIntervalCold)
 	}
 
-	// A frame created days early is NOT abandoned - its time has not come.
+	// Aged out by first sighting, like every pending frame...
+	aged := base.Add(ytUpcomingMaxAge + time.Minute)
+	if dropped := w.Sweep(aged); len(dropped) != 1 {
+		t.Fatalf("dropped = %v, want the overdue frame aged out after %v", dropped, ytUpcomingMaxAge)
+	}
+	// ...but never negatively cached, so the next discovery pass picks it up.
+	if w.Retired("overdue", aged) {
+		t.Fatal("an upcoming frame must stay rediscoverable; retiring it could miss the go-live")
+	}
+	if fresh := d.seedDiscovered([]string{"overdue"}, "doki", false, aged.Add(5*time.Minute)); len(fresh) != 1 {
+		t.Fatalf("discovery re-seeded %v, want the aged-out frame back", fresh)
+	}
+
+	// A frame created days early is not touched before its age is up either.
 	w2 := newWatchlist()
 	w2.Seed("far-future", "doki", base, false)
 	w2.Observe("far-future", StateUpcoming, base.Add(72*time.Hour), base)
 	if dropped := w2.Sweep(base.Add(20 * time.Hour)); len(dropped) != 0 {
 		t.Fatalf("swept a frame that has not reached its scheduled time: %v", dropped)
+	}
+}
+
+// FdwrQid9ulg, 2026-10-11: a waiting room created and hidden a week earlier was
+// re-published with its original, week-old schedule. Its first poll read
+// "upcoming", the sweep that closed the same discovery pass judged it abandoned
+// and retired it for 24 hours, and its go-live fifteen hours later was never
+// seen. A frame that has only just appeared with a stale schedule is a reused
+// frame, not an abandoned one.
+func TestRepublishedFrameWithAStaleScheduleIsStillWatchedAtGoLive(t *testing.T) {
+	const id = "FdwrQid9ulg"
+	at := func(s string) time.Time {
+		tm, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tm
+	}
+	passStart := at("2026-10-11T04:57:34Z")
+	stale := at("2026-10-04T20:00:00Z")
+
+	w := newWatchlist()
+	d := &Detector{watch: w}
+	if fresh := d.seedDiscovered([]string{id}, "beri", false, passStart); len(fresh) != 1 {
+		t.Fatalf("fresh = %v, want the re-published frame seeded", fresh)
+	}
+	w.Observe(id, StateUpcoming, stale, passStart.Add(time.Second))
+
+	// The sweep closing the same pass, and every pass after it, keeps it.
+	for _, now := range []time.Time{passStart, passStart.Add(30 * time.Second), at("2026-10-11T18:01:31Z")} {
+		if dropped := w.Sweep(now); len(dropped) != 0 {
+			t.Fatalf("Sweep(%v) dropped %v", now, dropped)
+		}
+		if w.Retired(id, now) {
+			t.Fatalf("a pending frame was retired at %v", now)
+		}
+	}
+
+	// Once the seed boost lapses it costs at most one cold poll in five minutes.
+	if got := w.entries[id].interval(passStart.Add(ytSeedBoost + time.Second)); got != ytIntervalCold {
+		t.Errorf("interval after the boost = %v, want %v", got, ytIntervalCold)
+	}
+
+	// At the go-live it is still on the watchlist and comes due within one
+	// cold interval, and the delay is attributed to the ladder, not discovery.
+	goLive := at("2026-10-11T20:03:01Z")
+	if !w.Known(id) {
+		t.Fatal("the frame must still be watched when it goes live")
+	}
+	if due := w.Due(goLive.Add(ytIntervalCold)); len(due) != 1 || due[0] != id {
+		t.Fatalf("Due one cold interval after go-live = %v, want [%s]", due, id)
+	}
+	w.Observe(id, StateLive, time.Time{}, goLive.Add(ytIntervalCold))
+	if !w.SawUpcoming(id) {
+		t.Error("the frame was watched as a waiting room before going live")
+	}
+}
+
+// No sweep may put a not-yet-ended entry into the negative cache: discovery
+// skips retired ids for a day, and anything not ended can still go live.
+func TestSweepNeverRetiresAnEntryThatHasNotEnded(t *testing.T) {
+	schedules := map[string]time.Time{
+		"none":       {},
+		"epoch":      time.Unix(0, 0).UTC(),
+		"week-ago":   base.Add(-7 * 24 * time.Hour),
+		"13h-ago":    base.Add(-13 * time.Hour),
+		"hour-ago":   base.Add(-time.Hour),
+		"in-an-hour": base.Add(time.Hour),
+		"in-3-days":  base.Add(72 * time.Hour),
+	}
+	for _, state := range []State{StateUnknown, StateUpcoming, StateLive} {
+		for name, sched := range schedules {
+			for _, after := range []time.Duration{0, 13 * time.Hour, ytUpcomingMaxAge + time.Minute, 49 * time.Hour} {
+				w := newWatchlist()
+				w.Seed("x", "doki", base, true)
+				w.Observe("x", state, sched, base)
+				now := base.Add(after)
+				w.Sweep(now)
+				if w.Retired("x", now) {
+					t.Errorf("state %v, schedule %s, swept at +%v: retired a pending entry", state, name, after)
+				}
+			}
+		}
 	}
 }

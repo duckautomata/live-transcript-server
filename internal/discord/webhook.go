@@ -547,6 +547,91 @@ func (d *Client) NotifyLiveDetectAuditMiss(channelKey, videoID string) {
 	})
 }
 
+// NotifyLiveDetectAuditUnclaimed reports that the search cross-check found a
+// live broadcast detection was already tracking but had never claimed, even
+// after the cross-check pulled its next state poll forward and waited.
+//
+// It is the audit miss's sibling, kept apart because it points somewhere else:
+// discovery did its job, so whatever failed lies between the watchlist and the
+// ledger - the state poll, the quota governor, or the sink.
+func (d *Client) NotifyLiveDetectAuditUnclaimed(channelKey, videoID string) {
+	if d == nil || d.detectWebhookURL() == "" {
+		return
+	}
+	fullName := channelKey
+	if p, ok := d.channels[channelKey]; ok {
+		fullName = p.displayName
+	}
+	go d.sendTo(d.detectWebhookURL(), map[string]any{
+		"content": d.NotifyPing,
+		"embeds": []map[string]any{
+			{
+				"title": "Live Detection Missed a Stream",
+				"description": fmt.Sprintf(
+					"The search cross-check found **%s** live on a broadcast detection was tracking but never detected.\n[%s](%s)\n\nDiscovery found it; the state poll did not confirm it. Check the server log for the state poll and the quota governor.",
+					fullName, videoID, "https://www.youtube.com/watch?v="+videoID),
+				"color":     15158332, // Red
+				"timestamp": time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("live detection · Version: %s", d.Version),
+				},
+			},
+		},
+	})
+}
+
+// NotifyLiveDetectLate reports that a live broadcast was detected - and so
+// queued and announced - long after the platform says it started.
+//
+// It pings, like the audit miss, because by the time this fires the stream was
+// effectively missed: the audience announcement went out late, and with
+// queueIncoming the worker started late too, so the opening of the transcript
+// is gone. It is also the only alarm that sees a detection gap which healed
+// itself: discovery finding the broadcast eventually (or a restart clearing
+// whatever hid it) looks like an ordinary detection everywhere else.
+//
+// platform is the display label ("YouTube"), url may be empty, and delay is
+// detection time minus the platform's start time. sawScheduled says whether
+// detection was already watching the broadcast as an upcoming one before it
+// went live, which tells the operator where to look: a watched waiting room
+// that still came in late points at the state poller or the watchlist, an
+// unwatched one at discovery.
+func (d *Client) NotifyLiveDetectLate(channelKey, platform, broadcastID, url, mechanism string, delay time.Duration, sawScheduled bool) {
+	if d == nil || d.detectWebhookURL() == "" {
+		return
+	}
+	fullName := channelKey
+	if p, ok := d.channels[channelKey]; ok {
+		fullName = p.displayName
+	}
+	link := broadcastID
+	if url != "" {
+		link = fmt.Sprintf("[%s](%s)", broadcastID, url)
+	}
+	scheduled := "no"
+	if sawScheduled {
+		scheduled = "yes"
+	}
+	go d.sendTo(d.detectWebhookURL(), map[string]any{
+		"content": d.NotifyPing,
+		"embeds": []map[string]any{
+			{
+				"title": "Live Detection Was Late",
+				"description": fmt.Sprintf(
+					"**%s** went live on %s %s before detection noticed.\n%s\n\n"+
+						"**Detected by:** %s\n**Watched as scheduled:** %s\n\n"+
+						"Detection did not see this broadcast start; check the server log for the channel's discovery/sweep lines.",
+					fullName, platform, delay.Round(time.Second), link, mechanism, scheduled),
+				"color":     15158332, // Red
+				"timestamp": time.Now().Format(time.RFC3339),
+				"footer": map[string]string{
+					"text": fmt.Sprintf("live detection · Version: %s", d.Version),
+				},
+			},
+		},
+	})
+}
+
 // NotifyLiveDetectCallbackBlocked alerts that an inbound callback URL is being
 // answered by something other than this server.
 //

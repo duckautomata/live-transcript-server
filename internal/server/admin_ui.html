@@ -537,6 +537,20 @@
   .row .row-title .dot.offline { background: var(--danger); }
   .row .row-title .dot.warn { background: var(--warning); }
   .leg-state { color: var(--text-muted); font-size: 12px; margin-left: 6px; }
+
+  /* Manual YouTube controls under the legs list: the add-row form, allowed
+     to wrap so the two buttons drop below the input on a phone, and a result
+     area that reuses the row styles and only takes space when it has
+     something to say. */
+  .add-row.wrap { flex-wrap: wrap; }
+  .add-row.wrap input { min-width: 200px; }
+  .ld-manual-result:empty { display: none; }
+  .ld-manual-result { border-top: 1px solid var(--border); padding-top: 12px; }
+  .ld-manual-result .row { border-bottom: none; padding-top: 0; }
+  /* The chips are the answer (hidden from discovery, members-only), so the
+     title wraps here instead of being cut off with an ellipsis. */
+  .ld-manual-result .row-title { white-space: normal; }
+  .ld-manual-result .form-error { margin-top: 0; }
   .row-title a { color: var(--text); text-decoration: none; }
   .row-title a:hover { color: var(--accent); text-decoration: underline; }
 
@@ -711,6 +725,19 @@
     <div class="card-body" id="ld-legs-body">
       <div class="empty">Loading…</div>
     </div>
+    <!-- Manual YouTube controls, for a stream that is live but was not
+         detected. Shown only when detection is on and this channel is watched
+         on YouTube (info.liveDetectYouTube). Static markup rather than part of
+         the legs render, so the periodic re-render never wipes what is being
+         typed or the last result. -->
+    <div id="ld-manual" style="display:none">
+      <form class="add-row wrap" id="ld-check-form">
+        <input type="text" id="ld-check-input" placeholder="YouTube URL or video id" autocomplete="off" spellcheck="false" />
+        <button type="submit" class="primary" id="ld-check-btn" title="Look this video up now and have detection watch it. Clears anything that was hiding it from discovery.">Check video</button>
+        <button type="button" id="ld-discover-btn" title="Read every YouTube channel's playlists now instead of at the next scheduled pass.">Run discovery now</button>
+      </form>
+      <div class="ld-manual-result" id="ld-manual-result"></div>
+    </div>
   </div>
 
 
@@ -875,9 +902,25 @@
         <dd>What live detection saw on this channel: streams going live (with which mechanism won and how long after the platform's own start time), streams being scheduled, videos and shorts being published. <strong>Clear</strong> removes finished entries; anything still guarding against a repeat announcement is kept.</dd>
         <dt>Live detection cards</dt>
         <dd><strong>Live detection</strong> summarises the health of the detection legs (Twitch EventSub and polling, YouTube WebSub, state polling and discovery); the legs card lists each one. <strong>Worker queue</strong> says whether a detected stream is queued for the worker automatically (<code>liveDetect.queueIncoming</code> in the server config) or only announced. <strong>Operator feed</strong> is the server's own copy of every detection, posted in the default look with no pings to <code>discord.detectWebhookUrl</code> - the same feed that carries detection problems, kept separate from the audience webhooks on purpose.</dd>
+        <dt>Check video</dt>
+        <dd>Under the legs card, shown when this channel is watched on YouTube. Paste a YouTube link (<code>watch?v=</code>, <code>youtu.be/</code>, <code>/live/</code>, <code>/shorts/</code>) or a bare video id. The server looks the video up, makes sure it belongs to this channel, clears anything that was hiding it from discovery, and has detection poll it straight away - a live stream is then recorded and announced within seconds, the normal way. The answer says the video's state, whether it is members-only (or <em>members-only not checked</em> when the channel's members-only playlist could not be read, in which case it is treated as public), and <em>was hidden from discovery</em> when detection had wrongly written off a video that has not ended. It costs at most three YouTube quota units; each channel may run 20 checks a day.</dd>
+        <dt>Run discovery now</dt>
+        <dd>Reads every YouTube channel's playlists immediately instead of at the next scheduled pass (every two minutes by default), and lists what it found on this channel. Up to two quota units per channel; once a minute at most, and six times a day per channel.</dd>
         <dt>Accounts</dt>
         <dd>Anyone can create an account on the site to run their own events. Sign-ups can be closed with <code>accounts.disableRegistration</code> in the server config; existing accounts keep working. What accounts do with their own events (create, edit, pause, delete, test send) goes to the server log with the webhooks masked, not to the admin audit webhook, which is reserved for operator actions.</dd>
       </dl>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>A stream is live but was not detected</h2></div>
+    <div class="guide-body">
+      <ol>
+        <li><strong>Start the transcript first.</strong> Queue the stream from the <strong>Incoming queue</strong> card on the Worker &amp; streams tab, as <code>https://www.youtube.com/watch?v=&lt;id&gt;</code>. The worker picks it up within seconds; every minute spent on the steps below is otherwise lost from the transcript. That form is the one detection queues itself, so if detection gets there while your entry is still waiting, the two are one entry.</li>
+        <li><strong>Let detection catch up.</strong> Paste the same URL into <strong>Check video</strong> under the legs card on the Notifications tab. Detection records the stream and runs the announcements within seconds - late, so the operator feed flags it if it started more than ten minutes ago.</li>
+        <li><strong>Find out why</strong> before it happens again. Search the server log for the video id and the channel name: discovery lines name the videos they found, drop lines name each video with a reason (<code>aged-upcoming</code>, <code>aged-unknown</code>, <code>unreturned</code>; ended videos are only counted, never named), and the check itself logs whether the video <em>was hidden from discovery</em>.</li>
+        <li><strong>Do not restart the server to fix it.</strong> A restart throws away the in-memory state that explains the miss, resets the quota counters, and disconnects every viewer. The two steps above do everything a restart would have.</li>
+      </ol>
     </div>
   </div>
 
@@ -1069,6 +1112,12 @@
   const ldWatchBadge = $('ld-watch-badge');
   const ldDetectionsCount = $('ld-detections-count');
   const ldDetectionsBody = $('ld-detections-body');
+  const ldManual = $('ld-manual');
+  const ldCheckForm = $('ld-check-form');
+  const ldCheckInput = $('ld-check-input');
+  const ldCheckBtn = $('ld-check-btn');
+  const ldDiscoverBtn = $('ld-discover-btn');
+  const ldManualResult = $('ld-manual-result');
 
   channelNameEl.textContent = channel;
   document.title = `${channel} · admin`;
@@ -1200,6 +1249,9 @@
     notifyLogBody.innerHTML = '<div class="empty">Login to view</div>';
     ldDetectionsBody.innerHTML = '<div class="empty">Login to view</div>';
     ldLegsBody.innerHTML = '<div class="empty">Login to view</div>';
+    ldManual.style.display = 'none';
+    ldManualResult.innerHTML = '';
+    ldCheckInput.value = '';
     // Drop cached VOD state too - it belongs to the session that was just
     // logged out. Any in-flight poll stops on its next 403.
     for (const id of Object.keys(vodStatus)) delete vodStatus[id];
@@ -2095,6 +2147,10 @@
           </div>
         </div>`).join('') || '<div class="empty">No detection legs are running.</div>';
     }
+    // The manual controls only make sense where a YouTube leg watches this
+    // channel; the server says so in info.liveDetectYouTube. Toggled, never
+    // re-rendered, so the input and the last result survive the refresh.
+    ldManual.style.display = (ld && ld.enabled && lastInfo.liveDetectYouTube) ? '' : 'none';
 
     // Recent detections: live broadcasts from /info plus the non-live ledger.
     const items = [];
@@ -2171,6 +2227,138 @@
     await withButton(ldDetectionsClearBtn, async () => {
       await api('DELETE', '/notifications/detections');
       toast('Recent detections cleared', 'success');
+      await refresh();
+    });
+  });
+
+  // --- Manual YouTube detection ---
+  // For a stream that is live but was not detected. "Check video" looks one
+  // video up and has detection watch it (clearing anything that hid it);
+  // "Run discovery now" reads every channel's playlists without waiting for
+  // the next scheduled pass. Results and refusals are shown under the form
+  // rather than only as a toast, because they are what the operator reads
+  // next: whether the video was hidden, whether it is members-only, when to
+  // try again.
+
+  // The endpoints answer refusals as JSON ({error, retryAfterSeconds}); api()
+  // hands that back as "429 Too Many Requests: {...}".
+  function manualErrorText(e) {
+    let msg = friendlyError(e);
+    try {
+      const body = JSON.parse(msg);
+      if (body && body.error) msg = body.error;
+    } catch (_) { /* plain text - shown as is */ }
+    return msg;
+  }
+  function showManualError(e) {
+    ldManualResult.innerHTML = `<div class="form-error">${escapeHtml(manualErrorText(e))}</div>`;
+  }
+  // Runs one manual request: the button is disabled while it runs, and auth
+  // failures are left to api(), which already re-shows the login.
+  function runManual(btn, fn) {
+    return withButton(btn, async () => {
+      try {
+        await fn();
+      } catch (e) {
+        if (e.message === 'forbidden' || e.message === 'not-authenticated') throw e;
+        showManualError(e);
+      }
+    });
+  }
+
+  function renderCheckResult(c) {
+    const pill = c.state === 'live' ? '<span class="pill live">Live</span>'
+      : c.state === 'upcoming' ? '<span class="pill warning">Upcoming</span>'
+      : `<span class="pill past">${c.state === 'ended' ? 'Ended' : 'Unknown'}</span>`;
+    const chips = [];
+    if (c.membersOnly) chips.push('<span class="chip">members-only</span>');
+    // Not read means not known: the channel has no members-only playlist,
+    // is backed off from not having one, or the read failed. The video is
+    // then treated as public, so a members-only stream would be queued for a
+    // worker that refuses it - worth saying rather than implying "public".
+    else if (!c.membersOnlyChecked) chips.push('<span class="chip" title="The members-only playlist of this channel was not read (it has none, detection is waiting before asking again, or the read failed), so the video is treated as public.">members-only not checked</span>');
+    if (c.unretired) chips.push('<span class="chip trig-scheduled" title="Detection had put this video in its negative cache although it had not ended, so discovery was skipping it. The check cleared that.">was hidden from discovery</span>');
+    chips.push(`<span class="chip">${c.wasTracked ? 'already tracked' : 'now tracked'}</span>`);
+    const meta = [];
+    if (c.actualStart) meta.push(`started ${formatAbsolute(c.actualStart)} (${timeAgo(c.actualStart)})`);
+    else if (c.scheduledStart) meta.push(`scheduled for ${formatAbsolute(c.scheduledStart)}`);
+    const next = {
+      live: 'Detection polls it within seconds, then records and announces it like any detection - it shows under Recent detections. If it started over ten minutes ago, the operator feed flags it as late.',
+      upcoming: 'Detection is watching it now and will catch the go-live.',
+      ended: 'It has already ended, so there is nothing left to detect.',
+    }[c.state] || 'YouTube did not say what state it is in; detection will keep polling it.';
+    meta.push(`${plural(c.checksRemaining || 0, 'check')} left today`);
+    const label = escapeHtml(c.title || urlLabel(c.url) || c.videoId);
+    ldManualResult.innerHTML = `
+      <div class="row">
+        <div class="row-main">
+          <div class="row-title">${pill} <a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${label}</a> <span class="chips">${chips.join('')}</span></div>
+          <div class="row-meta wrap">${escapeHtml(next)}</div>
+          <div class="row-meta wrap">${meta.map(escapeHtml).join(' · ')}</div>
+        </div>
+      </div>`;
+  }
+
+  // Returns whether every playlist read succeeded, so the caller does not
+  // toast success for a pass that could not read anything - "found nothing
+  // new" from a pass whose reads all failed is not news, it is the outage.
+  function renderDiscoverResult(s) {
+    const found = (s.found || []).concat(s.foundMembersOnly || []);
+    const clean = !s.failures && !s.budgetRefused;
+    let title;
+    if (found.length) {
+      title = `Discovery found ${plural(found.length, 'new video')} on this channel`;
+    } else if (!s.playlistsRead && !clean) {
+      title = 'Discovery could not read any playlist';
+    } else {
+      title = clean ? 'Discovery found nothing new on this channel' : 'Discovery found nothing new, but not every playlist was read';
+    }
+    const ids = found.map(id => `<span class="chip mono">${escapeHtml(id)}</span>`).join('');
+    const meta = [
+      `${plural(s.channels || 0, 'channel')} scanned`,
+      `${plural(s.playlistsRead || 0, 'playlist')} read`,
+      `${plural(s.unitsSpent || 0, 'quota unit')}`,
+    ];
+    if (s.foundOtherChannels) meta.push(`${plural(s.foundOtherChannels, 'new video')} on other channels`);
+    if (s.failures) meta.push(`${plural(s.failures, 'read')} failed - see the legs above`);
+    if (s.budgetRefused) meta.push('stopped early: the unit budget is spent');
+    ldManualResult.innerHTML = `
+      <div class="row">
+        <div class="row-main">
+          <div class="row-title">${escapeHtml(title)} ${ids ? `<span class="chips">${ids}</span>` : ''}</div>
+          <div class="row-meta wrap">${meta.map(escapeHtml).join(' · ')}</div>
+        </div>
+      </div>`;
+    return clean;
+  }
+
+  ldCheckForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const url = ldCheckInput.value.trim();
+    if (!url) return;
+    runManual(ldCheckBtn, async () => {
+      const c = await api('POST', '/livedetect/check', { url });
+      renderCheckResult(c);
+      toast(c.state === 'live' ? 'Video checked - detection is polling it now' : 'Video checked', 'success');
+      await refresh();
+    });
+  });
+
+  ldDiscoverBtn.addEventListener('click', async () => {
+    const result = await confirmAction({
+      title: 'Run discovery now?',
+      message: 'Reads every YouTube channel\'s uploads and members-only playlists now instead of at the next scheduled pass - up to two quota units per channel. Allowed once a minute, and 6 times per channel per quota day.',
+      okLabel: 'Run discovery',
+      danger: false,
+    });
+    if (!result.ok) return;
+    await runManual(ldDiscoverBtn, async () => {
+      const s = await api('POST', '/livedetect/discover');
+      if (renderDiscoverResult(s)) {
+        toast('Discovery pass complete', 'success');
+      } else {
+        toast('Discovery pass ran, but not every playlist could be read', 'error');
+      }
       await refresh();
     });
   });

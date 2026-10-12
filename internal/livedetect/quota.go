@@ -62,6 +62,17 @@ func quotaDay(now time.Time) int {
 	return y*10000 + int(m)*100 + d
 }
 
+// nextQuotaDayStart returns when the quota day after now's begins: the next
+// midnight at quotaPacificOffsetHours, as a UTC instant (08:00 UTC). It is the
+// honest Retry-After for anything refused until the budget resets, and it
+// moves with quotaDay, so the two can never disagree about where a day ends.
+func nextQuotaDayStart(now time.Time) time.Time {
+	offset := time.Duration(quotaPacificOffsetHours) * time.Hour
+	y, m, d := now.UTC().Add(offset).Date()
+	// time.Date normalises day 32 into the next month, and so on.
+	return time.Date(y, m, d+1, 0, 0, 0, 0, time.UTC).Add(-offset)
+}
+
 // rollover resets the counters when the quota day changes. Callers must hold mu.
 func (g *quotaGovernor) rollover(now time.Time) {
 	if d := quotaDay(now); d != g.day {

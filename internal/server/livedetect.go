@@ -23,6 +23,57 @@ import (
 // reason: a pruned row is a row that can be claimed again.
 const detectionRetention = 30 * 24 * time.Hour
 
+// lateDetectionAlertAfter is how far behind the platform's own start time a
+// live detection may land before the operator is paged about it.
+//
+// Every detection in production history landed 1-24 s after the platform's
+// start time: the push legs and a watched waiting room take seconds, and a
+// surprise go-live waits at most one discovery pass. So anything past a few
+// minutes is not a slow detection but a failed one that later healed itself -
+// and that is exactly the case nothing else reports, because every leg looks
+// healthy throughout. The incident that motivated it (2026-10-11): a week-old
+// waiting room re-published with a stale schedule sat in the watchlist's
+// negative cache, and its stream was detected 7349 s late, only after a
+// restart cleared the cache. No leg errored and the search audit had run 47 s
+// after the go-live, before search indexed it, so nothing alerted.
+//
+// Ten minutes is well clear of the worst healthy delay at the default
+// cadences (a surprise go-live waiting out one two-minute discovery pass, or
+// the hourly members-only retry for a channel's very first members-only
+// stream, which is rare and worth hearing about anyway), and well short of the
+// hours a stuck channel loses. It is a floor: a deployment that polls more
+// slowly gets a threshold to match (lateDetectionThreshold).
+const lateDetectionAlertAfter = 10 * time.Minute
+
+// lateDetectionMargin is how far past one interval of a platform's slowest
+// polling leg a detection may land before it counts as late: room for the
+// uploads playlist to lag a go-live, which takes minutes, not tens of them.
+const lateDetectionMargin = 5 * time.Minute
+
+// lateDetectionThreshold is how late a detection on platform may be before the
+// operator is paged: lateDetectionAlertAfter, or one interval of the
+// platform's polling floor plus lateDetectionMargin when that is longer.
+//
+// The floor is configurable without an upper bound, and the startup quota
+// projection tells a deployment with many channels to raise discoverySeconds
+// - to over eight minutes for six channels at the default budget. With a
+// fixed ten minutes every surprise go-live on such a deployment would page as
+// "late" for doing exactly what it was configured to do, which is how an
+// operator learns to ignore the alert.
+func (app *App) lateDetectionThreshold(platform string) time.Duration {
+	return max(lateDetectionAlertAfter, app.LiveDetect.PollingFloor(platform)+lateDetectionMargin)
+}
+
+// detectionDelay is how far behind the platform's own start time a broadcast
+// was detected. ok is false when the platform reported no start time, in which
+// case the delay is unknown - never zero, and never late.
+func detectionDelay(det model.DetectedBroadcast) (delay time.Duration, ok bool) {
+	if det.StartedAt <= 0 {
+		return 0, false
+	}
+	return time.Duration(det.DetectedAt-det.StartedAt) * time.Second, true
+}
+
 // maxStoredDescription is YouTube's documented maximum for a video
 // description, in characters.
 const maxStoredDescription = 5000
@@ -161,6 +212,7 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 		"queueMembersOnly", app.QueueMembersOnly,
 		"url", b.URL,
 	)
+	app.reportLateDetection(b, det, mechanism)
 
 	// The worker first: it is the product, and an announcement that goes out
 	// before the transcript starts is the normal order of events anyway.
@@ -233,6 +285,56 @@ func (app *App) ObserveLive(ctx context.Context, b livedetect.Broadcast, mechani
 	// stream - unlike the per-poll churn bumpAdminChange deliberately avoids.
 	app.bumpAdminChange(b.ChannelKey)
 	return nil
+}
+
+// reportLateDetection pages the operator when a broadcast this process just
+// claimed was detected more than lateDetectionThreshold behind the platform's
+// own start time. See lateDetectionAlertAfter for why that means a stream was
+// effectively missed rather than merely slow.
+//
+// Only the winning claim calls it, so one broadcast alerts at most once however
+// many legs go on to report it; a broadcast still live across a restart is
+// already claimed and stays quiet. One that started while the server was down
+// for longer than the threshold does alert, which is right: it was missed for
+// that long, whatever the reason. It only reports: whether a late detection
+// should still be queued and announced is a separate policy question, and
+// ObserveLive treats it like any other detection. The Discord post runs on its
+// own goroutine, so this never delays the queue write or the announcement.
+//
+// A claim the search audit rescued is logged but not paged. The audit paged
+// when it found the broadcast, which is the alert with the diagnosis in it; a
+// second ping seconds later about the same stream adds nothing but the habit
+// of expecting pings in pairs. An operator's rescue (Check video) is still
+// paged: whoever ran the check may not be the operator the feed is for.
+func (app *App) reportLateDetection(b livedetect.Broadcast, det model.DetectedBroadcast, mechanism string) {
+	delay, ok := detectionDelay(det)
+	// The fixed floor first, so the common on-time claim never asks the
+	// detector for its cadence.
+	if !ok || delay <= lateDetectionAlertAfter {
+		return
+	}
+	threshold := app.lateDetectionThreshold(b.Platform)
+	if delay <= threshold {
+		return
+	}
+	paged := mechanism != livedetect.MechanismYouTubeAudit
+	slog.Warn("live broadcast detected late",
+		"func", "App.reportLateDetection",
+		"key", b.ChannelKey,
+		"platform", b.Platform,
+		"broadcastId", b.ID,
+		"mechanism", mechanism,
+		"delaySeconds", int64(delay/time.Second),
+		"thresholdSeconds", int64(threshold/time.Second),
+		"sawScheduled", b.SawScheduled,
+		"paged", paged,
+		"url", b.URL,
+	)
+	if !paged {
+		return
+	}
+	app.Discord.NotifyLiveDetectLate(b.ChannelKey, announce.PlatformLabel(b.Platform), b.ID, b.URL,
+		mechanism, delay, b.SawScheduled)
 }
 
 // queueDetected queues a detected broadcast for the worker.
@@ -392,6 +494,21 @@ func (app *App) ActiveBroadcasts(ctx context.Context) ([]livedetect.Broadcast, e
 		out = append(out, b)
 	}
 	return out, nil
+}
+
+// DetectionClaimed implements livedetect.Sink for the search audit, which
+// compares what YouTube says is live against what detection actually claimed.
+//
+// Any row counts, ended or not: search keeps listing a broadcast as live for a
+// while after it finishes, and one that was detected and has since ended is
+// not a miss. Store.GetDetection answers (nil, nil) for a broadcast that was
+// never claimed, so only a real read failure is an error.
+func (app *App) DetectionClaimed(ctx context.Context, platform, broadcastID string) (bool, error) {
+	det, err := app.Store.GetDetection(ctx, platform, broadcastID)
+	if err != nil {
+		return false, err
+	}
+	return det != nil, nil
 }
 
 // cleanupDetections prunes ended detection rows past detectionRetention, and

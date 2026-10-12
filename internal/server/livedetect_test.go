@@ -746,3 +746,43 @@ func TestScheduledFlagReachesTheNotification(t *testing.T) {
 		}
 	}
 }
+
+// The search audit's "was this detected?" is any ledger row for the broadcast,
+// live or since ended: search keeps listing a stream as live for a while after
+// it finishes, and a detected stream that has ended is not a miss.
+func TestDetectionClaimedReadsTheLedger(t *testing.T) {
+	app, _ := setupDetectApp(t)
+	ctx := context.Background()
+
+	claimed := func(platform, id string) bool {
+		t.Helper()
+		ok, err := app.DetectionClaimed(ctx, platform, id)
+		if err != nil {
+			t.Fatalf("DetectionClaimed(%s, %s): %v", platform, id, err)
+		}
+		return ok
+	}
+
+	if claimed(livedetect.PlatformYouTube, "audited") {
+		t.Fatal("a broadcast never observed must read as unclaimed, not as an error")
+	}
+	if err := app.ObserveLive(ctx, livedetect.Broadcast{
+		Platform: livedetect.PlatformYouTube, ChannelKey: "doki", ID: "audited",
+		URL: livedetect.YouTubeWatchURL("audited"),
+	}, livedetect.MechanismYouTubeState); err != nil {
+		t.Fatalf("ObserveLive: %v", err)
+	}
+	if !claimed(livedetect.PlatformYouTube, "audited") {
+		t.Error("an observed broadcast must read as claimed")
+	}
+	if claimed(livedetect.PlatformTwitch, "audited") {
+		t.Error("a claim is per platform")
+	}
+
+	if err := app.ObserveEnded(ctx, livedetect.PlatformYouTube, "audited"); err != nil {
+		t.Fatalf("ObserveEnded: %v", err)
+	}
+	if !claimed(livedetect.PlatformYouTube, "audited") {
+		t.Error("an ended broadcast is still a detected one")
+	}
+}

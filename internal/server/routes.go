@@ -69,6 +69,11 @@ func (app *App) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /{channel}/admin/notifications/log", app.withAdminChannel(app.deleteAdminNotificationLogHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/notifications/detections", app.withAdminChannel(app.deleteAdminDetectionsHandler))
 	mux.HandleFunc("DELETE /{channel}/admin/notifications/{id}", app.withAdminChannel(app.deleteAdminNotificationHandler))
+	// Recovering a missed YouTube go-live without a restart: check one video
+	// (and seed it for detection), or run a discovery pass now. Both run on
+	// the detector's discovery goroutine; see handlers_livedetect.go.
+	mux.HandleFunc("POST /{channel}/admin/livedetect/check", app.withAdminChannel(app.postAdminLiveDetectCheckHandler))
+	mux.HandleFunc("POST /{channel}/admin/livedetect/discover", app.withAdminChannel(app.postAdminLiveDetectDiscoverHandler))
 
 	// Site admin (credentials.adminKey; see handlers_site_admin.go): the
 	// operator's view of every account and rule, and the levers to stop
