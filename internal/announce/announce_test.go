@@ -555,15 +555,17 @@ func TestRenderContextValuesEveryPlaceholder(t *testing.T) {
 		}
 	}
 
-	// And every one of them expands through Render, in one template.
+	// And every one of them expands through Render, in one template. Spaced
+	// apart: a "|" touching a link would be read as part of it, and fenced (see
+	// TestRenderEndsLinkPlaceholdersWhereTheValueEnds).
 	var names, values []string
 	for _, ph := range Placeholders {
 		names = append(names, ph.Name)
 		values = append(values, want[ph.Name])
 	}
-	msg := Render(model.NotificationEvent{Content: strings.Join(names, "|")}, rc)
-	if msg.Content != strings.Join(values, "|") {
-		t.Errorf("rendered content = %q, want %q", msg.Content, strings.Join(values, "|"))
+	msg := Render(model.NotificationEvent{Content: strings.Join(names, " | ")}, rc)
+	if msg.Content != strings.Join(values, " | ") {
+		t.Errorf("rendered content = %q, want %q", msg.Content, strings.Join(values, " | "))
 	}
 	if msg.Embed != nil {
 		t.Error("embed should be nil when EmbedEnabled is false")
@@ -3116,6 +3118,65 @@ func TestAngleWrapURLs(t *testing.T) {
 		if got := angleWrapURLs(in); got != want {
 			t.Errorf("angleWrapURLs(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Discord takes a "!" or "?" straight after a bare link into the address, so a
+// link placeholder the template runs into such text is sent as <link>, ending
+// where the value does. Anything Discord already ends correctly is left bare,
+// since the brackets also cost the link its preview card.
+func TestRenderEndsLinkPlaceholdersWhereTheValueEnds(t *testing.T) {
+	const u = "https://www.youtube.com/watch?v=vid123"
+	cases := map[string]string{
+		"{channel} is live over at {url}! Join us": "Dokibird is live over at <" + u + ">! Join us",
+		"Live? {url}?":          "Live? <" + u + ">?",
+		"{url}'s chat":          "<" + u + ">'s chat",
+		"({url})!":              "(<" + u + ">)!",
+		"{url}!\n{transcript}!": "<" + u + ">!\n<https://lt.example/doki/>!",
+		"*{url}**!":             "*<" + u + ">**!",
+		// Discord already ends these where the value ends.
+		"{url} !":                      u + " !",
+		"Watch {url}.":                 "Watch " + u + ".",
+		"Watch {url}...":               "Watch " + u + "...",
+		"({url}), or":                  "(" + u + "), or",
+		`"{url}"`:                      `"` + u + `"`,
+		"{url}\n!":                     u + "\n!",
+		"{url}<@&555555555555555555>!": u + "<@&555555555555555555>!",
+		// Something else already ends them: markup on both sides, the
+		// author's own brackets, a masked link.
+		"**{url}**!":      "**" + u + "**!",
+		"`{url}`!":        "`" + u + "`!",
+		"<{url}>!":        "<" + u + ">!",
+		"[Watch]({url})!": "[Watch](" + u + ")!",
+		"[{url}]({url})!": "[" + u + "](" + u + ")!",
+		// Only a value that is one link is fenced.
+		"{channel}! {title}!": "Dokibird! " + notifLivePayload().Title + "!",
+	}
+	rc := notifRenderContext()
+	for tmpl, want := range cases {
+		ev := DefaultEvent()
+		ev.Content = tmpl
+		ev.Embed.Description = tmpl
+		msg := Render(ev, rc)
+		if msg.Content != want {
+			t.Errorf("content of %q = %q, want %q", tmpl, msg.Content, want)
+		}
+		if msg.Embed["description"] != want {
+			t.Errorf("embed description of %q = %q, want %q", tmpl, msg.Embed["description"], want)
+		}
+	}
+
+	// The title and footer are not linked by Discord, so brackets there would
+	// only show.
+	ev := DefaultEvent()
+	ev.Embed.Title = "{url}!"
+	ev.Embed.Footer = "{url}!"
+	msg := Render(ev, rc)
+	if msg.Embed["title"] != u+"!" {
+		t.Errorf("embed title = %q, want %q", msg.Embed["title"], u+"!")
+	}
+	if f, _ := msg.Embed["footer"].(map[string]string); f["text"] != u+"!" {
+		t.Errorf("embed footer = %q, want %q", f["text"], u+"!")
 	}
 }
 

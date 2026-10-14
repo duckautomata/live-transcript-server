@@ -298,12 +298,17 @@ type expander struct {
 	// applied after any line count. noCap leaves the value whole. expandField
 	// searches for the largest cap that makes a field fit.
 	descCap int
+	// linkified is set for a field Discord turns bare links into links in (the
+	// message and the embed description): there a link value the template
+	// runs straight into more text is fenced, see runsOn.
+	linkified bool
 }
 
-// replace expands one placeholderPattern match. known reports whether it
-// named a placeholder at all, and blank whether that placeholder's final
-// value came up empty - which is what expandLines decides a line's fate on.
-func (x expander) replace(m string) (out string, known, blank bool) {
+// replace expands one placeholderPattern match; before and after are the
+// template text either side of it. known reports whether it named a
+// placeholder at all, and blank whether that placeholder's final value came
+// up empty - which is what expandLines decides a line's fate on.
+func (x expander) replace(m, before, after string) (out string, known, blank bool) {
 	lead, key, lines, trail, ok := splitPlaceholder(m)
 	if !ok {
 		return m, false, false
@@ -325,6 +330,9 @@ func (x expander) replace(m string) (out string, known, blank bool) {
 			v = c
 		}
 	}
+	if x.linkified && runsOn(v, lead, trail, before, after) {
+		v = "<" + v + ">"
+	}
 	// Judged on the FINAL value: a description capped away to nothing takes
 	// its emphasis with it exactly as a missing one does.
 	if v == "" && lead != "" && lead == trail {
@@ -333,12 +341,61 @@ func (x expander) replace(m string) (out string, known, blank bool) {
 	return lead + v + trail, true, v == ""
 }
 
+// expandAll substitutes every placeholder in s and touches nothing else.
+// visit, when set, is told what each match came to.
+func (x expander) expandAll(s string, visit func(known, blank bool)) string {
+	var b strings.Builder
+	last := 0
+	for _, loc := range placeholderPattern.FindAllStringIndex(s, -1) {
+		out, known, blank := x.replace(s[loc[0]:loc[1]], s[:loc[0]], s[loc[1]:])
+		if visit != nil {
+			visit(known, blank)
+		}
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(out)
+		last = loc[1]
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
 // expand substitutes every placeholder and touches nothing else.
 func (x expander) expand(template string) string {
-	return placeholderPattern.ReplaceAllStringFunc(template, func(m string) string {
-		out, _, _ := x.replace(m)
-		return out
-	})
+	return x.expandAll(template, nil)
+}
+
+// loneLink is a value that is one http(s) link and nothing else, such as
+// {url}, {transcript} or {thumbnail}.
+var loneLink = regexp.MustCompile(`^https?://[^\s<>]+$`)
+
+// linkEnders are the only characters Discord leaves off the end of a bare
+// link. Its rule is https?://[^\s<]+[^<.,:;"')\]\s]: a link runs to the next
+// space or "<" and then gives back any of these at its end, and nothing else
+// - so "!" and "?" stay part of the address.
+const linkEnders = `.,:;"')]`
+
+// runsOn reports whether Discord would read text the template puts straight
+// after a link value as part of the address: "{url}!" posts as a link to
+// "...watch?v=id!", which is not the stream. Wrapped in <> the link ends
+// exactly where the value does, which the editor's preview shows as the same
+// link. The brackets also stop Discord unfurling a card for it, so only a link
+// that would otherwise run on is wrapped; a space after it keeps the card.
+//
+// A link that something else already ends is left alone: markup on both sides
+// (**{url}**, `{url}`, where brackets would show inside code), the author's
+// own <{url}>, and either part of a masked link, [{url}](...) or [...]({url}).
+func runsOn(v, lead, trail, before, after string) bool {
+	if !loneLink.MatchString(v) || (lead != "" && lead == trail) {
+		return false
+	}
+	if strings.HasSuffix(before, "<") || strings.HasSuffix(before, "](") || strings.HasPrefix(after, "](") {
+		return false
+	}
+	next := trail + after
+	if i := strings.IndexFunc(next, func(r rune) bool { return unicode.IsSpace(r) || r == '<' }); i >= 0 {
+		next = next[:i]
+	}
+	return strings.ContainsFunc(next, func(r rune) bool { return !strings.ContainsRune(linkEnders, r) })
 }
 
 // Expand substitutes placeholders in a template.
@@ -378,8 +435,7 @@ func (x expander) expandLines(template string) string {
 	kept := make([]string, 0, len(lines))
 	for i := 0; i < len(lines); i++ {
 		emptied, filled := 0, 0
-		out := placeholderPattern.ReplaceAllStringFunc(lines[i], func(m string) string {
-			s, known, blank := x.replace(m)
+		out := x.expandAll(lines[i], func(known, blank bool) {
 			switch {
 			case !known:
 			case blank:
@@ -387,7 +443,6 @@ func (x expander) expandLines(template string) string {
 			default:
 				filled++
 			}
-			return s
 		})
 		if emptied == 0 || filled > 0 || strings.ContainsFunc(emojiToken.ReplaceAllString(out, ""), isWordRune) {
 			kept = append(kept, out)
@@ -439,16 +494,19 @@ const minDescriptionCap = 20
 // A field that fits, and an overflowing field with no description to give,
 // render exactly as they always have.
 //
+// linkified is for a field Discord links bare addresses in (see
+// expander.linkified).
+//
 // fit says what became of the description, because the editor tells the
 // author and the two outcomes read very differently: fitShortened is the
 // promise kept (the description gave way, everything else is whole), while
 // fitDropped means the author's own text left no room for it at all.
-func expandField(template string, values map[string]string, limit int) (out string, fit descriptionFit) {
+func expandField(template string, values map[string]string, limit int, linkified bool) (out string, fit descriptionFit) {
 	if limit <= 0 {
 		return "", fitWhole
 	}
 	render := func(descCap int) (string, bool) {
-		s := strings.TrimSpace(expander{values: values, descCap: descCap}.expandLines(template))
+		s := strings.TrimSpace(expander{values: values, descCap: descCap, linkified: linkified}.expandLines(template))
 		return s, utf8.RuneCountInString(s) <= limit
 	}
 	out, fits := render(noCap)
@@ -540,7 +598,7 @@ func Render(ev model.NotificationEvent, rc RenderContext) Message {
 		contentValues = maps.Clone(values)
 		contentValues[descriptionKey] = angleWrapURLs(values[descriptionKey])
 	}
-	content, fit := expandField(ev.Content, contentValues, MaxContentLength)
+	content, fit := expandField(ev.Content, contentValues, MaxContentLength, true)
 	msg := Message{
 		Content:  content,
 		Mentions: MentionPolicy(ev.Content),
@@ -552,7 +610,7 @@ func Render(ev model.NotificationEvent, rc RenderContext) Message {
 
 	embed := map[string]any{}
 	total := 0
-	t, fit := expandField(ev.Embed.Title, values, MaxEmbedTitle)
+	t, fit := expandField(ev.Embed.Title, values, MaxEmbedTitle, false)
 	msg.note(fit)
 	if t != "" {
 		embed["title"] = t
@@ -562,7 +620,7 @@ func Render(ev model.NotificationEvent, rc RenderContext) Message {
 	if rc.FooterOverride != "" {
 		footer = rc.FooterOverride
 	}
-	f, fit := expandField(footer, values, MaxEmbedFooter)
+	f, fit := expandField(footer, values, MaxEmbedFooter, false)
 	msg.note(fit)
 	if f != "" {
 		embed["footer"] = map[string]string{"text": f}
@@ -572,7 +630,7 @@ func Render(ev model.NotificationEvent, rc RenderContext) Message {
 	// combined limit reachable: it is fitted into what the title and footer
 	// left of the total, so that squeeze too comes out of the video
 	// description rather than off the end of the author's text.
-	d, fit := expandField(ev.Embed.Description, values, min(MaxEmbedDescription, MaxEmbedTotal-total))
+	d, fit := expandField(ev.Embed.Description, values, min(MaxEmbedDescription, MaxEmbedTotal-total), true)
 	msg.note(fit)
 	if d != "" {
 		embed["description"] = d

@@ -458,7 +458,11 @@ and refused by config validation.
   platforms; and when a message would be too long for Discord, the
   description is what gets shortened, not the text written around it. In the
   message text the description's links are written as `<https://...>`, so
-  Discord does not add a preview card for each one. A scheduled announcement
+  Discord does not add a preview card for each one. Discord also reads a `!`
+  or `?` straight after a bare link as part of the address, so a link
+  placeholder written right before one (`live at {url}!`) is sent the same
+  way, ending where the link does; leave a space after it to keep the
+  preview card. A scheduled announcement
   carries the description as it read when the waiting room was first seen,
   while the go-live announcement carries the text at go-live; the detection
   ledger is write-once, so later edits to a description are not picked up.
